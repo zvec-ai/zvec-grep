@@ -41,9 +41,9 @@ pub(crate) struct ObservedEntity {
 }
 
 impl ObservedEntity {
-    pub(crate) fn new(range: Option<Range>, searchable: bool) -> Self {
+    pub(crate) fn new(range: Option<StageRange>, searchable: bool) -> Self {
         Self {
-            range: range.map(Into::into),
+            range,
             searchable,
             stages: CandidateStages::default(),
         }
@@ -66,6 +66,26 @@ pub(crate) enum StageRange {
     },
 }
 
+impl StageRange {
+    pub(crate) fn from_location(range: Range, offsets: Option<(u64, u64)>) -> Self {
+        let mut range = Self::from(range);
+        if let (
+            Self::Pdf {
+                start_byte_offset,
+                end_byte_offset,
+                ..
+            },
+            Some((start, end)),
+        ) = (&mut range, offsets)
+        {
+            *start_byte_offset =
+                usize::try_from(start).expect("offset originates from in-memory text");
+            *end_byte_offset = usize::try_from(end).expect("offset originates from in-memory text");
+        }
+        range
+    }
+}
+
 impl From<Range> for StageRange {
     fn from(range: Range) -> Self {
         match range {
@@ -75,10 +95,10 @@ impl From<Range> for StageRange {
                 end_offset: range.end_offset(),
             },
             Range::Text(range) => Self::Text(range),
-            Range::Pdf(source) => Self::Pdf {
-                pages: source.pages(0..source.text_len),
-                start_byte_offset: source.markdown_start,
-                end_byte_offset: source.markdown_start + source.text_len,
+            Range::Pdf(location) => Self::Pdf {
+                pages: location.page_numbers(),
+                start_byte_offset: 0,
+                end_byte_offset: 0,
             },
         }
     }
@@ -130,7 +150,10 @@ mod tests {
                 .collect(),
         };
         source.validate("abc").expect("valid source map");
-        let range = StageRange::from(Range::Pdf(std::sync::Arc::new(source)));
+        let range = StageRange::from_location(
+            Range::Pdf(source.locate(0..source.text_len).expect("location").into()),
+            Some((100, 103)),
+        );
         let encoded = serde_json::to_value(&range).expect("serialize PDF trace");
         assert_eq!(
             encoded,

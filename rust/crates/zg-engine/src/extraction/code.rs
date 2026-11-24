@@ -695,6 +695,7 @@ fn append_entity(
     output.push(ExtractedEntity {
         index: output.len(),
         source_range: Range::Text(range),
+        source_map: None,
         fragments: text_fragments(&content, content_max, content_overlap),
         content: Content::Text(content),
         metadata: Some(metadata),

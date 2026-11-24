@@ -8,7 +8,7 @@ use crate::{
     EngineError, EngineResult,
     domain::{
         ByteRange, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileFormat, FileId,
-        FragmentId, ImageContent, PdfSourceMap, Range, TextRange,
+        FragmentId, ImageContent, PdfRange, PdfSourceMap, Range, TextRange,
     },
 };
 
@@ -30,6 +30,8 @@ struct EntityRecord<'a> {
     id: Cow<'a, str>,
     file_id: u32,
     source_range: RangeRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_map: Option<std::sync::Arc<PdfSourceMap>>,
     content: ContentRecord<'a>,
     fragments: Vec<FragmentRecord<'a>>,
 }
@@ -47,6 +49,7 @@ impl<'a> From<&'a Entity> for EntityRecord<'a> {
             id: entity.id().as_str().into(),
             file_id: entity.file_id().get(),
             source_range: entity.source_range().into(),
+            source_map: entity.source_map().cloned(),
             content: encode_content(entity.content()),
             fragments: entity
                 .fragments()
@@ -77,7 +80,8 @@ impl EntityRecord<'_> {
                     })
                 })
                 .collect::<EngineResult<_>>()?,
-        )
+        )?
+        .with_source_map(self.source_map)
     }
 }
 
@@ -132,7 +136,7 @@ fn decode_content(content: ContentRecord<'_>) -> EngineResult<Content> {
 enum RangeRecord {
     Full,
     Pdf {
-        source: std::sync::Arc<PdfSourceMap>,
+        location: std::sync::Arc<PdfRange>,
     },
     Text {
         start_line: usize,
@@ -152,7 +156,7 @@ impl From<Range> for RangeRecord {
     fn from(range: Range) -> Self {
         match range {
             Range::Full => Self::Full,
-            Range::Pdf(source) => Self::Pdf { source },
+            Range::Pdf(location) => Self::Pdf { location },
             Range::Text(range) => Self::Text {
                 start_line: range.start_line(),
                 end_line: range.end_line(),
@@ -175,7 +179,10 @@ impl TryFrom<RangeRecord> for Range {
     fn try_from(range: RangeRecord) -> EngineResult<Self> {
         Ok(match range {
             RangeRecord::Full => Self::Full,
-            RangeRecord::Pdf { source } => Self::Pdf(source),
+            RangeRecord::Pdf { location } => {
+                location.validate()?;
+                Self::Pdf(location)
+            }
             RangeRecord::Text {
                 start_line,
                 end_line,

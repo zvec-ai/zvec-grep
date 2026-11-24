@@ -58,6 +58,8 @@ pub(crate) struct ChunkOptions {
 pub(crate) struct ExtractedEntity {
     pub index: usize,
     pub source_range: Range,
+    /// Optional provenance over the complete entity text, shared by its fragments.
+    pub source_map: Option<std::sync::Arc<crate::domain::PdfSourceMap>>,
     pub content: Content,
     pub metadata: Option<EntityMetadata>,
     pub fragments: Vec<ExtractedEntityFragment>,

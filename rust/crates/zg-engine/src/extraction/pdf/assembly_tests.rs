@@ -68,7 +68,12 @@ fn utf8_block_spans_preserve_duplicate_text_lists_and_tables() {
     };
     map.validate(&rendered).expect("complete UTF-8 map");
     let second = &map.parts[2];
-    assert_eq!(map.pages(second.range.clone()), vec![2]);
+    assert_eq!(
+        map.locate(second.range.clone())
+            .expect("location")
+            .page_numbers(),
+        vec![2]
+    );
 }
 
 #[test]

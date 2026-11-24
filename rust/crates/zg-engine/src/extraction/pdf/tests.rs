@@ -92,12 +92,16 @@ async fn pdf_native_layout_smoke() {
             serde_json::to_vec_pretty(&result.source_map).expect("valid test fixture"),
         )
         .expect("valid test fixture");
-        std::fs::write(output.join("timing.json"), serde_json::to_vec_pretty(&serde_json::json!({"elapsed_ms": elapsed.as_secs_f64()*1000.0,"pages":result.source_map.pages(0..result.source_map.text_len),"entities":entities.len()})).expect("valid test fixture")).expect("valid test fixture");
+        std::fs::write(output.join("timing.json"), serde_json::to_vec_pretty(&serde_json::json!({"elapsed_ms": elapsed.as_secs_f64()*1000.0,"pages":result.source_map.locate(0..result.source_map.text_len).expect("location").page_numbers(),"entities":entities.len()})).expect("valid test fixture")).expect("valid test fixture");
     }
     eprintln!(
         "PDF conversion: {} entities, {:?}, {:.1} ms",
         entities.len(),
-        result.source_map.pages(0..result.source_map.text_len),
+        result
+            .source_map
+            .locate(0..result.source_map.text_len)
+            .expect("location")
+            .page_numbers(),
         elapsed.as_secs_f64() * 1000.0
     );
     drop(service);
@@ -150,17 +154,29 @@ fn pdf_markdown_reuses_sections_and_preserves_nonconsecutive_physical_pages() {
     ]);
     let entities = extract(&source, ChunkOptions::default()).expect("extract");
     assert_eq!(entities.len(), 2);
-    let Range::Pdf(first) = &entities[0].source_range else {
-        panic!("PDF provenance");
-    };
-    assert_eq!(first.pages(0..first.text_len), [2, 4]);
+    let first = entities[0].source_map.as_ref().expect("PDF provenance");
+    assert_eq!(
+        entities[0].source_range,
+        Range::Pdf(first.locate(0..first.text_len).expect("location").into())
+    );
+    assert_eq!(
+        first
+            .locate(0..first.text_len)
+            .expect("location")
+            .page_numbers(),
+        [2, 4]
+    );
     assert_eq!(first.parts.len(), 2);
     assert_eq!(first.parts[0].block.id, 1);
     assert_eq!(first.parts[1].block.id, 2);
-    let Range::Pdf(second) = &entities[1].source_range else {
-        panic!("PDF provenance");
-    };
-    assert_eq!(second.pages(0..second.text_len), [5]);
+    let second = entities[1].source_map.as_ref().expect("PDF provenance");
+    assert_eq!(
+        second
+            .locate(0..second.text_len)
+            .expect("location")
+            .page_numbers(),
+        [5]
+    );
     assert_eq!(second.parts[0].range.start, 0);
     assert!(
         matches!(&entities[1].metadata, Some(EntityMetadata::Markdown(m))
@@ -188,14 +204,18 @@ fn pdf_markdown_fragments_retain_exact_utf8_source_mapping() {
     let Content::Text(text) = &entities[0].content else {
         panic!("text");
     };
-    let Range::Pdf(map) = &entities[0].source_range else {
-        panic!("source map");
-    };
+    let map = entities[0].source_map.as_ref().expect("source map");
     let second_start = text.find("delta").expect("second page");
     let selected = map
         .slice(second_start..text.len(), &text[second_start..])
         .expect("slice");
-    assert_eq!(selected.pages(0..selected.text_len), [2]);
+    assert_eq!(
+        selected
+            .locate(0..selected.text_len)
+            .expect("location")
+            .page_numbers(),
+        [2]
+    );
     for fragment in &entities[0].fragments {
         let Range::Byte(range) = &fragment.range else {
             continue;

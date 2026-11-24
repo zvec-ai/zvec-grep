@@ -1047,12 +1047,11 @@ mod tests {
                         .entities
                         .values()
                         .filter(|stored| stored.file.id() == file.id())
-                        .map(|stored| {
-                            (
-                                stored.entity.id().clone(),
-                                stored.entity.source_range(),
-                                true,
-                            )
+                        .map(|stored| crate::storage::IndexedSourceEntity {
+                            id: stored.entity.id().clone(),
+                            range: stored.entity.source_range(),
+                            source_bytes: stored.entity.source_byte_offsets(),
+                            searchable: true,
                         })
                         .collect(),
                 })

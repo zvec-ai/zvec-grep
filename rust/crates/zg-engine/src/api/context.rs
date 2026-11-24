@@ -772,11 +772,10 @@ impl result::ContextItem {
 }
 
 impl result::PdfBox {
-    pub(crate) fn from_range(range: &crate::domain::Range) -> Vec<Self> {
-        match range {
-            crate::domain::Range::Pdf(source) => Self::from_source(source),
-            _ => Vec::new(),
-        }
+    pub(crate) fn from_entity(entity: &crate::domain::Entity) -> Vec<Self> {
+        entity
+            .source_map()
+            .map_or_else(Vec::new, |source| Self::from_source(source))
     }
 
     pub(crate) fn from_source(source: &crate::domain::PdfSourceMap) -> Vec<Self> {
@@ -793,15 +792,34 @@ impl result::PdfBox {
     }
 }
 
+impl result::ContentRange {
+    pub(crate) fn from_entity(entity: &crate::domain::Entity) -> Self {
+        let mut range: Self = entity.source_range().into();
+        if let (
+            Self::Pdf {
+                start_byte_offset,
+                end_byte_offset,
+                ..
+            },
+            Some(map),
+        ) = (&mut range, entity.source_map())
+        {
+            *start_byte_offset = map.markdown_start;
+            *end_byte_offset = map.markdown_start + map.text_len;
+        }
+        range
+    }
+}
+
 impl From<crate::domain::Range> for result::ContentRange {
     fn from(range: crate::domain::Range) -> Self {
         use crate::domain::Range;
         match range {
             Range::Full => Self::File,
-            Range::Pdf(source) => Self::Pdf {
-                pages: source.pages(0..source.text_len),
-                start_byte_offset: source.markdown_start,
-                end_byte_offset: source.markdown_start + source.text_len,
+            Range::Pdf(location) => Self::Pdf {
+                pages: location.page_numbers(),
+                start_byte_offset: 0,
+                end_byte_offset: 0,
             },
             Range::Text(range) => Self::Text {
                 start_line: range.start_line(),

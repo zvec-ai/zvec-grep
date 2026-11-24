@@ -98,7 +98,12 @@ fn indexed_sources_reads_only_requested_existing_files_in_writers_and_readers() 
         assert_eq!(sources[0].path, watched.relative_path().as_path());
         assert_eq!(
             sources[0].entities,
-            vec![(entry.entity.id().clone(), entry.entity.source_range(), true)]
+            vec![super::IndexedSourceEntity {
+                id: entry.entity.id().clone(),
+                range: entry.entity.source_range(),
+                source_bytes: entry.entity.source_byte_offsets(),
+                searchable: true
+            }]
         );
     };
     check(&storage);

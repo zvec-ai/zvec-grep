@@ -94,14 +94,16 @@ fn fixture_with_offsets(
                     },
                 });
             }
-            let range = Range::Pdf(Arc::new(PdfSourceMap {
+            let map = Arc::new(PdfSourceMap {
                 markdown_start: offsets.get(index).copied().unwrap_or(start),
                 text_len: text.len(),
                 parts,
-            }));
+            });
+            let range = Range::Pdf(map.locate(0..text.len()).expect("location").into());
             let text_len = text.len();
             let content = Content::Text(text);
-            let entity_id = EntityId::new(id, &content, &range).expect("entity id");
+            let entity_id =
+                EntityId::new_with_source_map(id, &content, &range, Some(&map)).expect("entity id");
             let fragment_id = FragmentId::new(&entity_id, 0);
             entities.push(
                 Entity::new(
@@ -115,7 +117,9 @@ fn fixture_with_offsets(
                         range: Range::Full,
                     }],
                 )
-                .expect("entity"),
+                .expect("entity")
+                .with_source_map(Some(map))
+                .expect("source map"),
             );
             fragments.push(IndexedFragment {
                 entity_id,

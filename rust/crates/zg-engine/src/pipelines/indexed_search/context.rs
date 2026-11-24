@@ -294,7 +294,7 @@ fn search_plan_to_context_items(
                 rank: hit.rank,
                 absolute_path: workspace_root.join(hit.file.relative_path()),
                 relative_path: hit.file.relative_path().to_path_buf(),
-                range: hit.entity.source_range().into(),
+                range: ContentRange::from_entity(&hit.entity),
                 excerpt_range: target.excerpt_range,
                 content_range: target.content_range,
                 match_ranges: Vec::new(),
@@ -305,9 +305,7 @@ fn search_plan_to_context_items(
                     hit.entity.metadata(),
                 ),
                 content_windows: Vec::new(),
-                pdf_boxes: crate::api::context::result::PdfBox::from_range(
-                    &hit.entity.source_range(),
-                ),
+                pdf_boxes: crate::api::context::result::PdfBox::from_entity(&hit.entity),
                 content_role: Some(target.content_role),
                 status: file_freshness_status(workspace_root, &hit.file),
                 score: Some(hit.score),
@@ -496,7 +494,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
     let Some(evidence) = hit.evidence.first() else {
         return Ok(ContextItemTarget {
             content: content_to_text(hit.entity.content()),
-            content_range: hit.entity.source_range().into(),
+            content_range: ContentRange::from_entity(&hit.entity),
             content_role: ContextContentRole::Source,
             excerpt_range: None,
         });
@@ -514,7 +512,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
     ) {
         (Range::Full, content) => (
             content_to_text(content),
-            hit.entity.source_range().into(),
+            ContentRange::from_entity(&hit.entity),
             None,
         ),
         (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
@@ -528,12 +526,11 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
                     "fragment end offset exceeds platform limits",
                 ))
             })?;
-            let source = hit.entity.source_range();
             let excerpt =
-                ContentRange::project_text(&source, text, start..end).map_err(invalid_fragment)?;
+                ContentRange::project_text(&hit.entity, start..end).map_err(invalid_fragment)?;
             // Fragments locate evidence; full previews retain the complete entity.
-            let whole = ContentRange::project_text(&source, text, 0..text.len())
-                .map_err(invalid_fragment)?;
+            let whole =
+                ContentRange::project_text(&hit.entity, 0..text.len()).map_err(invalid_fragment)?;
             (text.clone(), whole, Some(excerpt))
         }
         _ => {
@@ -622,7 +619,7 @@ mod tests {
                 },
             ],
         };
-        let source_range = Range::Pdf(std::sync::Arc::new(map));
+        let source_range = Range::Pdf(map.locate(0..map.text_len).expect("location").into());
         let file_id = FileId::new(1);
         let id = EntityId::new(file_id, &content, &source_range).expect("ID");
         let fragment = EntityFragment {
@@ -644,7 +641,9 @@ mod tests {
                 None,
                 vec![fragment.clone()],
             )
-            .expect("entity"),
+            .expect("entity")
+            .with_source_map(Some(std::sync::Arc::new(map)))
+            .expect("source map"),
             file: FileRecord::new(
                 file_id,
                 SourcePath::new("manual.pdf").expect("path"),

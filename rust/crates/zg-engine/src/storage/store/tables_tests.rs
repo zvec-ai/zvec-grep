@@ -135,7 +135,9 @@ fn pdf_markdown_search_round_trip_keeps_pages_and_blocks() {
                 draft.metadata,
                 fragments,
             )
-            .expect("entity"),
+            .expect("entity")
+            .with_source_map(draft.source_map)
+            .expect("source map"),
         );
     }
     store
@@ -153,12 +155,20 @@ fn pdf_markdown_search_round_trip_keeps_pages_and_blocks() {
         Path::new("manual.pdf")
     );
     assert_eq!(stored.entity, entities[0]);
-    let Range::Pdf(map) = stored.entity.source_range() else {
-        panic!("PDF map");
-    };
-    assert_eq!(map.pages(0..map.text_len), [2, 4]);
+    let map = stored.entity.source_map().expect("PDF map");
+    assert_eq!(
+        map.locate(0..map.text_len)
+            .expect("location")
+            .page_numbers(),
+        [2, 4]
+    );
     assert_eq!(map.parts[1].block.id, 2);
-    assert_eq!(map.pages(split..map.text_len), [4]);
+    assert_eq!(
+        map.locate(split..map.text_len)
+            .expect("location")
+            .page_numbers(),
+        [4]
+    );
 }
 
 impl IndexStore {

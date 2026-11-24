@@ -19,7 +19,10 @@ pub(crate) use format::formats_for_path;
 pub(crate) use format::reference_compatible_with;
 pub(crate) use path::SourcePath;
 pub use pdf::PdfRect;
-pub(crate) use pdf::{PdfBlock, PdfSourceMap, PdfSourcePart};
+pub(crate) use pdf::{PdfBlock, PdfRange, PdfSourceMap, PdfSourcePart};
 pub(crate) use range::ByteRange;
 pub(crate) use range::Range;
 pub(crate) use range::TextRange;
+
+#[cfg(test)]
+pub(crate) use pdf::PdfPageLocation;

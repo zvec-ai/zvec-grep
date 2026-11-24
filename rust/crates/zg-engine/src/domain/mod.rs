@@ -72,7 +72,7 @@ pub use source::PdfRect;
 pub(crate) use source::Range;
 pub(crate) use source::SourcePath;
 pub(crate) use source::TextRange;
-pub(crate) use source::{PdfBlock, PdfSourceMap, PdfSourcePart};
+pub(crate) use source::{PdfBlock, PdfRange, PdfSourceMap, PdfSourcePart};
 // Consumed by the cross-file reference resolver.
 pub(crate) use source::{formats_for_path, reference_compatible_with};
 
@@ -81,3 +81,6 @@ pub use workspace::ScanRules;
 pub(crate) use workspace::SourceRoot;
 pub(crate) use workspace::Workspace;
 pub(crate) use workspace::WorkspaceLayout;
+
+#[cfg(test)]
+pub(crate) use source::PdfPageLocation;

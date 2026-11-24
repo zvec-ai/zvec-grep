@@ -7,32 +7,24 @@ pub(crate) enum Range {
     Full,
     Byte(ByteRange),
     Text(TextRange),
-    Pdf(std::sync::Arc<super::PdfSourceMap>),
+    Pdf(std::sync::Arc<super::PdfRange>),
 }
 
 impl Range {
     /// Half-open offsets in this range's own coordinate space.
     pub(crate) fn byte_offsets(&self) -> Option<(u64, u64)> {
         match self {
-            Self::Full => None,
+            Self::Full | Self::Pdf(_) => None,
             Self::Byte(range) => Some((range.start_offset(), range.end_offset())),
             Self::Text(range) => Some((
                 u64::try_from(range.start_byte_offset()).ok()?,
                 u64::try_from(range.end_byte_offset()).ok()?,
-            )),
-            Self::Pdf(source) => Some((
-                u64::try_from(source.markdown_start).ok()?,
-                u64::try_from(source.markdown_start.checked_add(source.text_len)?).ok()?,
             )),
         }
     }
 
     pub(crate) fn contains(&self, other: &Self) -> EngineResult<bool> {
         match (self, other) {
-            (Self::Pdf(outer), Self::Pdf(inner)) => Ok(outer.markdown_start
-                <= inner.markdown_start
-                && outer.markdown_start.saturating_add(outer.text_len)
-                    >= inner.markdown_start.saturating_add(inner.text_len)),
             (Self::Full, Self::Full) => Ok(true),
             (Self::Byte(outer), Self::Byte(inner)) => Ok(
                 outer.start_offset <= inner.start_offset && outer.end_offset >= inner.end_offset

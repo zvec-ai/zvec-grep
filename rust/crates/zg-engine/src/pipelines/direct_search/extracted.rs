@@ -201,13 +201,12 @@ fn search_store(
             continue;
         };
         let status = file_freshness_status(root, &file);
-        entities.sort_by_key(|entity| entity.source_range().byte_offsets().map(|(start, _)| start));
+        entities.sort_by_key(|entity| entity.source_byte_offsets().map(|(start, _)| start));
         let mut state = ExtractedFileState::default();
         for entity in entities {
             if let Content::Text(text) | Content::Code(text) = entity.content() {
                 let source_start = entity
-                    .source_range()
-                    .byte_offsets()
+                    .source_byte_offsets()
                     .ok_or_else(|| EngineError::internal("Extracted entity has no source offsets"))?
                     .0;
                 let hits = matcher.search(text, source_start, &mut state)?;
@@ -256,8 +255,7 @@ fn context_item(
     let (Content::Text(text) | Content::Code(text)) = entity.content() else {
         return Err(EngineError::internal("Extracted match has no text"));
     };
-    let source = entity.source_range();
-    let project = |span| ContentRange::project_text(&source, text, span);
+    let project = |span| ContentRange::project_text(&entity, span);
     let lines = crate::utils::line_byte_offsets(text);
     let mut windows: Vec<std::ops::Range<usize>> = Vec::new();
     for matched in &hits {
@@ -283,8 +281,7 @@ fn context_item(
     let start = windows.first().expect("matched window").start;
     let end = windows.last().expect("matched window").end;
     let selection = ContentRange::project_selections(
-        &source,
-        text,
+        &entity,
         hits.iter().flat_map(|hit| {
             // Inverted searches select lines; zero-width matches have no highlight.
             let ranges = if hit.match_ranges.is_empty() {
@@ -299,7 +296,7 @@ fn context_item(
     )?;
     let range = if request.paths_selected {
         // Path lookup still describes the complete owning entity.
-        entity.source_range().into()
+        ContentRange::from_entity(&entity)
     } else {
         selection.clone()
     };
@@ -320,7 +317,7 @@ fn context_item(
             .into_iter()
             .map(project)
             .collect::<EngineResult<_>>()?,
-        pdf_boxes: crate::api::context::result::PdfBox::from_range(&source),
+        pdf_boxes: crate::api::context::result::PdfBox::from_entity(&entity),
         content: text[start..end].to_owned(),
         outline: None,
         content_role: Some(ContextContentRole::Source),

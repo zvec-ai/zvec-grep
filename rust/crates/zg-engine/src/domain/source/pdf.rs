@@ -1,17 +1,95 @@
-//! Provenance for PDF text after layout assembly and Markdown extraction.
+//! Physical PDF locations and provenance for extracted text.
+//! `PdfRange` contains pages/regions only. Entity-local byte selectors resolve
+//! through `PdfSourceMap`, which is stored once alongside the entity's text.
 
 use crate::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, ops::Range};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 /// A raw rectangle in top-left, 72-DPI page coordinates (points).
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PdfRect {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+impl PartialEq for PdfRect {
+    fn eq(&self, other: &Self) -> bool {
+        [self.x, self.y, self.width, self.height].map(f32::to_bits)
+            == [other.x, other.y, other.width, other.height].map(f32::to_bits)
+    }
+}
+impl Eq for PdfRect {}
+
+/// A physical PDF selection, independent of extracted text and its offsets.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PdfRange {
+    pub pages: Vec<PdfPageLocation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PdfPageLocation {
+    pub page: u32,
+    pub page_width: f32,
+    pub page_height: f32,
+    /// Empty when only the page is known. Coordinates remain block-level.
+    pub rects: Vec<PdfRect>,
+}
+
+impl PartialEq for PdfPageLocation {
+    fn eq(&self, other: &Self) -> bool {
+        self.page == other.page
+            && self.page_width.to_bits() == other.page_width.to_bits()
+            && self.page_height.to_bits() == other.page_height.to_bits()
+            && self.rects == other.rects
+    }
+}
+impl Eq for PdfPageLocation {}
+
+impl PdfRange {
+    pub(crate) fn page_numbers(&self) -> Vec<u32> {
+        self.pages
+            .iter()
+            .map(|page| page.page)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn validate(&self) -> EngineResult<()> {
+        let mut seen = BTreeSet::new();
+        if self.pages.is_empty()
+            || self.pages.iter().any(|page| {
+                page.page == 0
+                    || !seen.insert(page.page)
+                    || !valid_dimensions(page.page_width, page.page_height)
+                    || page.rects.iter().any(|rect| !valid_rect(*rect))
+            })
+        {
+            return Err(EngineError::invalid_argument("invalid PDF location"));
+        }
+        Ok(())
+    }
+}
+
+fn valid_dimensions(width: f32, height: f32) -> bool {
+    width.is_finite() && width > 0.0 && height.is_finite() && height > 0.0
+}
+
+fn valid_rect(rect: PdfRect) -> bool {
+    [rect.x, rect.y, rect.width, rect.height]
+        .iter()
+        .all(|v| v.is_finite())
+        && rect.width >= 0.0
+        && rect.height >= 0.0
 }
 
 /// An original content block. Pages and block IDs are one-based.
@@ -28,12 +106,11 @@ pub(crate) struct PdfBlock {
 // Provenance identity compares exact float representations, without rounding.
 impl PartialEq for PdfBlock {
     fn eq(&self, other: &Self) -> bool {
-        let bits = |b: PdfRect| [b.x, b.y, b.width, b.height].map(f32::to_bits);
         self.page == other.page
             && self.id == other.id
             && self.page_width.to_bits() == other.page_width.to_bits()
             && self.page_height.to_bits() == other.page_height.to_bits()
-            && self.bbox.map(bits) == other.bbox.map(bits)
+            && self.bbox == other.bbox
     }
 }
 impl Eq for PdfBlock {}
@@ -58,6 +135,52 @@ pub(crate) struct PdfSourceMap {
 }
 
 impl PdfSourceMap {
+    /// Resolve an entity-local text selection into physical pages and regions.
+    /// Empty matches and generated separators keep the existing nearest-block policy.
+    pub(crate) fn locate(&self, range: Range<usize>) -> EngineResult<PdfRange> {
+        if range.start > range.end || range.end > self.text_len {
+            return Err(EngineError::invalid_argument(
+                "invalid PDF source selection",
+            ));
+        }
+        let mut blocks = self
+            .parts
+            .iter()
+            .filter(|part| part.range.start < range.end && range.start < part.range.end)
+            .map(|part| &part.block)
+            .collect::<Vec<_>>();
+        if blocks.is_empty() {
+            blocks.extend(
+                self.parts
+                    .iter()
+                    .rev()
+                    .find(|part| part.range.start <= range.start)
+                    .or_else(|| self.parts.first())
+                    .map(|part| &part.block),
+            );
+        }
+        let mut pages = BTreeMap::<u32, PdfPageLocation>::new();
+        let mut seen = BTreeSet::new();
+        for block in blocks {
+            let page = pages.entry(block.page).or_insert_with(|| PdfPageLocation {
+                page: block.page,
+                page_width: block.page_width,
+                page_height: block.page_height,
+                rects: Vec::new(),
+            });
+            if let Some(rect) = block.bbox
+                && seen.insert((block.page, block.id))
+            {
+                page.rects.push(rect);
+            }
+        }
+        let location = PdfRange {
+            pages: pages.into_values().collect(),
+        };
+        location.validate()?;
+        Ok(location)
+    }
+
     /// Blocks with coordinates, once per (page, id), in first-seen source order.
     pub(crate) fn blocks_with_boxes(&self) -> impl Iterator<Item = (&PdfBlock, PdfRect)> {
         let mut seen = BTreeSet::new();
@@ -85,15 +208,8 @@ impl PdfSourceMap {
                 || !text.is_char_boundary(range.end)
                 || part.block.page == 0
                 || part.block.id == 0
-                || !part.block.page_width.is_finite()
-                || part.block.page_width <= 0.0
-                || !part.block.page_height.is_finite()
-                || part.block.page_height <= 0.0
-                || part.block.bbox.is_some_and(|b| {
-                    ![b.x, b.y, b.width, b.height].iter().all(|v| v.is_finite())
-                        || b.width < 0.0
-                        || b.height < 0.0
-                })
+                || !valid_dimensions(part.block.page_width, part.block.page_height)
+                || part.block.bbox.is_some_and(|rect| !valid_rect(rect))
             {
                 return Err(EngineError::invalid_argument("invalid PDF source part"));
             }
@@ -111,31 +227,6 @@ impl PdfSourceMap {
             ));
         }
         Ok(())
-    }
-
-    pub(crate) fn pages(&self, range: Range<usize>) -> Vec<u32> {
-        self.parts
-            .iter()
-            .filter(|part| part.range.start < range.end && range.start < part.range.end)
-            .map(|part| part.block.page)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
-    /// Resolve even empty matches or separators to a nearby source block.
-    pub(crate) fn selection_pages(&self, range: Range<usize>) -> Vec<u32> {
-        let pages = self.pages(range.clone());
-        if !pages.is_empty() {
-            return pages;
-        }
-        self.parts
-            .iter()
-            .rev()
-            .find(|part| part.range.start <= range.start)
-            .or_else(|| self.parts.first())
-            .map(|part| vec![part.block.page])
-            .unwrap_or_default()
     }
 
     /// Selects an entity or fragment and rebases its source parts.
@@ -169,3 +260,6 @@ impl PdfSourceMap {
         Ok(selected)
     }
 }
+
+#[cfg(test)]
+mod tests;

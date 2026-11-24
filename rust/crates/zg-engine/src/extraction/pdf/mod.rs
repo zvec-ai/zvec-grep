@@ -55,11 +55,11 @@ pub(super) fn extract(
                 "Markdown entity has non-text content",
             ));
         };
-        entity.source_range = Range::Pdf(Arc::new(
-            source
-                .source_map
-                .slice(range.start_byte_offset()..range.end_byte_offset(), text)?,
-        ));
+        let map = source
+            .source_map
+            .slice(range.start_byte_offset()..range.end_byte_offset(), text)?;
+        entity.source_range = Range::Pdf(map.locate(0..text.len())?.into());
+        entity.source_map = Some(Arc::new(map));
     }
     Ok(entities)
 }

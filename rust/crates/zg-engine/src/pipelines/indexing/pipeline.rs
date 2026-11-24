@@ -1237,7 +1237,12 @@ pub(super) fn bind_entities(
     extracted
         .into_iter()
         .map(|entity| {
-            let id = EntityId::new(file_id, &entity.content, &entity.source_range)?;
+            let id = EntityId::new_with_source_map(
+                file_id,
+                &entity.content,
+                &entity.source_range,
+                entity.source_map.as_deref(),
+            )?;
             let fragments = entity
                 .fragments
                 .into_iter()
@@ -1259,7 +1264,8 @@ pub(super) fn bind_entities(
                 entity.content,
                 entity.metadata,
                 fragments,
-            )
+            )?
+            .with_source_map(entity.source_map)
         })
         .collect()
 }
