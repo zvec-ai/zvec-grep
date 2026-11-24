@@ -526,10 +526,7 @@ impl ZvecGrepMcpServer {
         .await;
 
         Ok(match result {
-            Ok(reply) => CallToolResult::success(vec![ContentBlock::text(
-                search_format::format_search_result(&reply, preview),
-            )])
-            .into(),
+            Ok(reply) => search_result_to_tool_result(&reply, preview).into(),
             Err(error) if error.code() == EngineError::NOT_FOUND => {
                 return self
                     .setup_state
@@ -2575,6 +2572,23 @@ const fn is_false(value: &bool) -> bool {
 
 fn context_result_to_tool_result(reply: &ContextResult) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(rg_format::format(reply))])
+}
+
+fn search_result_to_tool_result(reply: &ContextResult, preview: SearchPreview) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(
+        search_format::format_search_result(reply, preview),
+    )]);
+    if !reply.stage_traces.is_empty() {
+        // Keep observations out of the agent-visible search text. The caller owns
+        // any aggregation and persistence; the stdio bridge forwards this metadata.
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "zg_stage_trace".to_owned(),
+            serde_json::json!(reply.stage_traces),
+        );
+        result.meta = Some(rmcp::model::MetaObject(metadata));
+    }
+    result
 }
 
 #[cfg(test)]

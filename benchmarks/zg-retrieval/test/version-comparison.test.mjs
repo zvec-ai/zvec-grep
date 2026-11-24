@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import {
   compareCombinedResults,
   compareRuns,
   markdownVersionComparison,
+  readComparisonInput,
 } from "../expansion/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import { QA_ENTITY_METRICS } from "../reports/zg.mjs";
@@ -16,7 +17,9 @@ import { QA_SCORING } from "../core/suite.mjs";
 import { summarizeIndexSettings } from "../core/index-settings.mjs";
 import {
   PILOT_FILE_RECALL_METRICS,
+  PILOT_NAMES,
   PILOT_QA_SCORING,
+  PILOT_SUITES,
 } from "../expansion/config.mjs";
 
 const baseSha = "a".repeat(40),
@@ -57,7 +60,7 @@ function result(commit, value = 0.5) {
       rows,
     },
     pilots: Object.fromEntries(
-      ["beir", "duretrieval", "quarry"].map((name) => [
+      PILOT_NAMES.map((name) => [
         name,
         {
           status: "success",
@@ -80,6 +83,7 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
   assert.equal(comparison.rows[0].metrics.file_hit_at_1.delta, -0.25);
   assert.equal(comparison.rows[3].metrics.file_hit_at_1.delta, 0.25);
   const markdown = markdownVersionComparison(comparison);
+  assert.doesNotMatch(markdown, /Stage capture incomplete/);
   assert.deepEqual(
     [...markdown.matchAll(/^### (.+)$/gm)].map((match) => match[1]),
     ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
@@ -176,6 +180,50 @@ test("indexed corpus counts compare once per suite and preserve unknown totals",
   assert.deepEqual(comparison.index_counts.sweqa.baseline, counts);
   before.sweqa.index_counts = { ...counts, fragments: 2012 };
   assert.throws(() => compareCombinedResults(before, after, metadata));
+});
+
+test("comparison links HTML without forwarding stage summaries to comments", () => {
+  const before = result(baseSha);
+  const after = result(headSha);
+  const quality = compareCombinedResults(before, after, metadata);
+  before.sweqa.gold_stages = { version: 1, groups: [] };
+  after.sweqa.gold_stages = { error: "unavailable stage evidence" };
+  for (const pilot of Object.values(after.pilots))
+    pilot.report.gold_stages = after.sweqa.gold_stages;
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.deepEqual(comparison, quality);
+  const traceUrl = "https://github.com/upstream/zg/actions/runs/1/artifacts/2";
+  const markdown = markdownVersionComparison(comparison, { traceUrl });
+  assert.ok(markdown.includes(`[Download stage trace (HTML)](${traceUrl})`));
+  assert.equal((markdown.match(/Download stage trace/g) ?? []).length, 1);
+  assert.doesNotMatch(
+    markdown,
+    /Gold coverage by stage|Gold covered by index|Before rule ranking|After rule ranking|Stage capture/,
+  );
+  assert.doesNotMatch(
+    markdownVersionComparison(comparison),
+    /Download stage trace/,
+  );
+  assert.equal((markdown.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+});
+
+test("a newly registered suite retains its trusted report title", async () => {
+  const name = "new-pilot";
+  PILOT_SUITES[name] = { report: { comparison: "New pilot" } };
+  PILOT_NAMES.push(name);
+  try {
+    // Load the comparator as it would start after the registry was extended.
+    const extended = await import("../expansion/compare.mjs?new-suite-test");
+    const before = result(baseSha);
+    const after = result(headSha);
+    const comparison = extended.compareCombinedResults(before, after, metadata);
+    const markdown = extended.markdownVersionComparison(comparison);
+    assert.match(markdown, /^### New pilot$/m);
+    assert.doesNotMatch(markdown, /Gold coverage by stage/);
+  } finally {
+    PILOT_NAMES.pop();
+    delete PILOT_SUITES[name];
+  }
 });
 
 test("model budgets propagate to each dataset without changing retrieval metrics", () => {
@@ -454,6 +502,118 @@ test("missing artifacts still produce an explicitly incomplete comment report wi
     await readFile(join(directory, "summary.md"), "utf8"),
     /Missing or invalid results are not zero scores/,
   );
+  assert.match(
+    await readFile(join(directory, "retrieval-trace.html"), "utf8"),
+    /Comparison incomplete/,
+  );
+});
+
+test("combined artifacts retain per-call trace sidecars and tolerate older artifacts", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "zg-trace-artifacts-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const args = [];
+  const evidence = {
+    summary: { version: 2 },
+    calls: [{ task_id: "original", repetition: 5 }],
+  };
+  for (const name of ["zg", ...PILOT_NAMES]) {
+    const source = join(directory, name);
+    await mkdir(source);
+    await writeFile(join(source, "report.json"), "null\n");
+    if (name === "zg")
+      await writeFile(
+        join(source, "gold-stages.json"),
+        JSON.stringify(evidence),
+      );
+    args.push(`--${name}`, join(source, "report.json"));
+  }
+  const output = join(directory, "combined");
+  const child = spawnSync(
+    globalThis.process.execPath,
+    [
+      fileURLToPath(new URL("../expansion/combined.mjs", import.meta.url)),
+      ...args,
+      "--output",
+      output,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(child.status, 1, child.stderr); // Intentionally missing quality reports.
+  const read = await readComparisonInput(output);
+  assert.deepEqual(read.traces.zg, evidence);
+  assert.equal(read.traces.beir, null);
+  assert.equal(read.summary.status, "failed");
+  await writeFile(join(output, "reports", "beir-gold-stages.json"), "{");
+  const malformed = await readComparisonInput(output);
+  assert.ok(malformed.traces.beir.error);
+  assert.deepEqual(malformed.summary, read.summary);
+  await rm(join(directory, "zg", "gold-stages.json"));
+  const repeated = spawnSync(
+    globalThis.process.execPath,
+    [
+      fileURLToPath(new URL("../expansion/combined.mjs", import.meta.url)),
+      ...args,
+      "--output",
+      output,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(repeated.status, 1, repeated.stderr);
+  assert.equal((await readComparisonInput(output)).traces.zg, null);
+});
+
+test("rejected artifact identity cannot attribute stage evidence to the requested commits", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "zg-trace-identity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const input = join(directory, "input");
+  await mkdir(join(input, "reports"), { recursive: true });
+  const summary = result(headSha);
+  summary.sweqa.gold_stages = {
+    version: 2,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [],
+  };
+  await writeFile(join(input, "summary.json"), JSON.stringify(summary));
+  for (const name of ["zg", ...PILOT_NAMES])
+    await writeFile(join(input, "reports", `${name}.json`), "null\n");
+  const child = spawnSync(
+    globalThis.process.execPath,
+    [
+      fileURLToPath(new URL("../expansion/compare.mjs", import.meta.url)),
+      "--baseline",
+      input,
+      "--candidate",
+      input,
+      "--output",
+      directory,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...globalThis.process.env,
+        RETRIEVAL_BASELINE_REPOSITORY: metadata.baseline.repository,
+        RETRIEVAL_BASELINE_COMMIT: baseSha,
+        RETRIEVAL_CANDIDATE_REPOSITORY: metadata.candidate.repository,
+        RETRIEVAL_CANDIDATE_COMMIT: headSha,
+      },
+    },
+  );
+  assert.equal(child.status, 1, child.stderr);
+  const comparison = JSON.parse(
+    await readFile(join(directory, "summary.json"), "utf8"),
+  );
+  assert.match(comparison.errors[0], /wrong artifact commit/);
+  const html = await readFile(join(directory, "retrieval-trace.html"), "utf8");
+  const data = JSON.parse(
+    html.match(
+      /<script type="application\/json" id="trace-data">([\s\S]*?)<\/script>/,
+    )[1],
+  );
+  for (const suite of data.suites)
+    for (const side of ["baseline", "candidate"])
+      assert.equal(suite[side].summary, null);
 });
 
 test("paired pilot reports render added scores only under the same Gold and scoring rules", () => {

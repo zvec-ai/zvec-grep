@@ -25,9 +25,15 @@ def source_build(messages):
     if len(builds) != 1:
         raise RuntimeError("Expected one active llama sys build script in the primary Cargo messages")
     # Cargo retains build-script stdout beside this invocation's OUT_DIR, also
-    # on cache hits. The pinned sys crate records its verified source here;
-    # custom metadata is not included in Cargo's JSON build-script record.
-    output = Path(builds[0]["out_dir"]).parent / "output"
+    # on cache hits: output before 1.100, run/stdout in the new build-dir layout.
+    # The pinned sys crate records its verified source here; custom metadata is
+    # not included in Cargo's JSON build-script record.
+    directory = Path(builds[0]["out_dir"]).parent
+    candidates = [directory / "output", directory / "run" / "stdout"]
+    outputs = [path for path in candidates if path.is_file()]
+    if len(outputs) != 1:
+        raise RuntimeError(f"Missing or ambiguous build-script stdout for primary OUT_DIR: {candidates}")
+    output = outputs[0]
     lines = output.read_text(encoding="utf-8").splitlines()
     metadata = {}
     for key in ("source_dir", "source_revision"):

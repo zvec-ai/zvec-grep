@@ -64,6 +64,13 @@ An index is created on the first indexing run and updated as files are added, ch
 
 Indexed search combines full-text and vector retrieval to return relevant source snippets. Index refresh follows the caller's policy; resident execution can schedule background refresh. Query filters narrow results without changing the workspace's scanning rules. Direct text search reads source files without requiring an index.
 
+In indexed search, `--trace` shows each hit's rank (`#1`, `#2`, …) and `score=`.
+Code hits show the rule-ranking score. Other hits show the raw reciprocal rank
+fusion (RRF) score. These scores use different scales, so use the displayed
+rank for the final order. The trace's `fusion.score` gives the raw RRF score
+for either kind of hit. See the [ranking guide](src/pipelines/indexed_search/ranking/README.md)
+for the shared Direct, Server and MCP selection policy.
+
 ### Vector storage
 
 Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` remains 2. Existing FP32 indexes require an explicit rebuild with `zg --index --rebuild` before use.

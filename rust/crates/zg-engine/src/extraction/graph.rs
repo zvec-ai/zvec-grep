@@ -53,6 +53,27 @@ use crate::domain::{GraphEdgeKind, PreprocessorDirective};
 /// allocated by [`WalkContext::next_entity_index`].
 pub(crate) const FILE_SCOPE_INDEX: usize = usize::MAX;
 
+/// The bound type extraction records for a Python name a body rebinds to a
+/// value the index cannot place (`client = clients[0]`, `self.client = client`).
+///
+/// The write shadows what an earlier declaration stated — a parameter's
+/// annotation, a member's previous assignment — so the name holds no type from
+/// that line on. The resolver reads the sentinel as "stated, but undecided":
+/// the answer is not the type the name no longer holds, and a base class's
+/// member is not the answer either.
+pub(crate) const PYTHON_UNBOUND_TYPE: &str = "[[python_unbound]]";
+
+/// The bound type extraction records for a Python member a class writes as
+/// `None` (`self.client = None`).
+///
+/// The write is a declaration of the member — the class chooses what the name
+/// holds, so a base class's member of the same name is not the answer — but it
+/// states no type. It differs from [`PYTHON_UNBOUND_TYPE`], which leaves the
+/// member undecided even beside a write that does state a type: an optional
+/// member (`__init__` writes `None`, another method stores the real value) is
+/// still typed by the write that states one.
+pub(crate) const PYTHON_NONE_TYPE: &str = "[[python_none]]";
+
 /// An edge whose both endpoints are known at walk time. Only `contains`
 /// qualifies: the target entity is created during the same walk, so its index
 /// is available from the scope stack. Positions use one-based lines and
@@ -137,6 +158,95 @@ struct BindingScope {
     end: Option<(usize, usize)>,
 }
 
+/// The block that directly contains one item, as a source span.
+///
+/// Rust scopes a block-level `fn` to the block that declares it: every body
+/// inside that block sees it, whatever its order, while a sibling item written
+/// after the block reaches the enclosing scope's spelling instead. Positions
+/// follow the collector's convention: one-based lines, zero-based columns.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ItemExtent {
+    start: (usize, usize),
+    end: (usize, usize),
+}
+
+impl ItemExtent {
+    /// True when the call site `(line, column)` falls inside the block.
+    ///
+    /// The end is tree-sitter's `end_position`, the first position past the
+    /// block, so a call written directly after the closing brace is outside
+    /// it: `{ fn save() {} } save()` reaches the enclosing spelling.
+    pub(crate) fn contains(self, line: usize, column: usize) -> bool {
+        (line, column) >= self.start && (line, column) < self.end
+    }
+
+    /// Whether this block is the inner of two blocks that both hold a site.
+    ///
+    /// Source blocks nest rather than overlap, so of two blocks holding the
+    /// same position the one that opens later lies inside the other and is
+    /// the nearer scope; text order between two items says nothing about
+    /// which of their blocks is nearer.
+    pub(crate) fn is_nearer_than(self, other: Option<Self>) -> bool {
+        let Some(other) = other else {
+            return true;
+        };
+        self.start > other.start || (self.start == other.start && self.end < other.end)
+    }
+}
+
+/// The tables a Rust bare call reads while it climbs out of its own body.
+///
+/// Rust scopes names by item and by block rather than by the file alone, so
+/// partition needs several views at once: which entities are modules and which
+/// are function bodies, which items hold a spelling only in the type namespace,
+/// the block that directly contains each item, the names a `use` binds, and the
+/// globs that put names in view without spelling them. They are kept together
+/// because every one of them answers the same question — what a bare call at
+/// one position reaches — and a change to that answer touches several at once.
+///
+/// Other languages leave this empty: their bare calls are read from the file's
+/// own tables and the resolver's scope rules.
+#[derive(Debug, Default)]
+pub(crate) struct RustScopeTables {
+    /// Symbols each containing entity declares directly in its body, the
+    /// innermost-scope shadow table: a call inside `outer` that names
+    /// `work` binds the nested `outer::work` before any file-level name.
+    /// A spelling lists every entity registered under it in walk order, because
+    /// Rust keeps the type and value namespaces apart: `fn save` beside
+    /// `mod save` is legal, and only the function answers a bare call.
+    scoped_symbols: HashMap<usize, HashMap<String, Vec<usize>>>,
+    /// Rust modules. A module's items are in bare scope for every body written
+    /// inside it, so its table answers a bare call before the file's own
+    /// namesake does; an outer module's items need `super::` and never answer.
+    module_scopes: HashSet<usize>,
+    /// Rust functions. A function's items are in bare scope for the bodies
+    /// nested inside it (`fn outer() { fn save() {} fn inner() { save() } }`),
+    /// so partition reads its table while climbing towards the module.
+    function_scopes: HashSet<usize>,
+    /// Items that hold a spelling in the type namespace only (`trait save`,
+    /// `type save = ..`, `enum save`, an `impl` block, a named-field `struct`).
+    /// A bare call names a value, so such a spelling never answers it: beside
+    /// `fn save` the function keeps the call, and a spelling only the type
+    /// namespace holds stays pending.
+    type_namespace_items: HashSet<usize>,
+    /// The block that directly contains each item. A function's item table is
+    /// nearer than the module's, but only while the block that declares the
+    /// item is still open at the call site.
+    item_extents: HashMap<usize, ItemExtent>,
+    /// Names a `use` declaration binds in the body that writes it. Rust scopes
+    /// an import to that body, so a name a function imports is nearer than the
+    /// module's item of the same name: `use crate::other::save;` inside `flush`
+    /// makes its `save()` the imported one, which only the resolver can place.
+    /// The record carries no position, so a `use` in a nested block also leaves
+    /// calls outside that block pending: a lost edge rather than a wrong one.
+    import_bindings: HashMap<usize, HashSet<String>>,
+    /// Bodies that write a glob `use` (`use super::*;`). A glob states no
+    /// spelling this walk can place, but it does put the surrounding names in
+    /// view, which is why partition may still read the file's own table after
+    /// the walk reaches a module that writes one.
+    import_globs: HashSet<usize>,
+}
+
 /// Mutable state carried through a single AST walk.
 #[derive(Debug)]
 pub(crate) struct WalkContext {
@@ -149,10 +259,8 @@ pub(crate) struct WalkContext {
     /// definitions, and a member is not visible to a top-level caller that
     /// never received a receiver of its container's type.
     file_symbols: HashMap<String, Vec<usize>>,
-    /// Symbols each containing entity declares directly in its body, the
-    /// innermost-scope shadow table: a call inside `outer` that names
-    /// `work` binds the nested `outer::work` before any file-level name.
-    scoped_symbols: HashMap<usize, HashMap<String, usize>>,
+    /// The Rust item and block tables a bare call reads.
+    rust_scopes: RustScopeTables,
     /// Names each entity takes for itself without necessarily binding them to
     /// an indexable target: parameters, and locals whose type the index cannot
     /// spell. A bare call through such a name reaches the local value, never
@@ -209,7 +317,7 @@ impl WalkContext {
             scope_stack: Vec::new(),
             symbols: HashMap::new(),
             file_symbols: HashMap::new(),
-            scoped_symbols: HashMap::new(),
+            rust_scopes: RustScopeTables::default(),
             shadowed_names: HashMap::new(),
             borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
@@ -291,10 +399,86 @@ impl WalkContext {
         let Some(owner) = self.current_scope_index() else {
             return;
         };
-        self.scoped_symbols
+        self.rust_scopes
+            .scoped_symbols
             .entry(owner)
             .or_default()
-            .insert(name.to_owned(), index);
+            .entry(name.to_owned())
+            .or_default()
+            .push(index);
+    }
+
+    /// Records that `index` is a Rust module (`mod m { .. }`): the items it
+    /// declares directly are in bare scope for every body written inside it,
+    /// so partition reads its table before the file's own. An `impl`, a trait
+    /// and a class body are not modules — their members need a receiver.
+    pub(crate) fn register_module_scope(&mut self, index: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.rust_scopes.module_scopes.insert(index);
+    }
+
+    /// Records that `index` is a Rust function: the items its body declares
+    /// (`fn outer() { fn save() {} }`) are in bare scope for the bodies nested
+    /// inside it, so partition reads that table while climbing towards the
+    /// module. Method items stay out unless the walk reports them here.
+    pub(crate) fn register_function_scope(&mut self, index: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.rust_scopes.function_scopes.insert(index);
+    }
+
+    /// Records that `index` is a Rust item the value namespace does not hold
+    /// (`trait save`, `type save = ..`, `enum save`). Rust keeps the type and
+    /// value namespaces apart, so such a spelling never takes a bare call away
+    /// from a same-named function.
+    pub(crate) fn register_type_namespace_item(&mut self, index: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.rust_scopes.type_namespace_items.insert(index);
+    }
+
+    /// Records the block that directly contains `index`. Item scopes read it
+    /// to tell an item still in scope at a call site from one whose block has
+    /// already ended before the call.
+    pub(crate) fn register_item_extent(
+        &mut self,
+        index: usize,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.rust_scopes
+            .item_extents
+            .insert(index, ItemExtent { start, end });
+    }
+
+    /// Records that a `use` declaration in `owner`'s body binds `name` there.
+    /// Rust scopes the import to that body, so partition lets the nearer
+    /// spelling keep the call pending instead of handing it to a module item.
+    pub(crate) fn register_import_binding(&mut self, owner: usize, name: &str) {
+        if !self.collecting || name.is_empty() {
+            return;
+        }
+        self.rust_scopes
+            .import_bindings
+            .entry(owner)
+            .or_default()
+            .insert(name.to_owned());
+    }
+
+    /// Records that `owner`'s body writes a glob `use` (`use super::*;`),
+    /// which puts the surrounding names in view without spelling any of them.
+    pub(crate) fn register_import_glob(&mut self, owner: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.rust_scopes.import_globs.insert(owner);
     }
 
     /// Records that `owner`'s body takes `name` for a local value or
@@ -341,8 +525,8 @@ impl WalkContext {
     #[allow(dead_code)]
     /// The per-entity local name tables partition consults before the
     /// file-level one.
-    pub(crate) fn scoped_symbols(&self) -> &HashMap<usize, HashMap<String, usize>> {
-        &self.scoped_symbols
+    pub(crate) fn scoped_symbols(&self) -> &HashMap<usize, HashMap<String, Vec<usize>>> {
+        &self.rust_scopes.scoped_symbols
     }
 
     /// Entity indices in this file that declare `name`, if any.
@@ -525,6 +709,28 @@ impl WalkContext {
             line,
             column,
         });
+    }
+
+    /// The type `owner_index` has stated for `name` at one point of its body:
+    /// the last declaration written before the position, which is what a copy
+    /// (`client = other`) takes with it.
+    pub(crate) fn declared_type_at(
+        &self,
+        owner_index: usize,
+        name: &str,
+        line: usize,
+        column: usize,
+    ) -> Option<&str> {
+        self.name_edges
+            .iter()
+            .rev()
+            .find(|edge| {
+                edge.ref_kind == GraphEdgeKind::Declares
+                    && edge.owner_index == owner_index
+                    && edge.ref_name == name
+                    && (edge.line, edge.column) < (line, column)
+            })
+            .and_then(|edge| edge.bound_type.as_deref())
     }
 
     pub(crate) fn add_scoped_binding(
