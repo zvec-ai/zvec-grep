@@ -129,7 +129,8 @@ export async function auditGraphCalls(directory, manifest, calls, suite) {
             path,
             Object.fromEntries(
               Object.entries(entities).map(([id, entity]) => {
-                const { final_rank, ...beforeRanking } = entity;
+                const beforeRanking = { ...entity };
+                delete beforeRanking.final_rank;
                 return [id, beforeRanking];
               }),
             ),
