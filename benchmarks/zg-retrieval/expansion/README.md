@@ -113,8 +113,9 @@ Compare the `vector` row in each `report.json` for File/Entity Recall@1/5/10
 and MCP mean/median latency. Sum `index_seconds` for full index wall time.
 Precache both models when comparing indexing performance.
 
-The [November 2026 Blink and Bekko comparison](blink-multilingual-bekko.md)
-records paired vector recall, query latency and full indexing time for these pilots.
+The November 2026 Blink and Bekko runs record paired vector recall, query
+latency and full indexing time. The [1,024-token results](blink-multilingual-bekko-1024.md)
+include the change from the [32,768-token baseline](blink-multilingual-bekko.md).
 
 ## Gold and scoring
 
