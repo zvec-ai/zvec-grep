@@ -27,6 +27,11 @@ that smoke test for local differential validation.
 Existing indexes must be rebuilt when switching embedding models, even when
 their vector dimensions match. The legacy TypeScript catalog is unchanged.
 
+Select Blink Multilingual with `zg --index --embedding local/blink-multilingual-64m --device cpu`.
+The Model2Vec backend loads the [pinned FP32 weights and tokenizer](https://huggingface.co/minishlab/blink-multilingual-64M/tree/a7198ef875b9a756b8b641ab064542f7408e50f3)
+and produces normalized 256-dimensional embeddings. ZG applies a 32,768-token
+input budget to this model.
+
 New indexes without `--embedding`, `ZVEC_GREP_EMBEDDING`, or a configured default
 select Potion Code for code-heavy workspaces and Bekko for text-heavy workspaces.
 The shared engine analyzes only files admitted by the index's scan rules and

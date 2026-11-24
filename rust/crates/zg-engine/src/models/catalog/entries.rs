@@ -103,6 +103,19 @@ const POTION_MULTILINGUAL_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
+const BLINK_MULTILINGUAL_ARTIFACTS: &[ArtifactConfig] = &[
+    ArtifactConfig {
+        path: "model.safetensors",
+        size: 256_000_088,
+        sha256: "e5709f744dde2ccdff6799e608308765cb55f7ca9287f33f38bfe2d4a965b3d0",
+    },
+    ArtifactConfig {
+        path: "tokenizer.json",
+        size: 8_277_389,
+        sha256: "169193dd66d750ee493719971bb325ecd35347fe2145d1e7eb4b863f7b5a19c0",
+    },
+];
+
 // https://huggingface.co/hotchpotch/bekko-static-embedding-v1/blob/c18167b8f244c1bc6de21ce9b710bac8a29c4615/backend_manifest.json
 const BEKKO_256_INT8_ARTIFACTS: &[ArtifactConfig] = &[
     ArtifactConfig {
@@ -222,7 +235,7 @@ const NOMIC_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
-const CATALOG: [EmbeddingCatalogEntry; 16] = [
+const CATALOG: &[EmbeddingCatalogEntry] = &[
     EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
         reference: "local/embeddinggemma-300m",
         provider: "local",
@@ -572,6 +585,34 @@ const CATALOG: [EmbeddingCatalogEntry; 16] = [
         max_input_tokens: 8_192,
         max_batch_size: 2,
     }),
+    EmbeddingCatalogEntry::Model2Vec(Model2VecConfig {
+        reference: "local/blink-multilingual-64m",
+        provider: "local",
+        model: "blink-multilingual-64m",
+        repo: "minishlab/blink-multilingual-64M",
+        revision: "a7198ef875b9a756b8b641ab064542f7408e50f3",
+        download: &ArtifactDownloadConfig {
+            hugging_face: ArtifactSourceConfig {
+                repo: "minishlab/blink-multilingual-64M",
+                revision: "a7198ef875b9a756b8b641ab064542f7408e50f3",
+            },
+            model_scope: None,
+            artifacts: BLINK_MULTILINGUAL_ARTIFACTS,
+        },
+        model_file: "model.safetensors",
+        embedding_tensor: "embeddings",
+        tokenizer_file: "tokenizer.json",
+        dimension: 256,
+        metric: EmbeddingMetric::Cosine,
+        normalize: true,
+        // The upstream tokenizer has no truncation limit. Use the same ZG
+        // input budget as Bekko for long documents.
+        max_input_tokens: 32_768,
+        max_batch_size: 256,
+        default_concurrency: 2,
+        query_prefix: None,
+        document_prefix: None,
+    }),
     EmbeddingCatalogEntry::Bekko(BekkoConfig {
         reference: "local/bekko-256-int8",
         provider: "local",
@@ -637,6 +678,7 @@ mod tests {
                 "local/jina-embeddings-v2-base-code",
                 "local/gte-modernbert-base",
                 "local/nomic-embed-text-v1.5",
+                "local/blink-multilingual-64m",
                 "local/bekko-256-int8",
             ]
         );

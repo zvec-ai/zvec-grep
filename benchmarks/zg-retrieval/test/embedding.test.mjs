@@ -6,6 +6,20 @@ import {
   REMOTE_EMBEDDING_MODEL,
 } from "../core/embedding.mjs";
 import { loadSuite } from "../core/suite.mjs";
+import { loadPilot } from "../expansion/datasets.mjs";
+
+test("text pilots use the requested local embedding with their pinned data", async () => {
+  for (const suite of ["beir", "duretrieval"]) {
+    for (const model of [
+      "local/blink-multilingual-64m",
+      "local/bekko-256-int8",
+    ]) {
+      const pilot = await loadPilot(suite, { embedding: model });
+      assert.equal(pilot.model, model);
+      assert.equal(pilot.lock.model, pilot.config.model);
+    }
+  }
+});
 
 test("embedding profile keeps the configured local model or selects Qwen remotely", () => {
   assert.equal(

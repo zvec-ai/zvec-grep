@@ -91,6 +91,24 @@ dependency before invoking `expansion/run.mjs`. Downloaded source data and
 materialized corpus files are run-local inputs; only hashes and selected
 original query/qrel records are checked in.
 
+To compare Blink Multilingual and Bekko on CPU, build one local Rust package
+and run the following from the repository root. Use a fresh output path for
+each run and install the selected suite's pinned PyArrow requirement first.
+
+```sh
+for suite in beir duretrieval; do
+  for model in blink-multilingual-64m bekko-256-int8; do
+    RETRIEVAL_EMBEDDING="local/$model" node benchmarks/zg-retrieval/expansion/run.mjs \
+      --suite "$suite" --package rust/dist/npm --output "$retrieval_work/$suite-$model" \
+      --model-cache "$retrieval_work/model-cache" --candidate-commit "$(git rev-parse HEAD)"
+  done
+done
+```
+
+Compare the `vector` row in each `report.json` for File/Entity Recall@1/5/10
+and MCP mean/median latency. Sum `index_seconds` for full index wall time.
+Precache both models when comparing indexing performance.
+
 ## Gold and scoring
 
 All three pilots support the opt-in [Gold stage diagnostic](../README.md#gold-coverage-by-retrieval-stage).

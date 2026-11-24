@@ -12,8 +12,9 @@ use crate::{
     },
 };
 
-const CI_MODELS: [&str; 9] = [
+const CI_MODELS: &[&str] = &[
     "local/bekko-256-int8",
+    "local/blink-multilingual-64m",
     "local/potion-code-16m-v2",
     "local/all-minilm-l6-v2",
     "local/embeddinggemma-300m",
@@ -44,7 +45,10 @@ async fn selected_local_model_downloads_loads_and_embeds() {
         }
         Ok(device) if device == "cuda" => {
             assert!(
-                reference != "local/potion-code-16m-v2",
+                !matches!(
+                    reference.as_str(),
+                    "local/potion-code-16m-v2" | "local/blink-multilingual-64m"
+                ),
                 "model2vec has no CUDA backend"
             );
             // The CUDA workflow checks native offload / graph-placement evidence

@@ -824,6 +824,7 @@ Supported text embedding models (one per workspace):
   local/all-minilm-l6-v2              local    text         384     256  transformers
   local/bekko-256-int8                local    text         256   32768  bekko
   local/bge-small-en-v1.5             local    text         384     512  transformers
+  local/blink-multilingual-64m        local    text         256   32768  model2vec
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
   local/gte-modernbert-base           local    text         768    8192  transformers
   local/jina-embeddings-v2-base-code  local    text         768    8192  transformers
