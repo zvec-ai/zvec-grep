@@ -4,12 +4,11 @@ use std::collections::{BTreeMap, VecDeque};
 use tokio::sync::{oneshot, watch};
 
 use super::{
-    Arc, AtomicBool, CancellationToken, EmbeddingResult, LlamaContextPool, LlamaContextProfile,
+    Arc, CancellationToken, EmbeddingResult, LlamaContextPool, LlamaContextProfile,
     LlamaContextWorker, LlamaExecutionBackend, LlamaExecutionBudget, LlamaModel, LlamaResources,
     LlamaWorkerJob, LlamaWorkerLease, LlamaWorkerMessage, LlamaWorkerResponse, ModelError,
     Ordering, PreparedLlamaBatch, PreparedLlamaInput, StdMutex, check_cancelled,
-    llama_batch_capacity, llama_context_worker, llama_micro_batch_capacity, lock_llama_mutex, mpsc,
-    thread,
+    llama_batch_capacity, llama_context_worker, llama_micro_batch_capacity, lock_llama_mutex,
 };
 
 #[derive(Default)]
@@ -357,18 +356,7 @@ impl LlamaContextPool {
     fn create_worker(&self) -> Result<Arc<LlamaContextWorker>, ModelError> {
         let model = Arc::clone(&self.model);
         let resources = Arc::clone(&self.resources);
-        let (sender, receiver) = mpsc::channel();
-        thread::Builder::new()
-            .name("zg-llama-context".to_owned())
-            .spawn(move || llama_context_worker(&model, &receiver, &resources))
-            .map_err(|error| {
-                ModelError::internal("Unable to create llama.cpp context worker").with_cause(error)
-            })?;
-        Ok(Arc::new(LlamaContextWorker {
-            busy: AtomicBool::new(false),
-            failed: AtomicBool::new(false),
-            sender,
-        }))
+        super::worker::spawn(move |receiver| llama_context_worker(&model, receiver, &resources))
     }
 }
 
@@ -588,8 +576,8 @@ fn retire_idle_workers(state: &mut LlamaContextPoolState) -> Vec<Arc<LlamaContex
 }
 
 fn shutdown_workers(workers: Vec<Arc<LlamaContextWorker>>) {
-    // Never join from an async task or from a worker releasing the last runtime
-    // keepalive. Each thread owns the weights until its context is destroyed.
+    // The runtime-owned shutdown guard joins after native cleanup, or during
+    // runtime shutdown. This path can run on the worker itself and must not join.
     for worker in workers {
         let _ = worker.sender.send(LlamaWorkerMessage::Shutdown);
     }

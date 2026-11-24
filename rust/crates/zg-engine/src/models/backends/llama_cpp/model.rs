@@ -8,7 +8,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread,
     time::Duration,
 };
 
@@ -49,6 +48,7 @@ use crate::models::runtime::llama_config::LlamaResources;
 use policy::{LlamaExecutionBackend, LlamaExecutionBudget};
 mod pool;
 use pool::{LlamaContextPoolState, LlamaResponseSender};
+mod worker;
 
 static LLAMA_BACKEND: super::backend_loading::BackendInitialization<InitializedBackend> =
     super::backend_loading::BackendInitialization::new();

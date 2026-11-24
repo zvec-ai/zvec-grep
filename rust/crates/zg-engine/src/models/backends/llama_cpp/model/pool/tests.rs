@@ -1,6 +1,7 @@
 use super::super::tests::test_resources;
 use super::super::{LlamaToken, should_fallback_to_cpu};
 use super::*;
+use std::sync::{atomic::AtomicBool, mpsc};
 
 #[test]
 fn overlapping_operations_share_the_fixed_capacity_instead_of_adding_budgets() {
@@ -373,6 +374,51 @@ fn received_job(receiver: &mpsc::Receiver<LlamaWorkerMessage>) -> LlamaWorkerJob
 fn finish(job: LlamaWorkerJob) {
     let index = job.input.index;
     job.response.send(Ok((index, vec![1.0])));
+}
+
+#[test]
+fn a_dropped_request_can_release_its_last_keepalive_on_the_native_worker() {
+    struct RetireWorker(Arc<LlamaContextWorker>);
+    impl Drop for RetireWorker {
+        fn drop(&mut self) {
+            shutdown_workers(vec![Arc::clone(&self.0)]);
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let native_cleaned = Arc::clone(&cleaned);
+    let pool = TestPool::new(1);
+    runtime.block_on(async {
+        let (started, dispatched) = oneshot::channel();
+        let (release, held) = mpsc::channel();
+        let worker = super::super::worker::spawn(move |receiver| {
+            let LlamaWorkerMessage::Embed(job) = receiver.recv().expect("job") else {
+                panic!("expected native job");
+            };
+            let _ = started.send(());
+            held.recv().expect("release native work");
+            // The caller has dropped its future. Sending this result drops the
+            // final execution keepalive on this thread and requests our shutdown.
+            finish(job);
+            assert!(matches!(receiver.recv(), Ok(LlamaWorkerMessage::Shutdown)));
+            native_cleaned.store(true, Ordering::Release);
+        })
+        .expect("worker");
+        let keepalive = Arc::new(RetireWorker(Arc::clone(&worker)));
+        let mut request =
+            Box::pin(pool.run(1, 1, None, Some(keepalive), || Ok(Arc::clone(&worker))));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        dispatched.await.expect("native job started");
+        drop(request);
+        assert_eq!(pool.in_flight(), 1);
+        release.send(()).expect("finish native work");
+    });
+    drop(runtime);
+    assert!(cleaned.load(Ordering::Acquire));
+    pool.assert_released();
 }
 
 #[tokio::test]

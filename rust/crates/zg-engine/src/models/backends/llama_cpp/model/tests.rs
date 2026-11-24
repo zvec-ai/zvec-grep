@@ -1,6 +1,8 @@
 use super::*;
 use crate::models::catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry};
 
+#[cfg(feature = "cuda")]
+mod cuda_shutdown;
 mod qwen;
 
 pub(super) fn test_resources(contexts: usize) -> Arc<LlamaResources> {
