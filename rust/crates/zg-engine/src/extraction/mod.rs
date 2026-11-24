@@ -26,7 +26,7 @@ pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment, ExtractionOutput}
 #[cfg(test)]
 pub(crate) use graph::Constructs;
 #[allow(unused_imports)]
-pub(crate) use graph::{FILE_SCOPE_INDEX, PartitionedGraph};
+pub(crate) use graph::{FILE_SCOPE_INDEX, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, PartitionedGraph};
 #[cfg(test)]
 pub(crate) use graph::{PendingNameRef, ResolvedNameEdge};
 
