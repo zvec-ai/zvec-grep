@@ -11,7 +11,9 @@ mod store;
 pub(crate) mod types;
 mod zvec;
 
-pub(crate) use store::{IndexStore, IndexedSourceFile, ReadView, ResolutionSnapshot};
+pub(crate) use store::{
+    IndexStore, IndexedSourceFile, ReadView, ResolutionSnapshot, parameter_evidence,
+};
 
 #[cfg(test)]
 pub(crate) use store::IndexedSourceEntity;

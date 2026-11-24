@@ -285,7 +285,7 @@ impl SymbolIndex {
 /// `requires(...)` — are not the parameter list, and a list this function
 /// cannot place returns `None`, so an entity without that evidence never
 /// stands in for one that has it.
-fn parameter_evidence(signature: Option<&str>) -> Option<String> {
+pub(crate) fn parameter_evidence(signature: Option<&str>) -> Option<String> {
     let signature = signature?;
     let (start, end) = outer_parameter_group(signature)?;
     let mut parameters = Vec::new();

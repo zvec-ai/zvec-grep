@@ -23,6 +23,7 @@ use crate::{
     storage::{
         ReadView,
         graph::Direction,
+        parameter_evidence,
         types::{StorageSearchFilter, StoredEntity},
     },
 };
@@ -183,16 +184,44 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> EngineResult<()> {
 /// overrides it name different members, so the base declaration stays an
 /// answer of its own even while a body of the same bare name exists.
 fn prefer_definitions(definitions: Vec<StoredEntity>) -> Vec<StoredEntity> {
-    let defined: HashSet<_> = definitions
+    /// One definition's evidence: the symbol its qualified name spells, the
+    /// parameters it counts and the list its signature states.
+    type Evidence = (String, Option<usize>, Option<String>);
+    let defined: Vec<Evidence> = definitions
         .iter()
         .filter(|stored| !is_declaration(stored))
-        .filter_map(qualified_symbol)
+        .filter_map(|stored| {
+            let metadata = code_metadata(stored)?;
+            Some((
+                qualified_symbol(stored)?,
+                metadata.arity,
+                parameter_evidence(metadata.signature.as_deref()),
+            ))
+        })
         .collect();
     definitions
         .into_iter()
         .filter(|stored| {
-            !is_declaration(stored)
-                || qualified_symbol(stored).is_none_or(|symbol| !defined.contains(&symbol))
+            if !is_declaration(stored) {
+                return true;
+            }
+            // A qualified name does not identify a C++ overload, so the pair
+            // also matches the parameters: `void f(int);` and `void f() {}`
+            // share a scope without naming one member.
+            let (Some(metadata), Some(symbol)) = (code_metadata(stored), qualified_symbol(stored))
+            else {
+                return true;
+            };
+            let parameters = parameter_evidence(metadata.signature.as_deref());
+            !defined.iter().any(|(defined, arity, list)| {
+                *defined == symbol
+                    && same_parameters(
+                        metadata.arity,
+                        parameters.as_deref(),
+                        *arity,
+                        list.as_deref(),
+                    )
+            })
         })
         .collect()
 }
@@ -247,6 +276,7 @@ fn collect_match(
         direction,
         kinds,
         limit.saturating_add(1),
+        &[],
         signal,
     )?;
     // A call through a base reference dispatches into the body that overrides
@@ -327,8 +357,15 @@ fn inherited_callers(
     if limit == 0 || !kinds.is_some_and(|kinds| kinds.contains(&GraphEdgeKind::Calls)) {
         return Ok(Vec::new());
     }
+    let members = overridden_members(storage, stored, signal)?;
+    // The body that overrides a base member may name that base explicitly to
+    // reach the implementation it replaced (`Derived::Func() { Base::Func(); }`).
+    // The row lands on the base member like any other call, but the body it is
+    // written in is the one being queried, so it answers nothing and must not
+    // take a slot: the limit counts callers, not rows.
+    let excluded = [stored.entity.id().as_str()];
     let mut edges = Vec::new();
-    for member in overridden_members(storage, stored, signal)? {
+    for member in &members {
         let Some(spare) = limit.checked_sub(edges.len()).filter(|spare| *spare > 0) else {
             break;
         };
@@ -338,6 +375,7 @@ fn inherited_callers(
             Direction::In,
             Some(&[GraphEdgeKind::Calls]),
             spare,
+            &excluded,
             signal,
         )?);
     }
@@ -399,15 +437,56 @@ fn overridden_members(
     }
     // A call dispatches only through a virtual base member: a non-virtual one
     // is merely hidden by the same-named body, and the call stays the base's.
+    // The specifier is written once, though, and not always on the entity the
+    // call reaches: `virtual void Func();` stands in the header while the body
+    // that carries the call sites writes plain `void Base::Func()`, so the two
+    // spellings are one member and either one marks it. An override that
+    // repeats only `override` marks its own member the same way.
     let declared = storage.fetch_code_metadata(&candidates)?;
+    let marked: Vec<&CodeMetadata> = candidates
+        .iter()
+        .filter_map(|id| declared.get(id).map(|(_, metadata)| metadata))
+        .filter(|base| is_virtual(base) && same_arity(metadata.arity, base.arity))
+        .collect();
     Ok(candidates
         .into_iter()
         .filter(|id| {
-            declared
-                .get(id)
-                .is_some_and(|(_, base)| is_virtual(base) && same_arity(metadata.arity, base.arity))
+            declared.get(id).is_some_and(|(_, base)| {
+                same_arity(metadata.arity, base.arity)
+                    && marked.iter().any(|other| same_member(base, other))
+            })
         })
         .collect())
+}
+
+/// Whether two spellings name one member: the class both are written in and
+/// the parameters they state.
+fn same_member(left: &CodeMetadata, right: &CodeMetadata) -> bool {
+    left.scope == right.scope
+        && left.symbol_name == right.symbol_name
+        && same_parameters(
+            left.arity,
+            parameter_evidence(left.signature.as_deref()).as_deref(),
+            right.arity,
+            parameter_evidence(right.signature.as_deref()).as_deref(),
+        )
+}
+
+/// Whether two spellings state one symbol's parameters: the lists their
+/// signatures state when both are readable, and the counted parameters
+/// otherwise. A signature that states no list the reader can place leaves the
+/// count as the only evidence, which is what the index holds of such an entity
+/// anyway.
+fn same_parameters(
+    left: Option<usize>,
+    left_parameters: Option<&str>,
+    right: Option<usize>,
+    right_parameters: Option<&str>,
+) -> bool {
+    match (left_parameters, right_parameters) {
+        (Some(left), Some(right)) => left == right,
+        _ => same_arity(left, right),
+    }
 }
 
 /// The class bodies a member's scope names. Two files may declare one qualified
@@ -532,12 +611,14 @@ fn qualified_metadata(metadata: &CodeMetadata) -> Option<String> {
 
 /// Whether one base member dispatches into a derived body. Extraction keeps the
 /// declaration syntax up to the body, so the specifier a base spells is the
-/// evidence that the same-named body under a derived class overrides it.
+/// evidence that the same-named body under a derived class overrides it: the
+/// introducer writes `virtual`, and an override repeats the decision with
+/// `override` even where it never repeats the base's `virtual`.
 fn is_virtual(metadata: &CodeMetadata) -> bool {
     metadata.signature.as_deref().is_some_and(|signature| {
         signature
             .split(|character: char| !character.is_alphanumeric() && character != '_')
-            .any(|word| word == "virtual")
+            .any(|word| matches!(word, "virtual" | "override"))
     })
 }
 
@@ -725,12 +806,19 @@ fn load_symbols(
 }
 
 /// Filter resolved edges by endpoint visibility before applying the limit.
+///
+/// `excluded` names the sources whose rows are read but never counted: a body
+/// that names the member it overrides reaches that implementation directly, so
+/// its call site is not a caller of anything the query asks about. Skipping the
+/// rows while reading keeps the limit describing the answer rather than the
+/// table.
 fn neighborhood(
     storage: &ReadView<'_>,
     id: &str,
     direction: Direction,
     kinds: Option<&[GraphEdgeKind]>,
     limit: usize,
+    excluded: &[&str],
     signal: Option<&CancellationToken>,
 ) -> EngineResult<Vec<(FileEdge, PathBuf)>> {
     check_cancelled(signal)?;
@@ -739,17 +827,30 @@ fn neighborhood(
         let mut hydration_size = limit.clamp(1, ENDPOINT_BATCH_SIZE);
         let mut checked = HashSet::new();
         let mut visible = HashMap::new();
-        while edges.len() < limit {
+        'read: while edges.len() < limit {
             check_cancelled(signal)?;
             let mut batch = Vec::with_capacity(hydration_size);
+            let mut drained = false;
             for _ in 0..hydration_size {
                 check_cancelled(signal)?;
-                let Some(edge) = rows.next() else { break };
-                batch.push(edge?);
+                let Some(edge) = rows.next() else {
+                    drained = true;
+                    break;
+                };
+                let edge = edge?;
+                if !excluded.contains(&edge.source.as_str()) {
+                    batch.push(edge);
+                }
                 check_cancelled(signal)?;
             }
             if batch.is_empty() {
-                break;
+                // Only rows the caller excluded so far: what follows may still
+                // answer, so read further instead of stopping here.
+                if drained {
+                    break 'read;
+                }
+                hydration_size = hydration_size.saturating_mul(2).min(ENDPOINT_BATCH_SIZE);
+                continue;
             }
             // SQLite can be ahead of zvec after a failed write. Filter both
             // endpoints before counting a row toward the requested limit.
