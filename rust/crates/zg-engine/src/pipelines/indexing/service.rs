@@ -177,6 +177,9 @@ impl WorkspaceIndexService {
             options.embedding_concurrency,
         )
         .map_err(ModelError::into_engine_error)?;
+        // Extraction models are local even when embeddings use an HTTP backend.
+        let extraction_cache =
+            index_model_cache(&crate::config::read()?, existing.as_ref(), &options)?;
         let IndexModels {
             runtimes: acquired,
             descriptor,
@@ -210,13 +213,7 @@ impl WorkspaceIndexService {
             options.changes.clear();
             prepare_build(&workspace)?;
         }
-        let extractor = crate::extraction::ExtractionService::new(
-            models.clone(),
-            acquired
-                .first()
-                .and_then(ModelRuntimeLease::configured_cache_directory)
-                .map(Path::to_path_buf),
-        );
+        let extractor = crate::extraction::ExtractionService::new(models.clone(), extraction_cache);
         let result = self
             .run_index(
                 &workspace,
@@ -699,6 +696,27 @@ struct IndexModels {
     descriptor: IndexDescriptor,
 }
 
+fn index_model_cache(
+    config: &serde_json::Value,
+    existing: Option<&Workspace>,
+    options: &IndexOptions,
+) -> Result<Option<std::path::PathBuf>, EngineError> {
+    let reference = embedding_reference(existing, options)?;
+    let saved = existing
+        .and_then(|workspace| workspace.index().descriptor())
+        .and_then(|index| index.embedding_configs().get(&reference))
+        .and_then(|runtime| runtime.cache_dir.clone());
+    Ok(crate::config::model_cache(
+        config,
+        options
+            .runtime_model_cache
+            .clone()
+            .or_else(|| options.model_cache.clone())
+            .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
+        saved,
+    ))
+}
+
 fn acquire_index_models(
     models: &ModelRuntimeManager,
     existing: Option<&Workspace>,
@@ -849,15 +867,7 @@ fn acquire_model(
     let cache_dir = if http_descriptor.is_some() {
         None
     } else {
-        crate::config::model_cache(
-            &config,
-            options
-                .runtime_model_cache
-                .clone()
-                .or_else(|| options.model_cache.clone())
-                .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
-            existing_runtime.and_then(|runtime| runtime.cache_dir.clone()),
-        )
+        index_model_cache(&config, existing, options)?
     };
     models
         .acquire(ModelRuntimeRequest::new(
@@ -1114,6 +1124,46 @@ mod tests {
     };
 
     use super::{ModelRuntimeManager, WorkspaceIndexService};
+
+    #[test]
+    fn extraction_model_cache_is_independent_of_embedding_backend() {
+        let directory = tempdir().expect("cache preferences");
+        let runtime = directory.path().join("runtime");
+        let explicit = directory.path().join("explicit");
+        let embedding = directory.path().join("embedding");
+        let global = directory.path().join("global");
+        let config = serde_json::json!({"defaults": {"modelCacheDir": global}});
+        for reference in ["local/potion-code-16m-v2", "http/fixture"] {
+            let mut options = IndexOptions {
+                runtime_model_cache: Some(runtime.clone()),
+                model_cache: Some(explicit.clone()),
+                embedding: Some(EmbeddingModelSpec {
+                    reference: reference.into(),
+                    revision: None,
+                    cache_dir: Some(embedding.clone()),
+                    endpoint: None,
+                    device: Device::Auto,
+                }),
+                ..Default::default()
+            };
+            let resolve = |options: &IndexOptions| {
+                super::index_model_cache(&config, None, options).expect("model cache")
+            };
+            assert_eq!(resolve(&options), Some(runtime.clone()), "{reference}");
+            options.runtime_model_cache = None;
+            assert_eq!(resolve(&options), Some(explicit.clone()), "{reference}");
+            options.model_cache = None;
+            assert_eq!(resolve(&options), Some(embedding.clone()), "{reference}");
+            options.embedding.as_mut().expect("embedding").cache_dir = None;
+            assert_eq!(
+                resolve(&options),
+                std::env::var_os("ZVEC_GREP_MODEL_CACHE")
+                    .map(PathBuf::from)
+                    .or_else(|| Some(global.clone())),
+                "{reference}",
+            );
+        }
+    }
 
     #[test]
     fn normalizes_selected_model_cache_paths() {

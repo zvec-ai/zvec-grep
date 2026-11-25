@@ -576,10 +576,6 @@ impl ModelRuntimeLease {
         self.inner.key.endpoint.as_deref()
     }
 
-    pub(crate) fn configured_cache_directory(&self) -> Option<&std::path::Path> {
-        self.inner.key.model_cache_dir.as_deref()
-    }
-
     pub(crate) fn configured_http(&self) -> Option<&HttpEmbeddingConfig> {
         self.inner.key.http.as_ref()
     }

@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -49,6 +51,63 @@ def fixture(path, pages):
     data += b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets[1:])
     data += f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
     path.write_bytes(data)
+
+
+def http_layout_cache_smoke(execute, workspace, home, env, cache):
+    """HTTP embeddings must not hide the independently cached layout model."""
+    root = workspace / "http-cache"
+    root.mkdir()
+    fixture(root / "native.pdf", [["Orchid recovery requires five minutes."]])
+    isolated_home = home / "http-cache"
+    config_dir = isolated_home / ".zvec-grep"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    unavailable_cache = isolated_home / "not-a-directory"
+    unavailable_cache.write_text("An ignored --model-cache must fail without downloading.", encoding="utf-8")
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(request)
+            inputs = request["input"]
+            body = json.dumps({"data": [{"index": i, "embedding": [1.0, 0.0, 0.0, 0.0]}
+                                        for i in range(len(inputs))]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            config = {"version": 1, "defaults": {"modelCacheDir": str(cache)}, "models": {"http/fixture": {
+                "endpoint": f"http://127.0.0.1:{server.server_port}/v1", "model": "fixture",
+                "dimension": 4, "maxInputTokens": 512, "maxBatchSize": 16, "auth": "none"}}}
+            (config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+            isolated_env = dict(env, HOME=str(isolated_home), USERPROFILE=str(isolated_home),
+                                XDG_CONFIG_HOME=str(isolated_home / "config"),
+                                ZVEC_GREP_MODEL_CACHE=str(unavailable_cache))
+            isolated_env.pop("ZVEC_GREP_DEVICE", None)
+            arguments = ["--index", "--embedding", "http/fixture", "--allow-remote"]
+            for label, extra in [("http-cache-explicit", ["--model-cache", str(cache)]),
+                                 ("http-cache-global", ["--rebuild"])]:
+                before = len(requests)
+                out, err = execute(label, arguments + extra, cwd=root, environment=isolated_env)
+                check("1 scanned" in out and "0 failed" in out, out + err)
+                check("using native PDF text without layout filtering" not in err, err)
+                check("Downloading model" not in err, "Expected cached PP-S: " + err)
+                check(len(requests) > before, "HTTP embedding fixture received no request")
+                isolated_env.pop("ZVEC_GREP_MODEL_CACHE", None)
+            out, _ = execute("http-cache-rg", ["--rg", "-F", "Orchid recovery"], cwd=root, environment=isolated_env)
+            check("native.pdf" in out and re.search(r"pages:\s*1\s*\n", out), out)
+        finally:
+            server.shutdown()
+            worker.join()
 
 
 def main():
@@ -101,10 +160,10 @@ def main():
         (workspace / "paper.pdf").write_bytes(data)
         (workspace / "notes.md").write_text("# Recovery\n\nOrchid recovery requires five minutes.\n", encoding="utf-8")
 
-        def execute(label, arguments, codes=(0,)):
+        def execute(label, arguments, codes=(0,), *, cwd=None, environment=None):
             started = time.perf_counter()
             command = [*command_prefix, *arguments, "--mode", "direct", "--color", "never"]
-            child = subprocess.run(command, cwd=workspace, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=300)
+            child = subprocess.run(command, cwd=cwd or workspace, env=environment or env, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=300)
             elapsed = time.perf_counter() - started
             (logs / f"{label}.stdout").write_text(child.stdout, encoding="utf-8")
             (logs / f"{label}.stderr").write_text(child.stderr, encoding="utf-8")
@@ -174,6 +233,7 @@ def main():
             check("1 deleted" in out, out)
             out, _ = execute("rg-deleted", ["--rg", "-F", "Updated orchid"], (0, 1))
             check("pages.pdf" not in out, out)
+            http_layout_cache_smoke(execute, workspace, home, env, cache)
             report["passed"] = True
         finally:
             (logs / "results.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
