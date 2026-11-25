@@ -26,6 +26,12 @@ pub fn create_embedding_model(
     compute_runtime: ModelComputeRuntime,
     session_count: usize,
 ) -> Result<Arc<dyn EmbeddingModel>, ModelError> {
+    let options = options.unwrap_or_default();
+    if reference.starts_with("http/") {
+        return Ok(Arc::new(super::http::HttpEmbeddingModel::new(
+            reference, options,
+        )?));
+    }
     let entry = get_embedding_model_catalog_entry(reference).ok_or_else(|| {
         ModelError::new(
             crate::EngineError::NOT_FOUND,
@@ -33,7 +39,6 @@ pub fn create_embedding_model(
             Some(format!("embedding={reference}")),
         )
     })?;
-    let options = options.unwrap_or_default();
     match entry {
         EmbeddingCatalogEntry::Bekko(config) => Ok(Arc::new(BekkoEmbeddingModel::new(
             config,
