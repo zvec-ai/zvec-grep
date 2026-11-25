@@ -1,6 +1,9 @@
 //! Resolve the indexed workspace, refresh it when requested, and execute retrieval.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -84,9 +87,11 @@ pub(crate) async fn context(
     .await?
     {
         ReadSource::Writer { lease, context } => {
-            let workspace = &lease.session.workspace;
-            let storage = &lease.session.storage;
-            return with_index_status(indexing, workspace, options, true, async |files| {
+            // The scan needs only the workspace snapshot after retrieval releases the writer.
+            let snapshot = Arc::clone(&lease.session.workspace);
+            let workspace = snapshot.as_ref();
+            return with_index_status(indexing, workspace, options, true, async move |files| {
+                let storage = &lease.session.storage;
                 query_storage(&context, workspace, storage, options, &request, files).await
             })
             .await;

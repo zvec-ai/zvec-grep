@@ -23,7 +23,7 @@ pub(crate) struct WriterSession {
     // Borrowers retain all resources, including the home lock, if indexing is aborted.
     pub(crate) storage: IndexStore,
     pub(crate) models: Vec<ModelRuntimeLease>,
-    pub(crate) workspace: Workspace,
+    pub(crate) workspace: Arc<Workspace>,
     active: AtomicUsize,
     drained: Notify,
     _home_lock: Arc<LockGuard>,
@@ -48,7 +48,7 @@ impl WriterSession {
         Self {
             storage,
             models,
-            workspace,
+            workspace: Arc::new(workspace),
             active: AtomicUsize::new(0),
             drained: Notify::new(),
             _home_lock: home_lock,
