@@ -85,6 +85,8 @@ explicitly requested. Resolve the final selection after acquiring the writer
 lock so an index published while a request was queued takes precedence over
 the caller's default.
 
+Runtime HTTP models use `http/<alias>` entries in the global `models` configuration, specifying the endpoint, served model, vector shape, limits, authentication, and query/document prefixes alongside each other. For `bearer` authentication, `--api-key` takes precedence over `apiKeyEnv` and follows the workspace's encrypted indexing and temporary query credential policy. The workspace saves the resolved descriptor and authorized endpoint for subsequent indexing and search; global edits do not silently change an existing index's embedding space. HTTP models retain the same content-transfer authorization and runtime concurrency/cancellation boundaries as built-in remote models. See the [embedding model guide](https://zvec.org/en/docs/zvec-grep/embedding-models/) for configuration.
+
 ## Resource ownership
 
 Reuse one `ZvecGrep` across requests and workspaces. The engine owns model

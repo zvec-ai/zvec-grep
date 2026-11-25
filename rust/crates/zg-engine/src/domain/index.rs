@@ -172,6 +172,41 @@ impl IndexDescriptor {
                 )));
             }
         }
+        for model in std::iter::once(&default_embedding_model).chain(embedding_routes.values()) {
+            let reference = model.model().reference();
+            if model.model().provider() == "http" {
+                let config = embedding_configs.get(&reference).ok_or_else(|| {
+                    EngineError::invalid_argument(
+                        "HTTP model descriptor is missing from index metadata",
+                    )
+                })?;
+                let http = config.http.as_ref().ok_or_else(|| {
+                    EngineError::invalid_argument(
+                        "HTTP model descriptor is missing from index metadata",
+                    )
+                })?;
+                if http.auth == crate::domain::model::HttpAuth::None && config.api_key.is_some() {
+                    return Err(EngineError::invalid_argument(
+                        "HTTP model with auth none cannot store an API key",
+                    ));
+                }
+                http.model_info(&reference)?
+                    .ensure_index_compatible(model)?;
+                let endpoint = config.endpoint.as_deref().ok_or_else(|| {
+                    EngineError::invalid_argument(
+                        "HTTP model endpoint is missing from index metadata",
+                    )
+                })?;
+                crate::authorization::canonical_remote_endpoint(&reference, endpoint)?;
+            } else if embedding_configs
+                .get(&reference)
+                .is_some_and(|config| config.http.is_some())
+            {
+                return Err(EngineError::invalid_argument(
+                    "HTTP descriptor requires an http model reference",
+                ));
+            }
+        }
         Ok(Self {
             default_embedding_model,
             embedding_routes,
@@ -263,6 +298,37 @@ impl IndexDescriptor {
             index
                 .embedding
                 .ensure_index_compatible(&other_index.embedding)?;
+        }
+        for model in self
+            .embeddings()
+            .into_iter()
+            .filter(|model| model.model().provider() == "http")
+        {
+            let reference = model.model().reference();
+            let saved = &self.embedding_configs[&reference];
+            let requested = other.embedding_configs.get(&reference).ok_or_else(|| {
+                EngineError::invalid_argument("HTTP model descriptor is missing; rebuild the index")
+            })?;
+            saved
+                .http
+                .as_ref()
+                .expect("validated HTTP descriptor")
+                .ensure_index_compatible(requested.http.as_ref().ok_or_else(|| {
+                    EngineError::invalid_argument(
+                        "HTTP model descriptor is missing; rebuild the index",
+                    )
+                })?)?;
+            let canonical = |config: &ModelConfig<EncryptedApiKey>| {
+                crate::authorization::canonical_remote_endpoint(
+                    &reference,
+                    config.endpoint.as_deref().unwrap_or_default(),
+                )
+            };
+            if canonical(saved)? != canonical(requested)? {
+                return Err(EngineError::invalid_argument(
+                    "HTTP embedding endpoint changed; rebuild the index",
+                ));
+            }
         }
         if self.graph_indexing != other.graph_indexing {
             let existing = if self.graph_indexing {
