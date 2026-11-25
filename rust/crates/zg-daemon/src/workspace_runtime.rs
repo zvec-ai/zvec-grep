@@ -69,6 +69,7 @@ struct WorkspaceRuntime {
     index_template: Mutex<IndexOptions>,
     pending_watcher_configuration: Mutex<Option<(uuid::Uuid, IndexOptions)>>,
     index_status: Mutex<CachedIndexStatus>,
+    status_inspection: tokio::sync::Mutex<()>,
     watcher: tokio::sync::Mutex<Option<WatcherHandle>>,
     watcher_active: AtomicBool,
     dirty_revision: AtomicU64,
@@ -578,6 +579,7 @@ impl WorkspaceRuntimeManager {
                 ..IndexOptions::default()
             },
         )?;
+        let _inspection = runtime.status_inspection.lock().await;
         let epoch = lock(&runtime.index_status).invalidate();
         let observed_job = self
             .job_for_root(&runtime.canonical_root)
@@ -592,7 +594,7 @@ impl WorkspaceRuntimeManager {
         let current_job = self.job_for_root(&info.root).map(|job| (job.id, job.state));
         let busy = current_job
             .is_some_and(|(_, state)| matches!(state, JobState::Queued | JobState::Running));
-        // Never restore ready after a watcher notification, job submission or concurrent scan.
+        // Never restore ready after a watcher notification or job transition.
         if busy || current_job != observed_job || !runtime.record_status(epoch, &info, current_job)
         {
             info.status = None;
@@ -707,6 +709,7 @@ impl WorkspaceRuntimeManager {
                 index_template: Mutex::new(template),
                 pending_watcher_configuration: Mutex::new(None),
                 index_status: Mutex::new(CachedIndexStatus::default()),
+                status_inspection: tokio::sync::Mutex::new(()),
                 watcher: tokio::sync::Mutex::new(None),
                 watcher_active: AtomicBool::new(false),
                 dirty_revision: AtomicU64::new(1),
