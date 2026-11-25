@@ -461,35 +461,72 @@ fn member_spelling<'a>(
     } else {
         visible.as_slice()
     };
-    let spelling = match seen {
+    // A class read through a header offers two spellings of one member — the
+    // declaration and the body implementing it — and the pair is one symbol.
+    // It is settled before the overload count, which would otherwise see two
+    // members accepting the same call and decline to choose.
+    let paired = super::prefer_definitions(snapshot, seen.to_vec());
+    let spelling = match paired.as_slice() {
         [hit] => Some(*hit),
-        _ => arity.and_then(|arity| unique_arity_match(seen.iter().copied(), arity)),
+        _ => arity.and_then(|arity| unique_arity_match(paired.iter().copied(), arity)),
     };
-    Ok(spelling.map(|spelling| paired_body(members, spelling)))
+    let Some(spelling) = spelling else {
+        return Ok(None);
+    };
+    Ok(Some(paired_body(
+        store, snapshot, caches, members, spelling,
+    )?))
 }
 
 /// The body implementing one member spelling, when the class holds exactly one
-/// body of that signature.
+/// body of that signature in this translation unit.
+///
+/// The declaration the unit reads may sit in a header shared by two independent
+/// targets that both declare the class, while the only indexed body belongs to
+/// the other target: the body's own unit is what says which declaration it
+/// implements, so a body whose class cannot be placed pairs only when its unit
+/// includes the declaring file. Otherwise the declaration answers the call,
+/// because a namesake's implementation is not this class's member.
 fn paired_body<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
     members: &[&'a NameIndexEntry],
     spelling: &'a NameIndexEntry,
-) -> &'a NameIndexEntry {
+) -> crate::EngineResult<&'a NameIndexEntry> {
     if !spelling.is_declaration {
-        return spelling;
+        return Ok(spelling);
     }
-    let mut bodies = members.iter().copied().filter(|hit| {
-        !hit.is_declaration
-            && super::same_symbol(
+    let declared = super::member_class_file(snapshot, spelling);
+    let mut bodies = Vec::new();
+    for hit in members {
+        if hit.is_declaration
+            || !super::same_symbol(
                 hit.arity,
                 hit.parameters.as_deref(),
                 spelling.arity,
                 spelling.parameters.as_deref(),
             )
-    });
-    match (bodies.next(), bodies.next()) {
-        (Some(body), None) => body,
-        _ => spelling,
+        {
+            continue;
+        }
+        let pairs = match (declared, super::member_class_file(snapshot, hit)) {
+            (Some(declared), Some(body_class)) => declared == body_class,
+            (Some(declared), None) => {
+                super::unit_includes(store, snapshot, caches, "cpp", hit.file_id, declared)?
+            }
+            // A spelling whose class the workspace cannot place states nothing
+            // about where its body is written, so the body still stands for it.
+            (None, _) => true,
+        };
+        if pairs {
+            bodies.push(*hit);
+        }
     }
+    Ok(match bodies.as_slice() {
+        [body] => body,
+        _ => spelling,
+    })
 }
 
 fn return_type(

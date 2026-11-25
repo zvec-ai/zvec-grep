@@ -342,6 +342,28 @@ fn local_binding_shadows(
     }))
 }
 
+/// The outcome a bare C/C++ call has when the owning body binds its name: the
+/// call reads that binding, so every member rule below must leave it alone.
+///
+/// A binding is evidence only for a call that spells the bare name: a member
+/// call (`x.f()`) names the receiver's member, and a language without implicit
+/// members states its bindings explicitly at every use.
+fn binding_shadowed_outcome(
+    store: &IndexStore,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Outcome>> {
+    let reference = &stored.reference;
+    if reference.ref_kind != GraphEdgeKind::Calls
+        || reference.receiver_name.is_some()
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+        || !local_binding_shadows(store, stored, caches)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(Outcome::Deferred))
+}
+
 /// Runs the path and binding rules in precedence order, then hands the
 /// reference to the name rules.
 ///
@@ -547,6 +569,13 @@ fn classify_names(
             resolution,
             rule: Rule::Receiver,
         });
+    }
+    if let Some(outcome) = binding_shadowed_outcome(store, stored, caches)? {
+        // A body that binds the name itself owns every bare call of it: the
+        // parameter of `void run(std::function<void()> cb)` is what `cb()`
+        // calls, so neither the member the class imports with `using` nor the
+        // one it inherits may answer ahead of that binding.
+        return Ok(outcome);
     }
     if let Some(resolution) = resolve_using_member(store, snapshot, stored, caches)? {
         // A using-declaration in the owner's class states which base member a
@@ -873,6 +902,35 @@ fn unit_hits<'a>(
         .filter(|hit| hit.file_id == file || closure.contains(&hit.file_id))
         .copied()
         .collect())
+}
+
+/// Whether the translation unit of `file` reads `declared`: itself always, any
+/// other file only through its include chain.
+///
+/// A body written out-of-line belongs to the class whose header its own unit
+/// includes, so this is the evidence that separates one target's implementation
+/// from the namesake class another target declares.
+///
+/// # Errors
+/// Propagates graph storage failures of the include-chain read.
+fn unit_includes(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    language: &str,
+    file: u32,
+    declared: u32,
+) -> crate::EngineResult<bool> {
+    if file == declared {
+        return Ok(true);
+    }
+    if let Entry::Vacant(entry) = caches.include_closures.entry(file) {
+        entry.insert(include_closure(store, snapshot, language, file)?);
+    }
+    Ok(caches
+        .include_closures
+        .get(&file)
+        .is_some_and(|closure| closure.contains(&declared)))
 }
 
 /// Narrows the candidates to the ones declared in a scope enclosing the
