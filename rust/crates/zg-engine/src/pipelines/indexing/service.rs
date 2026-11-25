@@ -2218,6 +2218,8 @@ mod tests {
     }
 
     mod query_status {
+        mod shared_scanner;
+
         use std::{fs::File, path::Path, sync::Arc, time::Duration};
         use tempfile::tempdir;
         use tokio::sync::Notify;
