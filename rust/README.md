@@ -597,10 +597,11 @@ extraction and the existing model cache. The matching PDFium library is bundled;
 users need no Python, PDF viewer, or system PDFium installation.
 
 Run `zg --index`, then `zg "How does recovery work?" -t pdf` or
-`zg --rg -F "recovery" -t pdf`. PDF rg searches the indexed entity text, retaining
-literal/regex, case, context and file-filter behavior within each entity. Stale
+`zg --rg -F "recovery" -t pdf`. PDF rg uses each file's nearest workspace to search
+its indexed entity text, retaining literal/regex, case, context and file-filter
+behavior within each entity. Stale
 extraction remains searchable with `possibly_stale`; its pages refer to the indexed
-version. Without a workspace index, rg searches original files, including PDFs,
+version. When a PDF has no workspace index, rg searches the original file
 with its usual binary policy (`-a` enables binary search). Within an indexed
 workspace, PDFs without usable extraction fall back to raw-file search with a
 warning. Index read failures report their cause and also fall back; rg never

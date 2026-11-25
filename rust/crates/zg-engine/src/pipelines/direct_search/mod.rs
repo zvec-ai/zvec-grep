@@ -102,21 +102,14 @@ impl DirectSearchService {
             .map_or((options.rg_paths, None), |(paths, limit)| {
                 (paths, Some(limit))
             });
-        let mut index_warnings = Vec::new();
-        let defer_extracted_sources = match extracted::enabled(&root) {
-            Ok(enabled) => enabled,
-            Err(error) => {
-                index_warnings.push(extracted::index_warning(&root, error)?);
-                false
-            }
-        };
         let request = LexicalSearchRequest {
             signal: options.signal.clone(),
             root: Some(root.clone()),
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
             paths_selected: use_entity_ranges,
-            defer_extracted_sources,
+            // Each candidate may belong to a different (or nested) workspace.
+            defer_extracted_sources: true,
             paths,
             limit: options.limit,
             options: LexicalOptions {
@@ -143,10 +136,9 @@ impl DirectSearchService {
             &self.writers,
         )
         .await?;
-        self.include_raw_fallback(&root, &request, &extracted.unavailable, &mut reply)
+        self.include_raw_fallback(&root, &request, &extracted.raw_paths, &mut reply)
             .await?;
         limit_matches(&mut reply, &mut extracted.matches, request.limit);
-        index_warnings.extend(extracted.warnings);
         let extracted_items = extracted::context_items(extracted.matches, &request)?;
         let structure_started = Instant::now();
         let enrichment = structure_file_limit.map(|file_limit| {
@@ -167,6 +159,7 @@ impl DirectSearchService {
         merge_extracted_items(&mut result, extracted_items, extracted.truncated);
         if let Some(rg) = &mut result.diagnostics.rg {
             rg.unindexed_files = extracted.unavailable;
+            let mut index_warnings = extracted.warnings;
             index_warnings.sort();
             index_warnings.dedup();
             rg.index_warnings = index_warnings;

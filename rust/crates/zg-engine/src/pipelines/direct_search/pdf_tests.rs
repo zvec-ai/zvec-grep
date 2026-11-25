@@ -23,17 +23,21 @@ fn fixture_with_files(texts: &[&[(u32, &str)]], names: &[&str]) -> tempfile::Tem
     fixture_with_offsets(texts, names, &[])
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Persisted fixture covers source mappings and FTS projections"
-)]
 fn fixture_with_offsets(
     texts: &[&[(u32, &str)]],
     names: &[&str],
     offsets: &[usize],
 ) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("workspace");
-    let root = dir.path();
+    write_fixture(dir.path(), texts, names, offsets);
+    dir
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Persisted fixture covers source mappings and FTS projections"
+)]
+fn write_fixture(root: &Path, texts: &[&[(u32, &str)]], names: &[&str], offsets: &[usize]) {
     let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
     let schema = EmbeddingModelInfo::new(
         ModelInfo::new("fixture", "pdf-rg", [ContentKind::Text], 32).expect("model"),
@@ -150,7 +154,6 @@ fn fixture_with_offsets(
     )
     .expect("workspace");
     write_workspace_manifest(layout.manifest_path(), &workspace).expect("publish");
-    dir
 }
 
 fn fixture() -> tempfile::TempDir {
@@ -172,6 +175,57 @@ fn options(root: &Path, query: &str) -> ContextOptions {
         limit: None,
         ..ContextOptions::default()
     }
+}
+
+#[tokio::test]
+async fn pdf_rg_uses_the_candidate_workspace_from_an_unindexed_parent() {
+    let parent = tempfile::tempdir().expect("parent");
+    let project = parent.path().join("project");
+    fs::create_dir(&project).expect("project");
+    write_fixture(
+        &project,
+        &[&[(2, "needle recovery instructions\n")]],
+        &["manual.pdf"],
+        &[],
+    );
+    let service = DirectSearchService::new();
+    for (root, paths, expected_path) in [
+        (project.as_path(), vec!["manual.pdf"], "manual.pdf"),
+        (
+            parent.path(),
+            vec!["project/manual.pdf"],
+            "project/manual.pdf",
+        ),
+        (parent.path(), vec!["project"], "project/manual.pdf"),
+        (parent.path(), vec![], "project/manual.pdf"),
+    ] {
+        let mut request = options(root, "needle");
+        request.rg_paths = paths.into_iter().map(PathBuf::from).collect();
+        let result = service.context(request).await.expect("extracted search");
+        assert_eq!(result.items.len(), 1);
+        let item = &result.items[0];
+        assert_eq!(item.relative_path, Path::new(expected_path));
+        assert_eq!(item.content, "needle recovery instructions\n");
+        assert!(matches!(&item.range, ContentRange::Pdf { pages, .. } if pages == &[2]));
+        assert_eq!(item.pdf_boxes.len(), 1);
+        let diagnostics = result.diagnostics.rg.expect("diagnostics");
+        assert!(diagnostics.index_warnings.is_empty());
+        assert!(diagnostics.unindexed_files.is_empty());
+    }
+    // A single walk can mix indexed children with ordinary raw PDFs.
+    fs::write(parent.path().join("raw.pdf"), "%PDF-1.7\nneedle raw\n").expect("raw PDF");
+    let result = service
+        .context(options(parent.path(), "needle"))
+        .await
+        .expect("mixed workspaces");
+    assert_eq!(result.items.len(), 2);
+    assert!(matches!(result.items[0].range, ContentRange::Pdf { .. }));
+    assert_eq!(result.items[1].relative_path, Path::new("raw.pdf"));
+    assert!(matches!(result.items[1].range, ContentRange::Text { .. }));
+    let diagnostics = result.diagnostics.rg.expect("diagnostics");
+    assert!(diagnostics.unindexed_files.is_empty());
+    assert!(diagnostics.index_warnings.is_empty());
+    assert!(!parent.path().join(".zvec-grep").exists());
 }
 
 #[tokio::test]

@@ -236,6 +236,30 @@ pub(crate) fn read_workspace_manifest(
     inspect_workspace_manifest(source_root, layout)?.into_workspace(false)
 }
 
+/// File enumeration needs scan settings, not a compatible index or its schema.
+/// Decode the original bytes to retain `ScanRules` validation and duplicate checks.
+pub(crate) fn read_workspace_scan(
+    layout: &WorkspaceLayout,
+) -> Result<Option<ScanRules>, EngineError> {
+    #[derive(Deserialize)]
+    struct ScanFields {
+        scan: ScanRules,
+    }
+
+    read_manifest_bytes(layout)?
+        .map(|bytes| {
+            serde_json::from_slice::<ScanFields>(&bytes)
+                .map(|fields| fields.scan)
+                .map_err(|error| {
+                    invalid_manifest(format!(
+                        "scan settings in '{}': {error}",
+                        layout.manifest_path().display()
+                    ))
+                })
+        })
+        .transpose()
+}
+
 pub(crate) fn write_workspace_manifest(
     path: &Path,
     manifest: &Workspace,
@@ -1287,6 +1311,59 @@ mod tests {
         json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["apiKey"] =
             serde_json::json!("plaintext-secret");
         assert!(decode_manifest(&json, manifest.layout()).is_err());
+    }
+
+    #[test]
+    fn scan_settings_are_independent_of_index_version_and_schema() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        assert_eq!(read_workspace_scan(&layout).expect("no manifest"), None);
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
+        for version in [2, super::super::CURRENT_INDEX_VERSION, 999] {
+            let mut value = serde_json::to_value(&manifest).expect("JSON");
+            value["indexVersion"] = version.into();
+            fs::write(layout.manifest_path(), value.to_string()).expect("manifest");
+            assert_eq!(
+                read_workspace_scan(&layout).expect("scan settings"),
+                Some(manifest.scan().clone())
+            );
+            if version != super::super::CURRENT_INDEX_VERSION {
+                assert_eq!(
+                    read_workspace_manifest(directory.path(), &layout)
+                        .expect_err("index readers still reject incompatible data")
+                        .code(),
+                    EngineError::INDEX_INCOMPATIBLE
+                );
+            }
+            value["index"] = serde_json::json!({"futureSchema": true});
+            fs::write(layout.manifest_path(), value.to_string()).expect("other index schema");
+            assert_eq!(
+                read_workspace_scan(&layout).expect("scan-only read"),
+                Some(manifest.scan().clone())
+            );
+        }
+        assert!(!layout.index_dir().exists());
+    }
+
+    #[test]
+    fn scan_settings_reject_missing_malformed_and_duplicate_fields() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        fs::create_dir(layout.storage_dir()).expect("storage");
+        for invalid in [
+            "{broken",
+            r#"{"indexVersion":2}"#,
+            r#"{"scan":null}"#,
+            r#"{"scan":{},"scan":{}}"#,
+            r#"{"scan":{"include_hidden":true,"include_hidden":false}}"#,
+            r#"{"scan":{"max_depth":-1}}"#,
+            r#"{"scan":{"included_formats":["unknown-format"]}}"#,
+            r#"{"scan":{"unknown_rule":true}}"#,
+        ] {
+            fs::write(layout.manifest_path(), invalid).expect("manifest");
+            assert!(read_workspace_scan(&layout).is_err(), "{invalid}");
+        }
     }
 
     #[test]

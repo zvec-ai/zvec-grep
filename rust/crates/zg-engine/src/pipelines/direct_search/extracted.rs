@@ -28,6 +28,9 @@ use std::{
 pub(super) struct SearchResult {
     pub matches: Vec<EntityMatches>,
     pub truncated: bool,
+    /// Files searched as raw bytes, including those outside indexed workspaces.
+    pub raw_paths: Vec<PathBuf>,
+    /// Files missing extraction within an enabled index, reported to the caller.
     pub unavailable: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
@@ -42,19 +45,7 @@ pub(super) struct EntityMatches {
     entity: Entity,
 }
 
-pub(super) fn enabled(root: &Path) -> EngineResult<bool> {
-    let start = if root.is_file() {
-        root.parent().unwrap_or(root)
-    } else {
-        root
-    };
-    let Some((root, layout)) = find_nearest_workspace(start)? else {
-        return Ok(false);
-    };
-    Ok(read_workspace_manifest(&root, &layout)?.is_some_and(|workspace| workspace.index_enabled()))
-}
-
-pub(super) fn index_warning(path: &Path, error: EngineError) -> EngineResult<String> {
+fn index_warning(path: &Path, error: EngineError) -> EngineResult<String> {
     match error.code() {
         EngineError::STORAGE_FAILURE
         | EngineError::INDEX_INCOMPATIBLE
@@ -87,12 +78,12 @@ pub(super) async fn search(
         let (root, layout) = match find_nearest_workspace(absolute.parent().unwrap_or(&absolute)) {
             Ok(Some(workspace)) => workspace,
             Ok(None) => {
-                result.unavailable.push(absolute);
+                result.raw_paths.push(absolute);
                 continue;
             }
             Err(error) => {
                 result.warnings.push(index_warning(&absolute, error)?);
-                result.unavailable.push(absolute);
+                result.raw_paths.push(absolute);
                 continue;
             }
         };
@@ -109,11 +100,13 @@ pub(super) async fn search(
             Ok(found) => found,
             Err(error) => {
                 result.warnings.push(index_warning(&root, error)?);
-                result.unavailable.extend(paths);
+                result.raw_paths.extend(paths);
                 continue;
             }
         };
         result.matches.append(&mut found.matches);
+        result.raw_paths.append(&mut found.raw_paths);
+        result.raw_paths.extend_from_slice(&found.unavailable);
         result.unavailable.append(&mut found.unavailable);
         result.truncated |= found.truncated;
     }
@@ -129,6 +122,12 @@ async fn search_workspace(
     wait: &LockWait<'_>,
     writers: &WriterContexts,
 ) -> EngineResult<SearchResult> {
+    if !read_workspace_manifest(root, &layout)?.is_some_and(|workspace| workspace.index_enabled()) {
+        return Ok(SearchResult {
+            raw_paths: paths.to_vec(),
+            ..SearchResult::default()
+        });
+    }
     let source = acquire_read_source(root, &layout, wait, "extracted.rg", Some(writers), |_| {
         Ok(Some(()))
     })
@@ -144,7 +143,7 @@ async fn search_workspace(
             .filter(crate::domain::Workspace::index_enabled)
         else {
             return Ok(SearchResult {
-                unavailable: paths,
+                raw_paths: paths,
                 ..SearchResult::default()
             });
         };
