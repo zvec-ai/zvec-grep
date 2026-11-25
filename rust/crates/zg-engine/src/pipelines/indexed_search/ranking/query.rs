@@ -16,13 +16,19 @@ pub(super) struct QueryFeatures {
     pub(super) generated: bool,
     requested_kind: Option<SymbolType>,
     pure_symbol: bool,
-    pub(super) literal_symbol: Option<String>,
+    whole_queries: Vec<String>,
     implementations: bool,
 }
 
 impl QueryFeatures {
+    #[cfg(test)]
     pub(super) fn new(query: &str) -> Self {
-        let identifiers = identifiers(query);
+        Self::from_queries(&[query])
+    }
+
+    pub(super) fn from_queries(queries: &[&str]) -> Self {
+        let query = queries.join("\n");
+        let identifiers = identifiers(&query);
         let lower = query.to_lowercase();
         let words = identifiers
             .iter()
@@ -69,7 +75,7 @@ impl QueryFeatures {
                         || name.contains(['_', ':', '.'])
                         || name.chars().any(char::is_uppercase)
                 }),
-            literal_symbol: literal_symbol(query, &identifiers),
+            whole_queries: queries.iter().copied().map(normalize_literal).collect(),
             query_tokens: identifiers
                 .iter()
                 .flat_map(|s| tokens(s))
@@ -144,6 +150,21 @@ impl QueryFeatures {
             }
         }
         features
+    }
+
+    /// Match an entire route against the stored name, including language-specific punctuation.
+    pub(super) fn directly_names_symbol(&self, code: &CodeMetadata) -> bool {
+        let Some(name) = code.symbol_name.as_deref().filter(|name| !name.is_empty()) else {
+            return false;
+        };
+        let name = name.replace('.', "::");
+        if self.whole_queries.contains(&name) {
+            return true;
+        }
+        code.scope.as_deref().is_some_and(|scope| {
+            let qualified = format!("{}::{name}", scope.replace('.', "::"));
+            self.whole_queries.contains(&qualified)
+        })
     }
 
     #[cfg(test)]
@@ -344,16 +365,13 @@ fn related(a: &str, b: &str) -> bool {
         && long.chars().count() - short.chars().count() <= 3
 }
 
-fn literal_symbol(query: &str, identifiers: &[String]) -> Option<String> {
-    let [identifier] = identifiers else {
-        return None;
-    };
-    let literal = query.trim();
-    let unquoted = literal
+fn normalize_literal(query: &str) -> String {
+    let query = query.trim();
+    query
         .strip_prefix('`')
         .and_then(|quoted| quoted.strip_suffix('`'))
-        .unwrap_or(literal);
-    (identifier == unquoted).then(|| identifier.clone())
+        .unwrap_or(query)
+        .replace('.', "::")
 }
 
 fn identifiers(query: &str) -> Vec<String> {

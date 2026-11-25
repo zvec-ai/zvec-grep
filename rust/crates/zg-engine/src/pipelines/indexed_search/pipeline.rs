@@ -19,7 +19,7 @@ use crate::{
         stage_trace::StageTrace,
     },
     domain::{
-        Content, Entity, EntityFragment, EntityId, FileId, FileRecord,
+        Content, Entity, EntityFragment, EntityId, FileId, FileRecord, TextRange,
         model::{EmbeddingModelInfo, EmbeddingPurpose},
     },
     models::{EmbeddingOptions, ModelError, ModelRuntimeLease},
@@ -66,6 +66,8 @@ pub(crate) struct SearchHit {
     pub entity: Entity,
     pub file: FileRecord,
     pub evidence: Vec<SearchEvidence>,
+    /// Source coordinates of a nested result represented by this hit.
+    pub nested_excerpt: Option<TextRange>,
     pub rank: usize,
     pub score: f64,
     pub matched_by: MatchedBy,
@@ -669,6 +671,7 @@ fn candidate_to_hit(
         entity: stored.entity,
         file: stored.file,
         evidence: loaded_evidence,
+        nested_excerpt: None,
         rank: candidate.rank,
         score: candidate.score,
         matched_by,

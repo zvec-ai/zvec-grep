@@ -59,6 +59,13 @@ fn full_preview_returns_complete_markdown_and_code_entities_across_transports()
             format!("{prefix}{entity}{suffix}"),
         )?;
     }
+    std::fs::write(
+        workspace.path().join("decoder.py"),
+        format!(
+            "class Decoder:\n    \"\"\"Decoder notes.\n{}    \"\"\"\n    def decode(self, ciphertext):\n        return decrypt(ciphertext)\n",
+            "    Additional background.\n".repeat(20)
+        ),
+    )?;
     let configure = |command: &mut Command| {
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("ZVEC_GREP_") {
@@ -97,6 +104,36 @@ fn full_preview_returns_complete_markdown_and_code_entities_across_transports()
     }
     let (guard, _) = start_server(&binary, &home, "agent", None, configure)?;
     verify_fragmented_entities(&guard.listen, workspace.path())?;
+    for mode in ["direct", "server"] {
+        for preview in ["short", "full"] {
+            let output = run(&[
+                "--mode",
+                mode,
+                "--home",
+                path_text(home.path())?,
+                "--fts",
+                "decrypt ciphertext",
+                "--glob",
+                "decoder.py",
+                "--preview",
+                preview,
+                "--refresh",
+                "off",
+            ])?;
+            assert_command_success(&output);
+            let text = String::from_utf8(output.stdout)?;
+            assert!(
+                text.contains("symbol: [class] Decoder"),
+                "{mode}/{preview}: {text}"
+            );
+            assert!(!text.contains("#2 "), "{mode}/{preview}: {text}");
+            assert!(
+                text.contains("return decrypt(ciphertext)"),
+                "{mode}/{preview}: {text}"
+            );
+            assert_eq!(text.contains("class Decoder:"), preview == "full", "{text}");
+        }
+    }
     let mut bridge = StdioBridge::spawn_with_toolset(&binary, home.path(), &guard.listen, None)?;
     bridge.request(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",

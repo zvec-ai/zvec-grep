@@ -42,9 +42,12 @@ no hard per-file cap. A code pool from a single file skips this selection
 penalty.
 
 If a class and its method both earn a result slot, the enclosing symbol covers
-both source spans. A query for a specific symbol keeps the direct match. The
-selector fills the freed slots from the remaining pool and skips symbols whose
-source contains or is contained by an existing selection in the same file.
+both source spans. Its short preview can show the matched method while its full
+preview shows the entire class. Each fused route can name a symbol to keep,
+including qualified names and names such as `#decrypt` or `~Widget`.
+The selector fills the freed slots from the remaining pool and skips symbols
+whose source contains or is contained by an existing selection in the same file.
+It then ranks the retained code hits using only those hits for file diversity.
 Sibling methods can still appear together. Once distinct code hits run out,
 subsequent documents can move up, and the result can be shorter than the limit.
 Across query groups, group coverage and global rank determine which of two

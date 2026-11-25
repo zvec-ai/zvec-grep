@@ -17,7 +17,7 @@ use crate::{
         options::QueryFilter,
         result::{ContentRange, SearchRankingTrace},
     },
-    domain::{ContentKind, EntityMetadata, FileId},
+    domain::{ContentKind, EntityMetadata, FileId, Range},
 };
 use paths::Roles;
 use query::QueryFeatures;
@@ -156,7 +156,7 @@ fn score_code(
     let mut queries = routes.iter().map(|r| r.query.as_str()).collect::<Vec<_>>();
     queries.sort_unstable();
     queries.dedup();
-    let query = QueryFeatures::new(&queries.join("\n"));
+    let query = QueryFeatures::from_queries(&queries);
     let mut overrides = Roles::overrides(&query, filter);
     let roles = hits
         .iter()
@@ -255,28 +255,51 @@ fn retain_representatives(shortlist: &mut Vec<Scored>, query: &QueryFeatures) {
             };
             let range = ContentRange::from(item.hit.entity.source_range());
             let (start, end) = range.byte_interval()?;
-            let direct = query.literal_symbol.as_deref().is_some_and(|name| {
-                code.symbol_name.as_deref() == Some(name) || item.symbol_match == "qualified_exact"
-            });
+            let direct = query.directly_names_symbol(code);
             Some((index, direct, end - start))
         })
         .collect();
     // Stable ties keep the original selection order for identical ranges.
     priority.sort_by_key(|&(_, direct, width)| (Reverse(direct), Reverse(width)));
-    let mut winners = Vec::<usize>::new();
-    let mut keep = vec![true; shortlist.len()];
-    for (index, _, _) in priority {
-        if winners
+    let mut winners = Vec::<(usize, bool)>::new();
+    let mut covered_by = vec![None; shortlist.len()];
+    for (index, direct, _) in priority {
+        if let Some(&winner) = winners
             .iter()
-            .any(|&other| nested_symbols(&shortlist[index], &shortlist[other]))
+            .find(|&&(other, _)| nested_symbols(&shortlist[index], &shortlist[other]))
         {
-            keep[index] = false;
+            covered_by[index] = Some(winner);
         } else {
-            winners.push(index);
+            winners.push((index, direct));
         }
     }
-    let mut keep = keep.into_iter();
-    shortlist.retain(|_| keep.next().expect("one flag per shortlisted item"));
+
+    // An exact symbol keeps its own preview. Otherwise use the earliest covered
+    // hit unless the representative already has a higher-ranked fragment.
+    for (index, &winner) in covered_by.iter().enumerate() {
+        let Some((parent, false)) = winner else {
+            continue;
+        };
+        let hit = &shortlist[parent].hit;
+        let has_fragment = hit
+            .evidence
+            .first()
+            .is_some_and(|e| matches!(e.fragment.range, Range::Byte(_)));
+        if hit.nested_excerpt.is_none()
+            && (index < parent || !has_fragment)
+            && let Ok((Range::Text(source), excerpt)) =
+                super::context::hit_source_ranges(&shortlist[index].hit)
+        {
+            shortlist[parent].hit.nested_excerpt = Some(excerpt.unwrap_or(source));
+        }
+    }
+    let mut covered_by = covered_by.into_iter();
+    shortlist.retain(|_| {
+        covered_by
+            .next()
+            .expect("one coverage entry per hit")
+            .is_none()
+    });
 }
 
 fn select(
@@ -308,6 +331,14 @@ fn select(
             scored.retain(|other| !nested_symbols(&item, other));
             selected.push(item);
         }
+
+        // The removed symbols influenced the original per-file penalties.
+        // Rank the surviving and backfilled hits with only their own counts.
+        let mut finalists = selected;
+        selected_per_file.clear();
+        selected =
+            std::iter::from_fn(|| take_best(&mut finalists, &mut selected_per_file, single_file))
+                .collect();
     }
 
     selected_per_file.clear();

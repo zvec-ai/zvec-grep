@@ -15,7 +15,7 @@ use crate::{
             IndexRouteDiagnostics, MatchedBy,
         },
     },
-    domain::{Content, EntityMetadata, FileRecord, Range, Workspace},
+    domain::{Content, EntityMetadata, FileRecord, Range, TextRange, Workspace},
     utils::sha256_hex,
 };
 
@@ -491,13 +491,20 @@ struct ContextItemTarget {
 }
 
 fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError> {
+    let (content_range, excerpt) = hit_source_ranges(hit)?;
+    Ok(ContextItemTarget {
+        content: content_to_text(hit.entity.content()),
+        content_range: content_range.into(),
+        content_role: ContextContentRole::Source,
+        excerpt_range: hit.nested_excerpt.or(excerpt).map(Into::into),
+    })
+}
+
+pub(super) fn hit_source_ranges(
+    hit: &SearchHit,
+) -> Result<(Range, Option<TextRange>), EngineError> {
     let Some(evidence) = hit.evidence.first() else {
-        return Ok(ContextItemTarget {
-            content: content_to_text(hit.entity.content()),
-            content_range: hit.entity.source_range().into(),
-            content_role: ContextContentRole::Source,
-            excerpt_range: None,
-        });
+        return Ok((hit.entity.source_range(), None));
     };
     let fragment = &evidence.fragment;
     let invalid_fragment = |error| {
@@ -506,12 +513,8 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             fragment.id.as_str()
         ))
     };
-    let (content, content_range, excerpt_range) = match (fragment.range, hit.entity.content()) {
-        (Range::Full, content) => (
-            content_to_text(content),
-            hit.entity.source_range().into(),
-            None,
-        ),
+    match (fragment.range, hit.entity.content()) {
+        (Range::Full, _) => Ok((hit.entity.source_range(), None)),
         (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 invalid_fragment(EngineError::invalid_argument(
@@ -540,24 +543,12 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             let whole = crate::utils::text_range_from_offsets(text, &lines, 0, text.len())
                 .map_err(invalid_fragment)?;
             let content_range = to_source(whole).map_err(invalid_fragment)?;
-            (
-                text.clone(),
-                Range::Text(content_range).into(),
-                Some(Range::Text(source).into()),
-            )
+            Ok((Range::Text(content_range), Some(source)))
         }
-        _ => {
-            return Err(invalid_fragment(EngineError::invalid_argument(
-                "fragments use Full or entity-relative byte ranges for text and code; images require Full",
-            )));
-        }
-    };
-    Ok(ContextItemTarget {
-        content,
-        content_range,
-        content_role: ContextContentRole::Source,
-        excerpt_range,
-    })
+        _ => Err(invalid_fragment(EngineError::invalid_argument(
+            "fragments use Full or entity-relative byte ranges for text and code; images require Full",
+        ))),
+    }
 }
 
 fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextItemStatus {
@@ -697,6 +688,7 @@ mod tests {
                 SearchEvidence { fragment },
                 SearchEvidence { fragment: full },
             ],
+            nested_excerpt: None,
             rank: 1,
             score: 1.0,
             matched_by: MatchedBy::Fts,
@@ -798,6 +790,7 @@ mod tests {
                 )
                 .expect("file"),
                 evidence: vec![SearchEvidence { fragment }],
+                nested_excerpt: None,
                 rank: 1,
                 score: 1.0,
                 matched_by: MatchedBy::Fts,
@@ -881,6 +874,7 @@ mod tests {
                     .expect("entity"),
                 file: file.clone(),
                 evidence: Vec::new(),
+                nested_excerpt: None,
                 rank: 1,
                 score: 1.0,
                 matched_by: MatchedBy::Fts,
