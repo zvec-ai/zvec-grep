@@ -3,7 +3,10 @@ mod paths;
 mod query;
 mod support;
 
-use std::{cmp::Ordering, collections::HashMap};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::HashMap,
+};
 
 use super::{
     pipeline::{ResolvedSearchRoute, SearchHit},
@@ -207,6 +210,75 @@ fn compare(a: &Scored, b: &Scored, a_score: f64, b_score: f64) -> Ordering {
         .then_with(|| a.hit.entity.id().as_str().cmp(b.hit.entity.id().as_str()))
 }
 
+fn take_best(
+    pool: &mut Vec<Scored>,
+    counts: &mut HashMap<FileId, u32>,
+    single_file: bool,
+) -> Option<Scored> {
+    let score = |item: &Scored| {
+        let count = counts.get(&item.hit.file.id()).copied().unwrap_or(0);
+        item.static_score / diversity_divisor(single_file, count)
+    };
+    let (best, _) = pool
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| compare(a, b, score(a), score(b)))?;
+    let best = pool.swap_remove(best);
+    *counts.entry(best.hit.file.id()).or_default() += 1;
+    Some(best)
+}
+
+fn diversity_divisor(single_file: bool, count: u32) -> f64 {
+    if single_file {
+        1.0
+    } else {
+        1.0 + FILE_DECAY * f64::from(count)
+    }
+}
+
+fn nested_symbols(left: &Scored, right: &Scored) -> bool {
+    left.hit.file.id() == right.hit.file.id()
+        && matches!(left.hit.entity.metadata(), Some(EntityMetadata::Code(_)))
+        && matches!(right.hit.entity.metadata(), Some(EntityMetadata::Code(_)))
+        && ContentRange::from(left.hit.entity.source_range())
+            .is_nested_with(&right.hit.entity.source_range().into())
+}
+
+/// Resolve conflicts only between candidates that made the original cutoff.
+fn retain_representatives(shortlist: &mut Vec<Scored>, query: &QueryFeatures) {
+    let mut priority: Vec<_> = shortlist
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let Some(EntityMetadata::Code(code)) = item.hit.entity.metadata() else {
+                return None;
+            };
+            let range = ContentRange::from(item.hit.entity.source_range());
+            let (start, end) = range.byte_interval()?;
+            let direct = query.literal_symbol.as_deref().is_some_and(|name| {
+                code.symbol_name.as_deref() == Some(name) || item.symbol_match == "qualified_exact"
+            });
+            Some((index, direct, end - start))
+        })
+        .collect();
+    // Stable ties keep the original selection order for identical ranges.
+    priority.sort_by_key(|&(_, direct, width)| (Reverse(direct), Reverse(width)));
+    let mut winners = Vec::<usize>::new();
+    let mut keep = vec![true; shortlist.len()];
+    for (index, _, _) in priority {
+        if winners
+            .iter()
+            .any(|&other| nested_symbols(&shortlist[index], &shortlist[other]))
+        {
+            keep[index] = false;
+        } else {
+            winners.push(index);
+        }
+    }
+    let mut keep = keep.into_iter();
+    shortlist.retain(|_| keep.next().expect("one flag per shortlisted item"));
+}
+
 fn select(
     mut scored: Vec<Scored>,
     query: &QueryFeatures,
@@ -217,33 +289,32 @@ fn select(
         .iter()
         .all(|s| s.hit.file.id() == scored[0].hit.file.id());
     let mut selected_per_file = HashMap::<FileId, u32>::new();
-    let mut output = Vec::with_capacity(code_ranks.len());
-    for &rank in code_ranks {
-        let effective = |item: &Scored| {
-            let count = if single_file {
-                0
-            } else {
-                selected_per_file
-                    .get(&item.hit.file.id())
-                    .copied()
-                    .unwrap_or(0)
+    let mut selected: Vec<_> = code_ranks
+        .iter()
+        .map_while(|_| take_best(&mut scored, &mut selected_per_file, single_file))
+        .collect();
+    let original_len = selected.len();
+    retain_representatives(&mut selected, query);
+    if selected.len() < original_len {
+        selected_per_file.clear();
+        for item in &selected {
+            *selected_per_file.entry(item.hit.file.id()).or_default() += 1;
+        }
+        scored.retain(|other| !selected.iter().any(|item| nested_symbols(item, other)));
+        while selected.len() < code_ranks.len() {
+            let Some(item) = take_best(&mut scored, &mut selected_per_file, single_file) else {
+                break;
             };
-            item.static_score / (1.0 + FILE_DECAY * f64::from(count))
-        };
-        let Some((best, _)) = scored
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| compare(a, b, effective(a), effective(b)))
-        else {
-            break;
-        };
-        let mut item = scored.swap_remove(best);
+            scored.retain(|other| !nested_symbols(&item, other));
+            selected.push(item);
+        }
+    }
+
+    selected_per_file.clear();
+    let mut output = Vec::with_capacity(selected.len());
+    for (mut item, &rank) in selected.into_iter().zip(code_ranks) {
         let count = selected_per_file.entry(item.hit.file.id()).or_default();
-        let factor = if single_file {
-            1.0
-        } else {
-            1.0 / (1.0 + FILE_DECAY * f64::from(*count))
-        };
+        let factor = 1.0 / diversity_divisor(single_file, *count);
         item.hit.score = item.static_score * factor;
         item.hit.rank = rank;
         if let Some(trace) = item.hit.trace.as_mut() {
@@ -268,14 +339,6 @@ fn select(
             });
         }
         *count = count.saturating_add(1);
-        if matches!(item.hit.entity.metadata(), Some(EntityMetadata::Code(_))) {
-            let range = ContentRange::from(item.hit.entity.source_range());
-            scored.retain(|other| {
-                other.hit.file.id() != item.hit.file.id()
-                    || !matches!(other.hit.entity.metadata(), Some(EntityMetadata::Code(_)))
-                    || !range.is_nested_with(&other.hit.entity.source_range().into())
-            });
-        }
         output.push(item.hit);
     }
     output

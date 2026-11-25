@@ -1,6 +1,8 @@
 use super::*;
 
-const FIXTURES: [(&str, &str, &str, &[&str]); 7] = [
+const STORE: &str = "class Store { get(key) { function get() { nested(); } return load(key); } }\n";
+
+const FIXTURES: [(&str, &str, &str, &[&str]); 8] = [
     (
         "component.vue",
         "<script lang=\"tsx\">\nfunction render() { return <Widget title={formatTitle()}>{renderBody()}</Widget>; }\n</script>\n",
@@ -19,13 +21,8 @@ const FIXTURES: [(&str, &str, &str, &[&str]); 7] = [
         "Builder",
         &["calls: init"],
     ),
-    (
-        "store.js",
-        "class Store { get(key) { function get() { nested(); } return load(key); } }\n",
-        "get",
-        // The method and its same-named nested function are separate entities.
-        &["calls: nested", "calls: nested, load"],
-    ),
+    ("store.js", STORE, "get", &["calls: nested, load"]),
+    ("store.js", STORE, "Store::get::get", &["calls: nested"]),
     (
         "reader.go",
         "package p\ntype Reader interface {\nRead()\nClose() error\n}\n",
@@ -113,7 +110,8 @@ fn stored_outline_context_is_consistent_in_direct_and_server_modes() -> Result<(
             assert_command_success(&output);
             let text = String::from_utf8(output.stdout)?;
             assert!(text.contains(path), "{text}");
-            assert!(text.contains(&format!("Symbol: {query}")), "{text}");
+            let name = query.rsplit("::").next().expect("symbol name");
+            assert!(text.contains(&format!("Symbol: {name}")), "{text}");
             let mut calls = text
                 .lines()
                 .map(str::trim)

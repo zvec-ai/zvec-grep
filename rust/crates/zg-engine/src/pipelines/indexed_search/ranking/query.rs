@@ -16,6 +16,7 @@ pub(super) struct QueryFeatures {
     pub(super) generated: bool,
     requested_kind: Option<SymbolType>,
     pure_symbol: bool,
+    pub(super) literal_symbol: Option<String>,
     implementations: bool,
 }
 
@@ -58,6 +59,11 @@ impl QueryFeatures {
         ]
         .into_iter()
         .find_map(|(word, kind)| has(word).then_some(kind));
+        let literal = query.trim();
+        let literal = literal
+            .strip_prefix('`')
+            .and_then(|quoted| quoted.strip_suffix('`'))
+            .unwrap_or(literal);
         Self {
             implementations: has("implementations")
                 || lower.contains("实现类")
@@ -68,6 +74,10 @@ impl QueryFeatures {
                         || name.contains(['_', ':', '.'])
                         || name.chars().any(char::is_uppercase)
                 }),
+            literal_symbol: identifiers
+                .iter()
+                .find(|name| name.as_str() == literal)
+                .cloned(),
             query_tokens: identifiers
                 .iter()
                 .flat_map(|s| tokens(s))

@@ -41,13 +41,14 @@ the same file receive a soft factor of `1 / (1 + 0.5 * selected_count)`. There i
 no hard per-file cap. A code pool from a single file skips this selection
 penalty.
 
-When two code symbols in the same file have source spans such that one fully
-contains the other, the first one selected keeps the slot. A class and its
-method therefore occupy one position. If the method wins, its siblings can
-still be selected. Selection continues down the candidate pool to fill the
-limit. Once distinct code hits run out, subsequent documents can move up.
-The result can be shorter than the limit. For multiple query groups, the final
-merge applies the same rule to the results each group returned.
+If a class and its method both earn a result slot, the enclosing symbol covers
+both source spans. A query for a specific symbol keeps the direct match. The
+selector fills the freed slots from the remaining pool and skips symbols whose
+source contains or is contained by an existing selection in the same file.
+Sibling methods can still appear together. Once distinct code hits run out,
+subsequent documents can move up, and the result can be shorter than the limit.
+Across query groups, group coverage and global rank determine which of two
+nested group results appears in the merged list.
 
 Before selection, a file's representative definition can gain up to 0.15 from
 at most two additional definitions. Support must have name or path evidence,

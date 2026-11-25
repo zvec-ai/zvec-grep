@@ -181,7 +181,7 @@ fn a_class_replaces_its_nested_method_and_backfills_the_top_ten() {
 }
 
 #[test]
-fn a_higher_ranked_method_keeps_its_siblings_and_documents_can_fill_vacancies() {
+fn a_named_method_keeps_its_siblings_and_documents_can_fill_vacancies() {
     let hits = vec![
         symbol_at("parse", 1, SymbolType::Function, 10, 20),
         symbol_at("Parser", 2, SymbolType::Class, 0, 100),
@@ -190,7 +190,7 @@ fn a_higher_ranked_method_keeps_its_siblings_and_documents_can_fill_vacancies() 
         document("notes", 3, "notes.md", 0.8, 5),
     ];
     for limit in [4, 10] {
-        let out = run("behavior", hits.clone(), &QueryFilter::default(), limit);
+        let out = run("parse", hits.clone(), &QueryFilter::default(), limit);
         assert_eq!(
             out.iter()
                 .map(|hit| (hit.entity.id().as_str(), hit.rank))
@@ -198,6 +198,28 @@ fn a_higher_ranked_method_keeps_its_siblings_and_documents_can_fill_vacancies() 
             [("parse", 1), ("validate", 2), ("guide", 3), ("notes", 4)]
         );
     }
+}
+
+#[test]
+fn a_broader_query_keeps_the_enclosing_source_only_if_it_earned_a_slot() {
+    let hits = vec![
+        symbol_at("from_index", 1, SymbolType::Function, 10, 20),
+        symbol_at("Coordinates", 2, SymbolType::Class, 0, 100),
+        symbol_at("materialize", 3, SymbolType::Function, 100, 120),
+    ];
+    let query = "how does from_index handle conversion";
+    let filter = QueryFilter::default();
+    let top_one = run(query, hits.clone(), &filter, 1);
+    assert_eq!(top_one[0].entity.id().as_str(), "from_index");
+
+    let out = run(query, hits, &filter, 2);
+    assert_eq!(
+        out.iter()
+            .map(|hit| hit.entity.id().as_str())
+            .collect::<Vec<_>>(),
+        ["Coordinates", "materialize"]
+    );
+    assert_eq!(out[0].trace.as_ref().expect("trace").fusion.rank, 2);
 }
 
 #[test]
