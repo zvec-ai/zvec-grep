@@ -45,6 +45,10 @@ in-process; its v2 request shape is unchanged.
 Compatible existing indexes retain their stored model, including during
 `--rebuild` without `--embedding`; supply a model explicitly to switch it.
 
+After upgrading from a version that skipped module-level code such as Python
+lookup tables, run `zg --index --rebuild` once to make that code searchable in
+unchanged files. Incremental indexing reuses files with matching snapshots.
+
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 

@@ -1,11 +1,14 @@
 mod adapter;
 mod outline;
+mod statements;
 
 pub(crate) use outline::code_outline;
 
 use tree_sitter::{Language, Node, Parser};
 
 use std::collections::HashMap;
+
+use self::statements::{append_statement_gaps, extract_symbol_free_file};
 
 use crate::{
     EngineError,
@@ -177,7 +180,14 @@ fn assemble_output(
         // Fragments are appended contiguously in walk order, so the output
         // length before each append is that entity's head fragment index.
         entity_heads.push(output.len());
-        append_entity(source, entity, max_chars, overlap_chars, &mut output);
+        append_code_entity(
+            source,
+            code_node_range(entity.node),
+            Some(code_entity_metadata(entity)),
+            max_chars,
+            overlap_chars,
+            &mut output,
+        );
     }
     // Anonymous retrieval chunks follow the symbols, preserving graph ordinals.
     append_code_gaps(
@@ -200,7 +210,13 @@ fn assemble_output(
             .then(|| partition_walk(graph_context, entity_heads))
             .filter(|graph| !graph.directives.is_empty());
         return ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
+            fragments: extract_symbol_free_file(
+                source,
+                tree.root_node(),
+                code_format,
+                max_chars,
+                overlap_chars,
+            ),
             graph: partitioned,
         };
     }
@@ -666,25 +682,32 @@ fn walk_code_node<'tree>(
     }
 }
 
-fn append_entity(
+fn code_node_range(node: Node<'_>) -> TextRange {
+    code_node_span(node, node)
+}
+
+fn code_node_span(first: Node<'_>, last: Node<'_>) -> TextRange {
+    TextRange::from_coordinates(
+        first.start_byte(),
+        last.end_byte(),
+        first.start_position().row + 1,
+        last.end_position().row + 1,
+        first.start_position().column,
+        last.end_position().column,
+    )
+    .expect("parser coordinates refer to source text")
+}
+
+fn append_code_entity(
     source: &TextSource,
-    entity: &CodeEntity<'_>,
+    range: TextRange,
+    metadata: Option<EntityMetadata>,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
-    let metadata = code_entity_metadata(entity);
     let (content_max, content_overlap) =
-        chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
-    let range = TextRange::from_coordinates(
-        entity.node.start_byte(),
-        entity.node.end_byte(),
-        entity.node.start_position().row + 1,
-        entity.node.end_position().row + 1,
-        entity.node.start_position().column,
-        entity.node.end_position().column,
-    )
-    .expect("parser coordinates refer to source text");
+        chunk_options_for_metadata(max_chars, overlap_chars, metadata.as_ref());
     let content = crate::utils::slice_text(
         &source.text,
         range.start_byte_offset(),
@@ -697,15 +720,13 @@ fn append_entity(
         source_range: Range::Text(range),
         fragments: text_fragments(&content, content_max, content_overlap),
         content: Content::Text(content),
-        metadata: Some(metadata),
+        metadata,
     });
 }
 
-// PHP retains all code outside declarations. JS/TS also needs the bodies of
-// callbacks with no symbol owner: excluding their local variables must not
-// remove their contents from retrieval. C/C++ keeps the text no entity bounded
-// — a file whose only entity owns a call still has to answer for the constants,
-// macros and includes beside it. Existing entities remain authoritative.
+// Preserve C/C++ and PHP's full-text gaps. In the other mixed-symbol files,
+// use statement boundaries so a long declaration remains one searchable
+// entity and syntax surrounding an existing symbol does not become a result.
 fn append_code_gaps(
     source: &TextSource,
     entities: &[CodeEntity<'_>],
@@ -715,16 +736,7 @@ fn append_code_gaps(
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
-    if output.is_empty()
-        || !matches!(
-            format,
-            FileFormat::C
-                | FileFormat::Cpp
-                | FileFormat::JavaScript
-                | FileFormat::Php
-                | FileFormat::TypeScript
-        )
-    {
+    if output.is_empty() {
         return;
     }
     let mut covered = Vec::with_capacity(entities.len() * 2);
@@ -762,28 +774,17 @@ fn append_code_gaps(
     }
     gaps.push((offset, source.text.len()));
 
-    // A JS/TS gap is a statement of a body no entity owns; only callbacks
-    // carry contents worth searching, and indexing the rest would duplicate
-    // the statements between declarations. C/C++ and PHP gaps are the whole
-    // uncovered text, so they are taken as they are.
-    if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript) {
-        let mut callbacks = Vec::new();
-        collect_uncovered_callbacks(root, &gaps, &mut callbacks);
-        gaps = callbacks
-            .into_iter()
-            .flat_map(|(start, end)| {
-                let first = gaps.partition_point(|&(_, gap_end)| gap_end <= start);
-                gaps[first..]
-                    .iter()
-                    .take_while(move |&&(gap_start, _)| gap_start < end)
-                    .map(move |&(gap_start, gap_end)| (start.max(gap_start), end.min(gap_end)))
-            })
-            .collect();
-    }
-    if gaps.is_empty() {
+    if !matches!(format, FileFormat::C | FileFormat::Cpp | FileFormat::Php) {
+        append_statement_gaps(
+            source,
+            root,
+            format,
+            &gaps,
+            (max_chars, overlap_chars),
+            output,
+        );
         return;
     }
-
     let line_offsets = line_byte_offsets(&source.text);
     let mut gap_source = source.clone();
     for (start, end) in gaps {
@@ -798,31 +799,6 @@ fn append_code_gaps(
         let remapped =
             remap_script_block_entities(source, chunks, output.len(), &line_offsets, text_start);
         output.extend(remapped);
-    }
-}
-
-fn collect_uncovered_callbacks(
-    node: Node<'_>,
-    gaps: &[(usize, usize)],
-    callbacks: &mut Vec<(usize, usize)>,
-) {
-    let first = gaps.partition_point(|&(_, end)| end <= node.start_byte());
-    if gaps
-        .get(first)
-        .is_none_or(|&(start, _)| start >= node.end_byte())
-    {
-        return;
-    }
-    if matches!(
-        node.kind(),
-        "arrow_function" | "function_expression" | "generator_function" | "method_definition"
-    ) {
-        // An outer callback contains its nested callbacks; do not index both.
-        callbacks.push((node.start_byte(), node.end_byte()));
-        return;
-    }
-    for child in named_children(node) {
-        collect_uncovered_callbacks(child, gaps, callbacks);
     }
 }
 
@@ -3139,6 +3115,215 @@ public class Service {
     }
 
     #[test]
+    fn unowned_module_statements_are_complete_entities_with_searchable_fragments() {
+        let go = "package config\r\nfunc ready() {}";
+        let rust = "use std::fmt;\r\nfn ready() {}";
+        let js = "import { configure } from './config';\r\nexport const ready = 1;";
+        let python = "import sys\r\ndef ready(): pass";
+        let js_statements = [
+            "configure('route_marker_🙂');",
+            "module.exports.limit = 'ordinary_assignment';",
+            "const { handler } = configure('destructured');",
+        ];
+        let fixtures: &[(FileFormat, &str, &[&str])] = &[
+            (
+                FileFormat::Go,
+                go,
+                &[
+                    "const (\r\n  Limit = 42\r\n  Name = \"go_marker_🙂\"\r\n)",
+                    "var Labels = map[string]int{\"larger_table\": 42}",
+                ],
+            ),
+            (
+                FileFormat::Rust,
+                rust,
+                &[
+                    "macro_rules! make_limit { () => { const LIMIT: u32 = 42; }; }",
+                    "make_limit!();",
+                    "macro_rules! ffi_signatures { () => { fn version() -> u32; }; }",
+                    "unsafe extern \"C\" { ffi_signatures!(); }",
+                    "extern crate core as local_core;",
+                ],
+            ),
+            (
+                FileFormat::Java,
+                "void main() {}",
+                &["String greeting = \"compact_field\";"],
+            ),
+            (FileFormat::JavaScript, js, &js_statements),
+            (FileFormat::TypeScript, js, &js_statements),
+            (
+                FileFormat::TypeScript,
+                "const ready = 1;",
+                &[
+                    "import Tools = Backend.Tools;",
+                    "declare const { handler }: Handlers;",
+                    "export /* CommonJS */ = { run: () => 'export_assignment_marker' };",
+                ],
+            ),
+            (
+                FileFormat::Python,
+                python,
+                &[
+                    "config.mode = 'attribute_assignment'",
+                    "if sys.platform == 'linux':\r\n    configure('platform_marker')",
+                ],
+            ),
+        ];
+        for &(format, preamble, expected) in fixtures {
+            let text = format!("{preamble}\r\n{}\r\n", expected.join("\r\n"));
+            let source = test_source(format, "mixed", &text);
+            for collect_graph in [false, true] {
+                let output = super::extract_for_indexing(
+                    &source,
+                    ChunkOptions {
+                        max_chunk_chars: Some(20),
+                        chunk_overlap_chars: Some(3),
+                    },
+                    collect_graph,
+                )
+                .expect("mixed-file extraction");
+                assert_eq!(plain_chunks(&output.fragments), expected, "{format:?}");
+                let existing = if format == FileFormat::Java {
+                    "main"
+                } else {
+                    "ready"
+                };
+                assert_eq!(named(&output.fragments, existing).index, 0);
+                for entity in &output.fragments {
+                    assert_source_backed(&source, entity);
+                    if test_metadata(entity).is_none()
+                        && let Content::Code(content) = &entity.content
+                        && crate::utils::utf16_len(content) > 20
+                    {
+                        assert!(entity.fragments.len() > 1, "{format:?}");
+                    }
+                }
+                if let Some(graph) = output.graph {
+                    assert_eq!(graph.head_fragment_indices, [0]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_files_group_adjacent_short_statements_within_the_fragment_budget() {
+        let table = "TABLE = [\r\n    'a multiline table',\r\n]";
+        let text = [
+            "def first(): pass",
+            "A='🙂'",
+            "B='🙂'",
+            "C=3",
+            "",
+            "D=4",
+            "# boundary",
+            "E=5",
+            "if FLAG:",
+            "    def separator(): pass",
+            "    load()",
+            "F=6",
+            table,
+            "G=7",
+            "H=8",
+        ]
+        .join("\r\n");
+        let source = test_source(FileFormat::Python, "mixed.py", &text);
+        let options = ChunkOptions {
+            max_chunk_chars: Some(14),
+            chunk_overlap_chars: Some(2),
+        };
+        let output = super::extract_for_indexing(&source, options, true).expect("mixed extraction");
+        assert_eq!(
+            plain_chunks(&output.fragments),
+            [
+                "A='🙂'\r\nB='🙂'",
+                "C=3",
+                "D=4",
+                "E=5",
+                "if FLAG:",
+                "load()",
+                "F=6",
+                table,
+                "G=7\r\nH=8",
+            ]
+        );
+        assert_eq!(
+            output.graph.expect("call graph").head_fragment_indices,
+            [0, 1]
+        );
+        assert_eq!(named(&output.fragments, "separator").index, 1);
+        for entity in &output.fragments {
+            assert_source_backed(&source, entity);
+        }
+
+        let js = test_source(
+            FileFormat::JavaScript,
+            "mixed.js",
+            "function first() {} a();  b();",
+        );
+        let output = extract(&js, options).expect("same-line statements");
+        assert_eq!(plain_chunks(&output), ["a();  b();"]);
+    }
+
+    #[test]
+    fn symbol_free_scripts_skip_empty_statements_beside_searchable_source() {
+        let call = "configure('long_enough_for_several_fragments');";
+        let source = test_source(FileFormat::JavaScript, "setup.js", &format!("{call};;;"));
+        let entities = extract(
+            &source,
+            ChunkOptions {
+                max_chunk_chars: Some(20),
+                chunk_overlap_chars: Some(3),
+            },
+        )
+        .expect("script extraction");
+        assert_eq!(plain_chunks(&entities), [call]);
+    }
+
+    #[test]
+    fn keeps_conditions_calls_and_object_properties_outside_nested_symbols() {
+        let javascript = concat!(
+            "export const ready = 1;\n",
+            "suite('outside_label', () => {\n",
+            "  /** NESTED_DOC_MARKER */\n",
+            "  function nested() { return 'nested_symbol_body'; }\n",
+            "  // CALLBACK_ONLY_MARKER\n",
+            "});\n",
+            "export const config = { option: 'plain_property', run() { return 'method_body'; } };",
+        );
+        for format in [FileFormat::JavaScript, FileFormat::TypeScript] {
+            let source = test_source(format, "mixed", javascript);
+            let entities = extract(&source, ChunkOptions::default()).expect("mixed JS extraction");
+            let anonymous = plain_chunks(&entities);
+            assert_eq!(anonymous.len(), 3, "{format:?}: {anonymous:?}");
+            assert!(anonymous[0].contains("suite('outside_label'"));
+            assert!(anonymous[1].contains("CALLBACK_ONLY_MARKER"));
+            assert!(anonymous[2].contains("option: 'plain_property'"));
+            assert!(
+                !anonymous
+                    .iter()
+                    .any(|chunk| chunk.contains("nested_symbol_body")
+                        || chunk.contains("method_body")
+                        || chunk.contains("NESTED_DOC_MARKER"))
+            );
+        }
+        let python = "if FEATURE_FLAG:\r\n    def active(): return 'named_value'\r\n    configure('after_definition')";
+        let source = test_source(FileFormat::Python, "mixed.py", python);
+        let entities = extract(&source, ChunkOptions::default()).expect("conditional extraction");
+        assert_eq!(
+            plain_chunks(&entities),
+            ["if FEATURE_FLAG:", "configure('after_definition')"]
+        );
+        assert_eq!(
+            test_content(named(&entities, "active")),
+            Content::Code("def active(): return 'named_value'".into())
+        );
+        for entity in &entities {
+            assert_source_backed(&source, entity);
+        }
+    }
+
+    #[test]
     fn keeps_unowned_callbacks_searchable_without_local_symbols() {
         let text = "const head = 1;\n\
                     function helper() {}\n\
@@ -4156,5 +4341,176 @@ public class Service {
         let fragments = extract(&member, ChunkOptions::default()).expect("py member extraction");
         // The leading receiver is excluded; class members are not importable.
         assert_eq!(code_fields(named(&fragments, "fetch")), (Some(1), false));
+    }
+
+    #[test]
+    fn python_module_assignments_preserve_the_whole_value_across_fragments() {
+        let table = concat!(
+            "_SPECIAL_METHODS_PARAMS: dict[str, int] = {\n",
+            "    '__copy__': 0,\n",
+            "    '__deepcopy__': 1,\n",
+            "    '__setattr__': 2,\n",
+            "}",
+        );
+        let settings = [
+            "from plugin import first, factory",
+            "# cookie policy 🍪",
+            table,
+            "len = 1",
+            "dispatch = first",
+            "dispatch = factory()",
+        ]
+        .join("\n");
+        let with_caller = format!("{settings}\ndef caller():\n    return dispatch()");
+        for (body, has_caller) in [(&settings, false), (&with_caller, true)] {
+            let source = test_source(FileFormat::Python, "signatures.py", body);
+            for collect_graph in [false, true] {
+                let output = super::extract_for_indexing(
+                    &source,
+                    ChunkOptions {
+                        max_chunk_chars: Some(64),
+                        chunk_overlap_chars: Some(8),
+                    },
+                    collect_graph,
+                )
+                .expect("python extraction");
+                let entity = output
+                    .fragments
+                    .iter()
+                    .find(|entity| matches!(&entity.content, Content::Code(text) if text == table))
+                    .expect("one complete dictionary assignment");
+                assert!(entity.metadata.is_none());
+                assert!(
+                    matches!(entity.source_range, Range::Text(r) if r.start_line() == 3 && r.end_line() == 7)
+                );
+                assert!(entity.fragments.len() > 1);
+                assert_source_backed(&source, entity);
+                let Range::Text(table_range) = entity.source_range else {
+                    panic!("expected a source range");
+                };
+                assert!(
+                    output
+                        .fragments
+                        .iter()
+                        .filter(|item| item.index != entity.index)
+                        .all(|item| {
+                            matches!(item.source_range, Range::Text(r)
+                        if r.end_byte_offset() <= table_range.start_byte_offset()
+                            || r.start_byte_offset() >= table_range.end_byte_offset())
+                        })
+                );
+                let names: Vec<_> = output
+                    .fragments
+                    .iter()
+                    .filter_map(|entity| {
+                        let EntityMetadata::Code(code) = entity.metadata.as_ref()? else {
+                            return None;
+                        };
+                        code.symbol_name.as_deref()
+                    })
+                    .collect();
+                if has_caller {
+                    assert_eq!(names, ["caller"]);
+                    if collect_graph {
+                        let graph = output.graph.expect("call graph");
+                        assert!(graph.resolved.is_empty());
+                        assert!(graph.pending.iter().any(|edge| edge.ref_name == "dispatch"));
+                    }
+                } else {
+                    assert!(names.is_empty());
+                    assert!(output.graph.is_none());
+                    for text in ["from plugin import first, factory", "# cookie policy"] {
+                        assert!(
+                            output.fragments.iter().any(
+                                |e| matches!(&e.content, Content::Code(s) if s.contains(text))
+                            )
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_statements_in_a_long_script_keep_the_original_text_chunks() {
+        let script = (0..80)
+            .map(|index| format!("record('数{index}');"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = test_source(FileFormat::Python, "script.py", &script);
+        let plain = super::fallback(&source, 80, 12);
+        assert!(plain.len() > 1 && plain.len() < 80);
+        let options = ChunkOptions {
+            max_chunk_chars: Some(80),
+            chunk_overlap_chars: Some(12),
+        };
+        let actual =
+            super::extract_code(&source, options, false, false).expect("script extraction");
+        assert_eq!(actual.fragments, plain);
+    }
+
+    #[test]
+    fn declaration_only_files_keep_long_go_constants_and_rust_macros_together() {
+        for (format, path, prefix, declaration) in [
+            (
+                FileFormat::Go,
+                "limits.go",
+                "package limits",
+                "const (\n  limitFastPath = 1234\n  limitSlowPath = 5678\n)",
+            ),
+            (
+                FileFormat::Rust,
+                "limits.rs",
+                "// Shared limits.",
+                "macro_rules! named_limits {\n  () => { (1234, 5678) };\n}",
+            ),
+        ] {
+            let source = test_source(format, path, &format!("{prefix}\n{declaration}"));
+            let entities = extract(
+                &source,
+                ChunkOptions {
+                    max_chunk_chars: Some(32),
+                    chunk_overlap_chars: Some(4),
+                },
+            )
+            .expect("declaration extraction");
+            assert!(
+                entities
+                    .iter()
+                    .any(|e| matches!(&e.content, Content::Code(s) if s == prefix)),
+                "{format:?} prefix {prefix:?} missing from {entities:?}"
+            );
+            let entity = entities
+                .iter()
+                .find(|e| matches!(&e.content, Content::Code(s) if s == declaration))
+                .unwrap_or_else(|| {
+                    panic!("{format:?} declaration {declaration:?} missing from {entities:?}")
+                });
+            assert!(entity.fragments.len() > 1);
+            assert_source_backed(&source, entity);
+
+            let short = extract(&source, ChunkOptions::default()).expect("whole-file fallback");
+            assert_eq!(short.len(), 1);
+            assert_eq!(test_content(&short[0]), Content::Code(source.text.clone()));
+        }
+    }
+
+    #[test]
+    fn malformed_go_declarations_keep_the_text_fallback() {
+        // Both a missing closing delimiter and a missing separator between
+        // two complete declarations remain invalid after adding a final LF.
+        for body in [
+            "package limits\nconst (\n  limitFastPath = 1234\n",
+            "package limits\nconst limitFastPath = 1234 const limitSlowPath = 5678",
+        ] {
+            let source = test_source(FileFormat::Go, "limits.go", body);
+            let options = ChunkOptions {
+                max_chunk_chars: Some(16),
+                chunk_overlap_chars: Some(2),
+            };
+            let output =
+                super::extract_code(&source, options, false, false).expect("Go extraction");
+            assert_eq!(output.fragments, super::fallback(&source, 16, 2), "{body}");
+        }
     }
 }
