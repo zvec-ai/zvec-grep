@@ -16,14 +16,14 @@ use crate::{
         SymbolDefinition, SymbolRelationships,
     },
     domain::{
-        CodeMetadata, Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind,
-        Language, Range,
+        CodeMetadata, EdgeProvenance, Entity, EntityId, EntityMetadata, FileEdge, FileRecord,
+        GraphEdgeKind, Language, Range,
     },
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
         ReadView,
         graph::Direction,
-        parameter_evidence,
+        parameter_evidence, qualifier_evidence,
         types::{StorageSearchFilter, StoredEntity},
     },
 };
@@ -276,7 +276,7 @@ fn collect_match(
         direction,
         kinds,
         limit.saturating_add(1),
-        &[],
+        |_| false,
         signal,
     )?;
     // A call through a base reference dispatches into the body that overrides
@@ -297,16 +297,25 @@ fn collect_match(
     }
     let truncated = edges.len() > limit;
     edges.truncate(limit);
-    let targets: Vec<_> = edges
+    // The query direction picks the other endpoint, not the root's position in
+    // the edge: an inherited caller may be the queried body itself, and its
+    // relationship is still the incoming one the query asked for.
+    let endpoints: Vec<_> = edges
         .iter()
-        .map(|(edge, _)| {
-            EntityId::from_string(if edge.source == id.as_str() {
-                edge.target.clone()
-            } else {
-                edge.source.clone()
-            })
+        .map(|(edge, _)| match (direction, edge.source == edge.target) {
+            (_, true) => (EntityId::from_string(edge.source.clone()), Direction::Both),
+            (Direction::In, false) => (EntityId::from_string(edge.source.clone()), Direction::In),
+            (Direction::Out, false) => (EntityId::from_string(edge.target.clone()), Direction::Out),
+            (Direction::Both, false) => {
+                if edge.source == id.as_str() {
+                    (EntityId::from_string(edge.target.clone()), Direction::Out)
+                } else {
+                    (EntityId::from_string(edge.source.clone()), Direction::In)
+                }
+            }
         })
         .collect();
+    let targets: Vec<_> = endpoints.iter().map(|(target, _)| target.clone()).collect();
     let missing: Vec<_> = targets
         .iter()
         .filter(|target| !symbols.contains_key(*target))
@@ -315,31 +324,27 @@ fn collect_match(
         .into_iter()
         .collect();
     check_cancelled(signal)?;
-    let endpoints = get_entities(storage, &missing)?;
+    let described = get_entities(storage, &missing)?;
     check_cancelled(signal)?;
     for id in missing {
-        symbols.insert(id.clone(), endpoints.get(&id).and_then(describe));
+        symbols.insert(id.clone(), described.get(&id).and_then(describe));
     }
     Ok(Some(SymbolRelationships {
         symbol,
         truncated,
         edges: edges
             .into_iter()
-            .zip(targets)
-            .map(|((edge, file_path), target)| RelationshipEdge {
-                kind: edge.kind,
-                direction: if edge.source == edge.target {
-                    Direction::Both
-                } else if edge.source == id.as_str() {
-                    Direction::Out
-                } else {
-                    Direction::In
+            .zip(endpoints)
+            .map(
+                |((edge, file_path), (target, edge_direction))| RelationshipEdge {
+                    kind: edge.kind,
+                    direction: edge_direction,
+                    file_path,
+                    symbol: symbols.get(&target).cloned().flatten(),
+                    line: edge.line,
+                    column: edge.column,
                 },
-                file_path,
-                symbol: symbols.get(&target).cloned().flatten(),
-                line: edge.line,
-                column: edge.column,
-            })
+            )
             .collect(),
     }))
 }
@@ -358,12 +363,18 @@ fn inherited_callers(
         return Ok(Vec::new());
     }
     let members = overridden_members(storage, stored, signal)?;
-    // The body that overrides a base member may name that base explicitly to
-    // reach the implementation it replaced (`Derived::Func() { Base::Func(); }`).
-    // The row lands on the base member like any other call, but the body it is
-    // written in is the one being queried, so it answers nothing and must not
-    // take a slot: the limit counts callers, not rows.
-    let excluded = [stored.entity.id().as_str()];
+    // A call site that spells the base scope calls that implementation directly,
+    // whatever the object it is written through would dispatch to
+    // (`Derived::Func() { Base::Func(); }`). It answers nothing here, and the
+    // body it is written in is irrelevant: a helper beside the override spells
+    // it the same way. A call through a base reference states no scope and does
+    // dispatch (`Base& b = *this; b.f();`), so it stays a caller.
+    let skip = |edge: &FileEdge| {
+        matches!(
+            edge.provenance,
+            EdgeProvenance::QualifiedNameMatch | EdgeProvenance::ArityBound
+        )
+    };
     let mut edges = Vec::new();
     for member in &members {
         let Some(spare) = limit.checked_sub(edges.len()).filter(|spare| *spare > 0) else {
@@ -375,7 +386,7 @@ fn inherited_callers(
             Direction::In,
             Some(&[GraphEdgeKind::Calls]),
             spare,
-            &excluded,
+            skip,
             signal,
         )?);
     }
@@ -414,49 +425,225 @@ fn overridden_members(
     if bases.is_empty() {
         return Ok(Vec::new());
     }
-    // Each base's same-named member is where a call through that base is stored;
-    // a base that does not declare the member contributes nothing.
-    let base_metadata = storage.fetch_code_metadata(&bases)?;
-    let mut base_scopes: Vec<String> = Vec::new();
-    for base in &bases {
-        if let Some((_, metadata)) = base_metadata.get(base)
-            && let Some(scope) = qualified_metadata(metadata)
-            && !base_scopes.contains(&scope)
-        {
-            base_scopes.push(scope);
-        }
-    }
-    let mut candidates: Vec<EntityId> = Vec::new();
-    for scope in base_scopes {
+    // A base's member is what that class body declares: the qualified name is
+    // shared by every target that declares the class, and their members are
+    // different symbols however alike they look.
+    let mut candidates: Vec<(usize, EntityId)> = Vec::new();
+    for (distance, base) in &bases {
         check_cancelled(signal)?;
-        for (id, _) in select_symbols(storage, member, Some(&scope), None, MAX_SYMBOL_MATCHES)? {
-            if id.as_str() != stored.entity.id().as_str() && !candidates.contains(&id) {
-                candidates.push(id);
+        for id in declared_members(storage, base, member, stored.entity.id(), signal)? {
+            if !candidates.iter().any(|(_, known)| *known == id) {
+                candidates.push((*distance, id));
             }
         }
     }
-    // A call dispatches only through a virtual base member: a non-virtual one
-    // is merely hidden by the same-named body, and the call stays the base's.
-    // The specifier is written once, though, and not always on the entity the
-    // call reaches: `virtual void Func();` stands in the header while the body
-    // that carries the call sites writes plain `void Base::Func()`, so the two
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A call dispatches only through a virtual member that takes the derived
+    // body's own parameters and qualifiers: an arity alone cannot tell `int`
+    // from `double`, and a member qualified `const` is another overload. The
+    // specifier is written once, though, and not always on the entity the call
+    // reaches: `virtual void Func();` stands in the header while the body that
+    // carries the call sites writes plain `void Base::Func()`, so the two
     // spellings are one member and either one marks it. An override that
     // repeats only `override` marks its own member the same way.
-    let declared = storage.fetch_code_metadata(&candidates)?;
-    let marked: Vec<&CodeMetadata> = candidates
-        .iter()
-        .filter_map(|id| declared.get(id).map(|(_, metadata)| metadata))
-        .filter(|base| is_virtual(base) && same_arity(metadata.arity, base.arity))
+    let declared: HashMap<EntityId, CodeMetadata> = storage
+        .fetch_code_metadata(
+            &candidates
+                .iter()
+                .map(|(_, id)| id.clone())
+                .collect::<Vec<_>>(),
+        )?
+        .into_iter()
+        .map(|(id, (_, metadata))| (id, metadata))
         .collect();
-    Ok(candidates
+    let derived_parameters = parameter_evidence(metadata.signature.as_deref());
+    let derived_qualifiers = qualifier_evidence(metadata.signature.as_deref());
+    let matched: Vec<(usize, &EntityId, &CodeMetadata)> = candidates
+        .iter()
+        .filter_map(|(distance, id)| {
+            let base = declared.get(id)?;
+            let parameters = parameter_evidence(base.signature.as_deref());
+            let qualifiers = qualifier_evidence(base.signature.as_deref());
+            (same_parameters(
+                metadata.arity,
+                derived_parameters.as_deref(),
+                base.arity,
+                parameters.as_deref(),
+            ) && same_qualifiers(derived_qualifiers.as_deref(), qualifiers.as_deref()))
+            .then_some((*distance, id, base))
+        })
+        .collect();
+    // Virtual status is inherited too: `Base` writes `virtual void f()`,
+    // `Mid : Base` writes plain `void f() {}`, and `Leaf : Mid` still
+    // overrides a virtual member. Candidates follow the base walk nearest
+    // first, so a virtual spelling at the same distance (the declaration and
+    // body of one member) or at a greater one (a higher base) marks this one.
+    // Siblings at one distance are separate classes and mark nothing.
+    let virtual_members: Vec<bool> = matched
+        .iter()
+        .map(|(distance, id, base)| {
+            is_virtual(base)
+                || matched.iter().any(|(other_distance, other_id, other)| {
+                    other_id != id
+                        && *other_distance >= *distance
+                        && (*other_distance > *distance || same_member(base, other))
+                        && is_virtual(other)
+                })
+        })
+        .collect();
+    Ok(matched
+        .into_iter()
+        .zip(virtual_members)
+        .filter(|(_, dispatches)| *dispatches)
+        .map(|((_, id, _), _)| id.clone())
+        .collect())
+}
+
+/// Whether two spellings state one member's qualifiers: the lists their
+/// signatures state when both are readable, and no disagreement otherwise.
+fn same_qualifiers(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+/// The members one class declares under `name`: its containment edges name the
+/// entities written in its body, so a namesake class another target declares
+/// contributes nothing here.
+///
+/// A member's body is usually written out-of-line, where no containment edge
+/// reaches it, so a declaration is paired with the definition of its signature.
+/// The pair is one symbol only while the class name identifies one class: two
+/// targets may each declare `api::Base` and define its member inline, and the
+/// body of one target's class is not the other's member.
+fn declared_members(
+    storage: &ReadView<'_>,
+    class: &EntityId,
+    name: &str,
+    stored: &EntityId,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<EntityId>> {
+    check_cancelled(signal)?;
+    let contains: Vec<FileEdge> = storage.neighborhood(
+        class.as_str(),
+        Direction::Out,
+        Some(&[GraphEdgeKind::Contains]),
+        |rows| rows.collect(),
+    )?;
+    let mut ids: Vec<EntityId> = Vec::new();
+    for edge in contains {
+        let id = EntityId::from_string(edge.target);
+        if id != *stored && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let declared: HashMap<EntityId, CodeMetadata> = storage
+        .fetch_code_metadata(&ids)?
+        .into_iter()
+        .map(|(id, (_, metadata))| (id, metadata))
+        .collect();
+    let mut members: Vec<EntityId> = ids
         .into_iter()
         .filter(|id| {
-            declared.get(id).is_some_and(|(_, base)| {
-                same_arity(metadata.arity, base.arity)
-                    && marked.iter().any(|other| same_member(base, other))
-            })
+            declared
+                .get(id)
+                .is_some_and(|member| member.symbol_name.as_deref() == Some(name))
         })
-        .collect())
+        .collect();
+    if members.is_empty() {
+        return Ok(members);
+    }
+    let Some(class_metadata) = declared_class(storage, class)? else {
+        return Ok(members);
+    };
+    let Some(qualified) = qualified_metadata(&class_metadata) else {
+        return Ok(members);
+    };
+    if classes_named(storage, &qualified, signal)?.len() > 1 {
+        return Ok(members);
+    }
+    let spellings = select_symbols(storage, name, Some(&qualified), None, MAX_SYMBOL_MATCHES)?;
+    let spelling_metadata: HashMap<EntityId, CodeMetadata> = storage
+        .fetch_code_metadata(
+            &spellings
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
+        )?
+        .into_iter()
+        .map(|(id, (_, metadata))| (id, metadata))
+        .collect();
+    for (id, _) in spellings {
+        let Some(spelling) = spelling_metadata.get(&id) else {
+            continue;
+        };
+        let pairs = members.iter().any(|member| {
+            declared.get(member).is_some_and(|base| {
+                base.is_declaration != spelling.is_declaration
+                    && same_parameters(
+                        base.arity,
+                        parameter_evidence(base.signature.as_deref()).as_deref(),
+                        spelling.arity,
+                        parameter_evidence(spelling.signature.as_deref()).as_deref(),
+                    )
+            })
+        });
+        if pairs && !members.contains(&id) {
+            members.push(id);
+        }
+    }
+    Ok(members)
+}
+
+/// One class entity's metadata.
+fn declared_class(storage: &ReadView<'_>, class: &EntityId) -> EngineResult<Option<CodeMetadata>> {
+    Ok(storage
+        .fetch_code_metadata(std::slice::from_ref(class))?
+        .into_values()
+        .next()
+        .map(|(_, metadata)| metadata))
+}
+
+/// Every class body the workspace declares under one qualified name. Two
+/// files may declare one qualified class, and the members of one are not the
+/// members of the other.
+fn classes_named(
+    storage: &ReadView<'_>,
+    qualified: &str,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<EntityId>> {
+    check_cancelled(signal)?;
+    let (class_name, class_scope) = split_symbol(qualified);
+    if class_name.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(select_symbols(
+        storage,
+        &class_name,
+        class_scope.as_deref(),
+        None,
+        MAX_SYMBOL_MATCHES,
+    )?
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect())
+}
+
+/// The qualified name of one stored symbol, as a scope spells it.
+fn qualified_metadata(metadata: &CodeMetadata) -> Option<String> {
+    let name = metadata
+        .symbol_name
+        .as_deref()
+        .filter(|name| !name.is_empty())?;
+    Some(
+        match metadata.scope.as_deref().filter(|scope| !scope.is_empty()) {
+            Some(scope) => format!("{scope}::{name}"),
+            None => name.to_owned(),
+        },
+    )
 }
 
 /// Whether two spellings name one member: the class both are written in and
@@ -521,16 +708,18 @@ fn member_classes(
     Ok(if owning.is_empty() { classes } else { owning })
 }
 
-/// Every base class reachable from `classes`, breadth first and bounded.
+/// Every base class reachable from `classes`, breadth first and bounded, each
+/// with the distance from the nearest class: a higher base is further away, and
+/// a member it declares virtual reaches the ones below it.
 fn base_chain(
     storage: &ReadView<'_>,
     classes: Vec<EntityId>,
     signal: Option<&CancellationToken>,
-) -> EngineResult<Vec<EntityId>> {
+) -> EngineResult<Vec<(usize, EntityId)>> {
     let mut bases = Vec::new();
     let mut visited = HashSet::new();
     let mut frontier = classes;
-    for _ in 0..MAX_OVERRIDE_DEPTH {
+    for distance in 1..=MAX_OVERRIDE_DEPTH {
         check_cancelled(signal)?;
         let mut level = Vec::new();
         for class in &frontier {
@@ -544,7 +733,12 @@ fn base_chain(
             break;
         }
         let spare = MAX_OVERRIDE_BASES.saturating_sub(bases.len());
-        bases.extend(level.iter().take(spare).cloned());
+        bases.extend(
+            level
+                .iter()
+                .take(spare)
+                .map(|base| (distance, base.clone())),
+        );
         if bases.len() == MAX_OVERRIDE_BASES {
             break;
         }
@@ -593,20 +787,6 @@ fn supertypes(
         .into_iter()
         .map(|edge| EntityId::from_string(edge.target))
         .collect())
-}
-
-/// The qualified name of one stored symbol, as a scope spells it.
-fn qualified_metadata(metadata: &CodeMetadata) -> Option<String> {
-    let name = metadata
-        .symbol_name
-        .as_deref()
-        .filter(|name| !name.is_empty())?;
-    Some(
-        match metadata.scope.as_deref().filter(|scope| !scope.is_empty()) {
-            Some(scope) => format!("{scope}::{name}"),
-            None => name.to_owned(),
-        },
-    )
 }
 
 /// Whether one base member dispatches into a derived body. Extraction keeps the
@@ -807,18 +987,17 @@ fn load_symbols(
 
 /// Filter resolved edges by endpoint visibility before applying the limit.
 ///
-/// `excluded` names the sources whose rows are read but never counted: a body
-/// that names the member it overrides reaches that implementation directly, so
-/// its call site is not a caller of anything the query asks about. Skipping the
-/// rows while reading keeps the limit describing the answer rather than the
-/// table.
+/// `skip` names the rows that are read but never counted: a call site that
+/// spells the member's own scope reaches that implementation directly, so it
+/// answers nothing the query asks about. Skipping the rows while reading keeps
+/// the limit describing the answer rather than the table.
 fn neighborhood(
     storage: &ReadView<'_>,
     id: &str,
     direction: Direction,
     kinds: Option<&[GraphEdgeKind]>,
     limit: usize,
-    excluded: &[&str],
+    skip: impl Fn(&FileEdge) -> bool,
     signal: Option<&CancellationToken>,
 ) -> EngineResult<Vec<(FileEdge, PathBuf)>> {
     check_cancelled(signal)?;
@@ -838,13 +1017,13 @@ fn neighborhood(
                     break;
                 };
                 let edge = edge?;
-                if !excluded.contains(&edge.source.as_str()) {
+                if !skip(&edge) {
                     batch.push(edge);
                 }
                 check_cancelled(signal)?;
             }
             if batch.is_empty() {
-                // Only rows the caller excluded so far: what follows may still
+                // Only rows the caller skipped so far: what follows may still
                 // answer, so read further instead of stopping here.
                 if drained {
                     break 'read;

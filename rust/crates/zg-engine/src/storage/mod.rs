@@ -13,6 +13,7 @@ mod zvec;
 
 pub(crate) use store::{
     IndexStore, IndexedSourceFile, ReadView, ResolutionSnapshot, parameter_evidence,
+    qualifier_evidence,
 };
 
 #[cfg(test)]

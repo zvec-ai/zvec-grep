@@ -39,7 +39,7 @@ use crate::domain::model::EmbeddingModelInfo;
 mod read_view;
 mod resolution;
 pub(crate) use read_view::ReadView;
-pub(crate) use resolution::{ResolutionSnapshot, parameter_evidence};
+pub(crate) use resolution::{ResolutionSnapshot, parameter_evidence, qualifier_evidence};
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
