@@ -10,6 +10,7 @@ from pathlib import Path
 
 from zg_bench.core.protocol import JUDGE_MODELS
 from zg_bench.reports.aggregate import aggregate_reports
+from zg_bench.settings import DEFAULT_SWE_QA_MODEL
 
 from . import SweQaError
 from .collect import collect_pair
@@ -48,7 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     judge.add_argument("--output-dir", type=Path, required=True)
     judge.add_argument("--expected", nargs="+", action="append", required=True)
     judge.add_argument("--attempts", type=int, default=3)
-    judge.add_argument("--model", choices=JUDGE_MODELS, default="glm-5.2")
+    judge.add_argument("--model", choices=JUDGE_MODELS, default=DEFAULT_SWE_QA_MODEL)
 
     aggregate = commands.add_parser(
         "aggregate", help="combine already judged per-task reports"

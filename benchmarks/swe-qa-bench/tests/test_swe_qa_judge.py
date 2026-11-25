@@ -33,7 +33,7 @@ from zg_bench.settings import (
     OPENCODE_QWEN_REASONING_EFFORT,
     OPENCODE_QWEN_TEMPERATURE,
 )
-from zg_bench.swe_qa import SELF_JUDGE_LABEL, SweQaError
+from zg_bench.swe_qa import SweQaError
 from zg_bench.swe_qa.cli import main as swe_qa_main
 from zg_bench.swe_qa.judge import judge_pairs
 
@@ -179,10 +179,10 @@ class JudgeTests(unittest.TestCase):
                 self.assertEqual(call["reasoning_effort"], "high")
                 self.assertEqual(call["max_tokens"], 32000)
                 self.assertNotIn("response_format", call)
-            self.assertTrue(all(call["model"] == "openai/glm-5.2" for call in requests))
+            self.assertTrue(all(call["model"] == "openai/qwen4-max" for call in requests))
             self.assertTrue(all(call["api_key"] == "test-secret" for call in requests))
             self.assertEqual(report["schema_version"], 2)
-            self.assertEqual(report["judge"]["label"], SELF_JUDGE_LABEL)
+            self.assertEqual(report["judge"]["label"], "qwen4-max-self-judge-v1")
             self.assertTrue(report["judge"]["self_judge"])
             self.assertEqual(report["judge"]["temperature"], 0)
             self.assertEqual(report["judge"]["seed"], 42)
@@ -351,6 +351,7 @@ class JudgeTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(body)
 
+        models = ("glm-5.2", "qwen3.8-max", "qwen4-max")
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -359,7 +360,7 @@ class JudgeTests(unittest.TestCase):
                 "os.environ",
                 {"LITELLM_LOCAL_MODEL_COST_MAP": "True", "DO_NOT_TRACK": "True"},
             ):
-                for model in ("glm-5.2", "qwen3.8-max"):
+                for model in models:
                     with self.subTest(model=model):
                         result = judge_candidate(
                             completion_fn=default_completion(),
@@ -379,23 +380,22 @@ class JudgeTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
-        self.assertEqual(len(requests), 2)
-        for request, model in zip(requests, ("glm-5.2", "qwen3.8-max"), strict=True):
+        for request, model in zip(requests, models, strict=True):
             with self.subTest(model=model):
                 self.assertEqual(request["model"], model)
                 self.assertEqual(
                     request["temperature"],
-                    OPENCODE_QWEN_TEMPERATURE if model == "qwen3.8-max" else 0,
+                    OPENCODE_QWEN_TEMPERATURE if model.startswith("qwen") else 0,
                 )
                 self.assertEqual(request["seed"], 42)
                 self.assertIs(
                     request["enable_thinking"],
-                    OPENCODE_QWEN_ENABLE_THINKING if model == "qwen3.8-max" else True,
+                    OPENCODE_QWEN_ENABLE_THINKING if model.startswith("qwen") else True,
                 )
                 self.assertEqual(
                     request["reasoning_effort"],
                     OPENCODE_QWEN_REASONING_EFFORT
-                    if model == "qwen3.8-max"
+                    if model.startswith("qwen")
                     else "high",
                 )
                 self.assertEqual(request["max_tokens"], 32000)
@@ -404,6 +404,12 @@ class JudgeTests(unittest.TestCase):
                 self.assertNotIn("reasoningEffort", request)
 
     def test_qwen_cli_propagates_model_and_roundtrips_report_identity(self) -> None:
+        self._check_qwen_cli_report("qwen3.8-max", ["--model", "qwen3.8-max"])
+
+    def test_judge_cli_defaults_to_qwen4_max(self) -> None:
+        self._check_qwen_cli_report("qwen4-max", [])
+
+    def _check_qwen_cli_report(self, model: str, model_args: list[str]) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             pairs_root, references = self._write_pair_and_reference(root)
@@ -460,8 +466,7 @@ class JudgeTests(unittest.TestCase):
                         str(root / "report"),
                         "--expected",
                         "reflex-6",
-                        "--model",
-                        "qwen3.8-max",
+                        *model_args,
                         "--attempts",
                         "1",
                     ]
@@ -469,7 +474,7 @@ class JudgeTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(len(requests), 6)
             for request in requests:
-                self.assertEqual(request["model"], "openai/qwen3.8-max")
+                self.assertEqual(request["model"], f"openai/{model}")
                 self.assertEqual(request["api_key"], "unused-legacy-key")
                 self.assertEqual(request["api_base"], "https://legacy.invalid/v1")
                 self.assertEqual(request["temperature"], OPENCODE_QWEN_TEMPERATURE)
@@ -485,8 +490,8 @@ class JudgeTests(unittest.TestCase):
             report = aggregate_reports(
                 reports_root=root / "report", output_dir=root / "combined"
             )
-            self.assertEqual(report["judge"]["model"], "qwen3.8-max")
-            self.assertEqual(report["judge"]["label"], "qwen3.8-max-self-judge-v1")
+            self.assertEqual(report["judge"]["model"], model)
+            self.assertEqual(report["judge"]["label"], f"{model}-self-judge-v1")
             self.assertEqual(report["judge"]["temperature"], OPENCODE_QWEN_TEMPERATURE)
             self.assertEqual(
                 report["judge"]["enable_thinking"], OPENCODE_QWEN_ENABLE_THINKING
@@ -497,12 +502,12 @@ class JudgeTests(unittest.TestCase):
                     profile["judge"],
                     *(trial["judge"] for trial in profile["trials"]),
                 ):
-                    self.assertEqual(result["model"], "qwen3.8-max")
-                    self.assertEqual(result["label"], "qwen3.8-max-self-judge-v1")
+                    self.assertEqual(result["model"], model)
+                    self.assertEqual(result["label"], f"{model}-self-judge-v1")
             markdown = (root / "combined" / "report.md").read_text()
-            self.assertIn("qwen3.8-max-self-judge-v1", markdown)
+            self.assertIn(f"{model}-self-judge-v1", markdown)
             self.assertNotIn("glm-5.2-self-judge-v1", markdown)
-            if OPENCODE_QWEN_ENABLE_THINKING:
+            if model == "qwen3.8-max" and OPENCODE_QWEN_ENABLE_THINKING:
                 self.assertIn("temperatures below 0.6", markdown)
                 self.assertIn("documented provider behaviors", markdown)
 

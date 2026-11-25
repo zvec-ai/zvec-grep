@@ -717,9 +717,11 @@ class RunValidationTests(unittest.TestCase):
         for model, provider_id, model_id in (
             ("custom-openai/glm-5.2", "custom-openai", "glm-5.2"),
             ("custom-openai/qwen3.8-max", "custom-openai", "qwen3.8-max"),
+            ("custom-openai/qwen4-max", "custom-openai", "qwen4-max"),
             ("aliyun-glm-5.2", "dashscope", "glm-5.2"),
             ("qwen3.7-max", "dashscope", "qwen3.7-max"),
         ):
+            custom_qwen = provider_id == "custom-openai" and model_id.startswith("qwen")
             configs = []
             for profile in runner.PROFILES:
                 with self.subTest(model=model, profile=profile):
@@ -745,20 +747,20 @@ class RunValidationTests(unittest.TestCase):
                         ["options"]["enable_thinking"],
                         (
                             settings.OPENCODE_QWEN_ENABLE_THINKING
-                            if model_id == "qwen3.8-max"
+                            if custom_qwen
                             else model_id == "glm-5.2"
                         ),
                     )
                     model_options = (
                         config["provider"][provider_id]["models"][model_id]["options"]
                     )
-                    if model_id in ("glm-5.2", "qwen3.8-max"):
+                    if model_id == "glm-5.2" or custom_qwen:
                         # The compatible SDK maps this option to the API's
                         # snake_case reasoning_effort field on the wire.
                         self.assertEqual(
                             model_options["reasoningEffort"],
                             settings.OPENCODE_QWEN_REASONING_EFFORT
-                            if model_id == "qwen3.8-max"
+                            if custom_qwen
                             else "high",
                         )
                         self.assertEqual(
@@ -775,7 +777,7 @@ class RunValidationTests(unittest.TestCase):
                         self.assertNotIn("reasoningEffort", model_options)
                     self.assertNotIn("reasoning_effort", model_options)
                     self.assertNotIn("response_format", model_options)
-                    if model_id == "qwen3.8-max":
+                    if custom_qwen:
                         self.assertEqual(
                             config["provider"][provider_id]["models"][model_id]["interleaved"],
                             {"field": "reasoning_content"},
@@ -795,7 +797,7 @@ class RunValidationTests(unittest.TestCase):
                         self.assertEqual(
                             config["agent"][name]["temperature"],
                             settings.OPENCODE_QWEN_TEMPERATURE
-                            if model_id == "qwen3.8-max"
+                            if custom_qwen
                             else 0,
                         )
                         self.assertEqual(config["agent"][name]["options"]["seed"], 42)

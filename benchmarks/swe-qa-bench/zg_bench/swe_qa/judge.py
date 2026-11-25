@@ -36,7 +36,7 @@ from zg_bench.reports.aggregate import aggregate_reports as aggregate_reports
 from zg_bench.reports.render import (
     write_report,
 )
-from zg_bench.settings import BENCHMARK_SEED
+from zg_bench.settings import BENCHMARK_SEED, DEFAULT_SWE_QA_MODEL
 from zg_bench.swe_qa.pairs import (
     load_pairs,
     load_references,
@@ -52,7 +52,7 @@ def judge_pairs(
     completion_fn: Completion | None = None,
     attempts: int = 3,
     concurrency: int | None = None,
-    model: str = "glm-5.2",
+    model: str = DEFAULT_SWE_QA_MODEL,
 ) -> dict[str, Any]:
     """Apply the same-model judge and emit JSON/Markdown reports."""
     label = judge_label(model)

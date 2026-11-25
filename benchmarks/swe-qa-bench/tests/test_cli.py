@@ -113,6 +113,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("qwen-coder", listing)
         self.assertIn("qwen3.7-max", listing)
         self.assertIn("custom-openai/qwen3.8-max", listing)
+        self.assertIn("custom-openai/qwen4-max", listing)
         self.assertIn("opencode", listing)
         self.assertIn("aliyun-glm-5.2", listing)
         self.assertIn("claude-code", listing)
@@ -136,7 +137,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
         self.assertIn(
             "supported models: aliyun-glm-5.2, custom-openai/glm-5.2, qwen3.7-max, "
-            "custom-openai/qwen3.8-max",
+            "custom-openai/qwen3.8-max, custom-openai/qwen4-max",
             stderr.getvalue(),
         )
 

@@ -26,7 +26,7 @@ Retrieval-only 衡量不同产品版本的检索质量；e2e 衡量 Agent 接入
 | --- | --- | --- |
 | PR 创建、重新打开或推送新提交，包含 fork PR | 固定 PR base/head 的 Retrieval-only；本地 Embedding | 自动更新的 PR 机器人评论、Actions summary 与 `retrieval-comparison` artifact |
 | PR Conversation 新评论，单独一行 `@zg-bench` | 相同的 Retrieval 版本对比 | 同一条机器人评论，从排队状态更新为结果 |
-| 手动启动 **ZG Bench**，指定 `pr_number` | Retrieval 对比；只有明确设置 `run_e2e: true` 才额外运行 e2e | 同一条机器人评论及运行 artifacts |
+| 手动启动 **ZG Bench**，指定 `pr_number` | Retrieval 对比。设置 `run_e2e: true` 后还会用 `qwen4-max` 执行 SWE-QA 并自评 | 同一条机器人评论及运行 artifacts |
 | 手动启动 **SWE-QA Bench** | 指定任务范围、模型与 Embedding runtime 的 e2e | 单题证据与聚合报告 |
 | 修改相关 benchmark 源码或工作流 | 离线回归检查 | CI 日志，不调用模型 |
 

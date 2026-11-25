@@ -155,12 +155,15 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
         cases = (
             ("custom-openai/glm-5.2", True),
             ("custom-openai/qwen3.8-max", True),
+            ("custom-openai/qwen4-max", True),
             ("aliyun-glm-5.2", True),
             # Prove that neither provider defaults nor the fixture itself hide
             # web tools: removing the benchmark denies must expose both tools.
             ("custom-openai/glm-5.2", False),
         )
         for model, disable_web_tools in cases:
+            is_qwen = model.startswith("custom-openai/qwen")
+            model_id = model.split("/", 1)[1] if is_qwen else "glm-5.2"
             with (
                 self.subTest(model=model, disable_web_tools=disable_web_tools),
                 tempfile.TemporaryDirectory() as temp_dir,
@@ -263,7 +266,7 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                                         "finish_reason": None,
                                     }],
                                 }]
-                                if body["model"] == "qwen3.8-max"
+                                if is_qwen
                                 else []
                             ),
                             {
@@ -436,8 +439,7 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                         authorization_headers, [f"Bearer {fixture_key}"] * len(requests)
                     )
                     for request in requests:
-                        is_qwen = model == "custom-openai/qwen3.8-max"
-                        self.assertEqual(request["model"], "qwen3.8-max" if is_qwen else "glm-5.2")
+                        self.assertEqual(request["model"], model_id)
                         self.assertEqual(
                             request.get("temperature"), settings.OPENCODE_QWEN_TEMPERATURE if is_qwen else 0
                         )
@@ -451,7 +453,7 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                         self.assertEqual(request.get("max_tokens"), 32000)
                         self.assertNotIn("response_format", request)
                         self.assertNotIn("reasoningEffort", request)
-                    if model == "custom-openai/qwen3.8-max":
+                    if is_qwen:
                         replayed_assistants = [
                             message
                             for request in task_requests

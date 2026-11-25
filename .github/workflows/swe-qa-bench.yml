@@ -1,5 +1,5 @@
 name: SWE-QA Bench
-run-name: SWE-QA Bench / Rust ${{ inputs.candidate_ref || 'main' }} / ${{ inputs.model || 'glm-5.2' }} / ${{ inputs.embedding || 'local' }} embedding / ${{ inputs.scope || 'repro-3' }}
+run-name: SWE-QA Bench / Rust ${{ inputs.candidate_ref || 'main' }} / ${{ inputs.model || 'qwen4-max' }} / ${{ inputs.embedding || 'local' }} embedding / ${{ inputs.scope || 'repro-3' }}
 
 on:
   workflow_call:
@@ -14,7 +14,7 @@ on:
         default: all-full
         type: string
       model:
-        default: glm-5.2
+        default: qwen4-max
         type: string
       embedding:
         default: local
@@ -43,9 +43,10 @@ on:
       model:
         description: Use this model for both execution and self-judging
         required: true
-        default: glm-5.2
+        default: qwen4-max
         type: choice
         options:
+          - qwen4-max
           - glm-5.2
           - qwen3.8-max
       embedding:
@@ -60,7 +61,7 @@ on:
 permissions: {}
 
 env:
-  SWE_QA_MODEL: ${{ inputs.model || 'glm-5.2' }}
+  SWE_QA_MODEL: ${{ inputs.model || 'qwen4-max' }}
   SWE_QA_MODEL_BASE_URL: ${{ vars.SWE_QA_MODEL_BASE_URL }}
 
 concurrency:

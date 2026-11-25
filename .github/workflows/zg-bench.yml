@@ -78,7 +78,6 @@ jobs:
       candidate_ref: ${{ needs.request.outputs.candidate_sha }}
       candidate_repository: ${{ needs.request.outputs.candidate_repository }}
       scope: all-full
-      model: glm-5.2
       embedding: local
     secrets:
       GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
