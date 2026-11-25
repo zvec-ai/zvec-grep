@@ -40,7 +40,7 @@ async fn definitions_without_text_locations_do_not_suppress_suggestions() {
         let fragment = IndexedFragment {
             entity_id: entity.id().clone(),
             fragment_id: entity.fragments()[0].id.clone(),
-            model: schema().model().reference(),
+            kind: entity.content().kind(),
             vector: vec![1.0, 0.0, 0.0],
             fts_text: "unlocated".into(),
         };
@@ -187,7 +187,9 @@ async fn wrong_scope_suggests_exact_names_even_when_fts_is_full_of_callers() {
     write_symbols(&store, "callers.rs", &callers);
     let body = format!("fn frob() {{ /* {} */ }}", "padding ".repeat(1000));
     let target = write_symbols(&store, "bar.rs", &[("frob", Some("Bar"), 1, &body)]);
-    let hits = store.search_fts("frob", 100, None).expect("FTS candidates");
+    let hits = store
+        .search_fts(ContentKind::Code, "frob", 100, None)
+        .expect("FTS candidates");
     assert_eq!(hits.len(), 100);
     assert!(
         hits.iter().all(|hit| &hit.entity_id != target[0].id()),

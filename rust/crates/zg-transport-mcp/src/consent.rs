@@ -78,9 +78,6 @@ pub(crate) async fn search(
     for (required, decision) in targets.iter().zip(decisions) {
         apply(decision, &required.target, &mut options.authorized_remote)?;
     }
-    if targets.len() == 1 {
-        options.authorization_model = Some(targets[0].target.model.clone());
-    }
     Ok(())
 }
 
@@ -123,14 +120,34 @@ async fn ask(
             "Remote authorization scope changed; retry consent",
         ));
     }
+    let scope = format!(
+        "Destination: {} (host: {}). Model: {}. Workspace: {}. Source roots: {}. Query text sent: {query_text}. Workspace content sent for indexing/refresh: {workspace_content}.",
+        target.endpoint,
+        target.endpoint_host,
+        target.model,
+        zg_cli::output_path(&target.root).display(),
+        target
+            .workspace_roots
+            .iter()
+            .map(|root| zg_cli::output_path(root).display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
     let supported = context
         .client_capabilities()
         .and_then(|caps| caps.elicitation)
         .is_some_and(|cap| cap.form.is_some() || cap.url.is_none());
     if !supported {
+        let lexical = if allow_fts {
+            " For lexical search, use FTS with autoUpdate: false and eventual freshness."
+        } else {
+            ""
+        };
         return Err(EngineError::permission_denied(
-            "Remote embedding requires consent. This MCP client does not support form elicitation; grant workspace authorization with `zg --auth` or use FTS with autoUpdate: false.",
-        ));
+            "Remote embedding requires consent. This MCP client does not support form elicitation.",
+        ).with_help(format!(
+            "{scope} For workspace approval, use the reported values with zg --auth grant <root> --capability embedding --scope workspace --embedding <model> --endpoint <endpoint>.{lexical}"
+        )));
     }
     let mut choices = vec!["once", "workspace", "cancel"];
     if allow_fts {
@@ -143,19 +160,11 @@ async fn ask(
         }}, "required": ["choice"]
     });
     let message = format!(
-        "Allow remote embedding? Destination: {} (host: {}). Model: {}. Workspace: {}. Source roots: {}. Query text sent: {query_text}. Workspace content sent for indexing/refresh: {workspace_content}. Only explicit acceptance permits transmission. Do not enter credentials in this form.",
-        target.endpoint,
-        target.endpoint_host,
-        target.model,
-        zg_cli::output_path(&target.root).display(),
-        target
-            .workspace_roots
-            .iter()
-            .map(|root| zg_cli::output_path(root).display().to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
+        "Allow remote embedding? {scope} Only explicit acceptance permits transmission. Do not enter credentials in this form."
     );
-    let result = elicit_form(message, requested_schema, context).await?;
+    let result = elicit_form(message, requested_schema, context)
+        .await
+        .map_err(|error| error.with_help(scope))?;
     decision(&result, allow_fts)
 }
 
@@ -429,6 +438,17 @@ mod tests {
                         !supported || choice == "cancel"
                     );
                     assert_eq!(calls.load(Ordering::SeqCst), usize::from(supported));
+                    if !supported {
+                        let report = serde_json::to_string(&result.content).expect("error report");
+                        for expected in [
+                            "consent-workspace",
+                            "remote/test-model",
+                            "https://embedding.example.test/v1",
+                            "--embedding <model> --endpoint <endpoint>",
+                        ] {
+                            assert!(report.contains(expected), "missing scope: {expected}");
+                        }
+                    }
                     client.cancel().await.expect("close client");
                     task.await.expect("server task").expect("server stop");
                 }

@@ -298,7 +298,7 @@ fn suggest_symbols(
     filter: Option<&StorageSearchFilter>,
 ) -> EngineResult<Vec<StoredEntity>> {
     let query = name.to_lowercase();
-    let hits = storage.search_fts(&query, 100, filter)?;
+    let hits = storage.search_fts(crate::domain::ContentKind::Code, &query, 100, filter)?;
     let mut seen = HashSet::new();
     let ids: Vec<_> = hits
         .into_iter()

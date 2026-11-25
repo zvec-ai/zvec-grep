@@ -7,7 +7,7 @@ use super::{
 };
 use crate::domain::model::ModelConfig;
 use crate::models::{
-    catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
+    catalog::EmbeddingCatalogEntry,
     runtime::{
         ModelComputeRuntime,
         llama_config::{LlamaResources, LlamaSettings},
@@ -32,7 +32,7 @@ pub(crate) fn create_layout_model(
     )))
 }
 
-/// Creates a catalog-backed embedding model.
+/// Creates a built-in or configured HTTP embedding model.
 ///
 /// `None` for `options` is the Rust equivalent of omitting the optional
 /// TypeScript options object.
@@ -53,14 +53,7 @@ pub fn create_embedding_model(
             reference, options,
         )?));
     }
-    let entry = get_embedding_model_catalog_entry(reference).ok_or_else(|| {
-        ModelError::new(
-            crate::EngineError::NOT_FOUND,
-            "Embedding model is not in the zvec-grep catalog",
-            Some(format!("embedding={reference}")),
-        )
-    })?;
-    match entry {
+    match EmbeddingCatalogEntry::try_from(reference)? {
         EmbeddingCatalogEntry::Bekko(config) => Ok(Arc::new(BekkoEmbeddingModel::new(
             config,
             options,

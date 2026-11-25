@@ -52,6 +52,67 @@ pub(super) fn text_fragments(
     fragments
 }
 
+/// Refine an extracted entity's existing fragment boundaries for a smaller
+/// owning runtime. All output offsets remain relative to the original entity.
+pub(crate) fn limit_entity_fragments(
+    entity: &mut super::ExtractedEntity,
+    options: super::ChunkOptions,
+) -> Result<(), crate::EngineError> {
+    let Some(maximum) = options.max_chunk_chars else {
+        return Ok(());
+    };
+    let (crate::domain::Content::Code(text) | crate::domain::Content::Text(text)) = &entity.content
+    else {
+        return Ok(());
+    };
+    let (maximum, overlap) = super::chunk_options_for_metadata(
+        maximum,
+        options.chunk_overlap_chars.unwrap_or(0),
+        entity.metadata.as_ref(),
+    );
+    let mut limited = Vec::new();
+    for fragment in &entity.fragments {
+        let (base, selected) = match fragment.range {
+            Range::Full => (0, text.as_str()),
+            Range::Byte(range) => {
+                let start = usize::try_from(range.start_offset()).map_err(|_| {
+                    crate::EngineError::invalid_argument("fragment start exceeds platform limits")
+                })?;
+                let end = usize::try_from(range.end_offset()).map_err(|_| {
+                    crate::EngineError::invalid_argument("fragment end exceeds platform limits")
+                })?;
+                (
+                    range.start_offset(),
+                    crate::utils::slice_text(text, start, end)?,
+                )
+            }
+            Range::Text(_) | Range::Pdf(_) => {
+                return Err(crate::EngineError::invalid_argument(
+                    "expected an entity-relative text fragment",
+                ));
+            }
+        };
+        if utf16_len(selected) <= maximum {
+            limited.push(fragment.clone());
+            continue;
+        }
+        for part in text_fragments(selected, maximum, overlap) {
+            if let Range::Byte(range) = part.range {
+                limited.push(ExtractedEntityFragment {
+                    range: Range::Byte(ByteRange::new(
+                        base + range.start_offset(),
+                        base + range.end_offset(),
+                    )?),
+                });
+            } else {
+                limited.push(fragment.clone());
+            }
+        }
+    }
+    entity.fragments = limited;
+    Ok(())
+}
+
 /// Choose a UTF-16 cut position, preferring punctuation near the chunk limit.
 pub(super) fn find_line_cut(line: &str, max_chars: usize) -> usize {
     let min_position = max_chars.saturating_mul(7) / 10;

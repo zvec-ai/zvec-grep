@@ -28,6 +28,8 @@ impl Fixture {
             "ZVEC_GREP_DEVICE",
             "ZVEC_GREP_EMBEDDING",
             "ZVEC_GREP_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "QWEN_API_KEY",
             "ZVEC_GREP_ENDPOINT",
             "ZVEC_GREP_MODEL_CACHE",
             "ZVEC_GREP_MODE",
@@ -48,6 +50,10 @@ impl Fixture {
             String::from_utf8_lossy(&output.stderr)
         );
         output
+    }
+    fn manifest(&self) -> serde_json::Value {
+        let bytes = fs::read(self.root.path().join(".zvec-grep/manifest.json")).expect("manifest");
+        serde_json::from_slice(&bytes).expect("manifest JSON")
     }
     fn write_config(&self, config: &serde_json::Value) {
         let directory = self.user.path().join(".zvec-grep");
@@ -415,8 +421,7 @@ fn binary_consumes_color_and_debug_options() {
     assert!(String::from_utf8_lossy(&removed.stderr).contains("--human"));
 }
 
-#[test]
-fn explicit_remote_credentials_and_consent_reach_index_execution() {
+fn indexed_remote_fixture() -> Fixture {
     let fixture = Fixture::new();
     fixture.success(&[
         "--index",
@@ -430,17 +435,19 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
         "--endpoint",
         "https://example.test/embeddings",
     ]);
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
-    )
-    .expect("JSON");
+    fixture
+}
+
+#[test]
+fn explicit_remote_credentials_and_consent_reach_index_execution() {
+    let fixture = indexed_remote_fixture();
+    let manifest = fixture.manifest();
     assert_eq!(
         manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/embeddings"
     );
-    let credentials = manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]
-        ["apiKey"]
-        .clone();
+    let credentials =
+        &manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["apiKey"];
     assert!(credentials["nonce"].is_string());
     assert!(credentials["ciphertext"].is_string());
     assert!(
@@ -454,27 +461,6 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
             .len(),
         32
     );
-    fixture.success(&[
-        "--index",
-        "--mode",
-        "direct",
-        "--allow-remote",
-        "--endpoint",
-        "https://example.test/updated",
-    ]);
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
-    )
-    .expect("JSON");
-    assert_eq!(
-        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["endpoint"],
-        "https://example.test/updated"
-    );
-    assert_eq!(
-        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["apiKey"],
-        credentials
-    );
-    let runtimes = manifest["index"]["descriptor"]["embeddingConfigs"].clone();
     fs::write(fixture.root.path().join("empty.txt"), "")
         .expect("trigger refresh without embedding");
     let query = fixture.run(&[
@@ -495,15 +481,66 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
         "{}",
         String::from_utf8_lossy(&query.stderr)
     );
-    let after = fs::read(fixture.root.path().join(".zvec-grep/manifest.json"))
-        .expect("manifest after refresh");
-    let after: serde_json::Value = serde_json::from_slice(&after).expect("manifest JSON");
-    assert_eq!(after["index"]["descriptor"]["embeddingConfigs"], runtimes);
+    let after = fixture.manifest();
+    assert_eq!(
+        after["index"]["descriptor"]["embeddingConfigs"],
+        manifest["index"]["descriptor"]["embeddingConfigs"]
+    );
     assert!(
         !serde_json::to_string(&after)
             .expect("manifest JSON")
             .contains("temporary-key")
     );
+}
+
+#[test]
+fn switching_endpoints_requires_a_key_for_the_new_destination() {
+    let fixture = indexed_remote_fixture();
+    let manifest = fixture.manifest();
+    let change_endpoint = [
+        "--index",
+        "--mode",
+        "direct",
+        "--allow-remote",
+        "--endpoint",
+        "https://example.test/updated",
+    ];
+    let without_key = fixture.run(&change_endpoint);
+    assert!(!without_key.status.success());
+    assert!(String::from_utf8_lossy(&without_key.stderr).contains("requires an API key"));
+    assert_eq!(
+        fixture.manifest()["index"]["descriptor"]["embeddingConfigs"],
+        manifest["index"]["descriptor"]["embeddingConfigs"]
+    );
+    let with_key = fixture
+        .command(&change_endpoint)
+        .env("ZVEC_GREP_API_KEY", "temporary-provider-key")
+        .output()
+        .expect("switch endpoints using an operation key");
+    assert!(
+        with_key.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with_key.stderr)
+    );
+    let manifest = fixture.manifest();
+    assert_eq!(
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["endpoint"],
+        "https://example.test/updated"
+    );
+    assert!(
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["apiKey"]
+            .is_null()
+    );
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--allow-remote",
+        "--api-key",
+        "replacement-key",
+    ]);
+    let runtimes = fixture.manifest()["index"]["descriptor"]["embeddingConfigs"].clone();
+    assert!(runtimes["qwen/text-embedding-v4"]["apiKey"]["ciphertext"].is_string());
 }
 
 #[test]

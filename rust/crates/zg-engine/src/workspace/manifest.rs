@@ -640,14 +640,14 @@ mod tests {
                 .is_some_and(IndexDescriptor::graph_indexing)
         );
 
-        // Released v2 manifests predate the optional graph setting.
+        // An omitted graph setting uses the descriptor default.
         value["index"]["descriptor"]
             .as_object_mut()
             .expect("descriptor object")
             .remove("graphIndexing");
         assert!(
             !decode_manifest(&value, &layout)
-                .expect("legacy v2 manifest")
+                .expect("descriptor without graph setting")
                 .index()
                 .descriptor()
                 .expect("enabled index")
@@ -1395,7 +1395,7 @@ mod tests {
         let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
         let storage_dir = layout.storage_dir().to_path_buf();
         fs::create_dir_all(&storage_dir).expect("workspace home");
-        fs::write(layout.manifest_path(), r#"{"indexVersion":2}"#).expect("invalid manifest");
+        fs::write(layout.manifest_path(), r#"{"indexVersion":3}"#).expect("invalid manifest");
         assert!(read_workspace_manifest(directory.path(), &layout).is_err());
         let current = fixture_manifest(&layout);
         write_workspace_manifest(layout.manifest_path(), &current).expect("current manifest");

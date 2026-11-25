@@ -1,9 +1,10 @@
 use super::*;
+use crate::domain::EmbeddingModelInfo;
 use crate::domain::{
     ByteRange, Content, FileIndexStatus, FileSnapshot, MarkdownMetadata, Range, SymbolType,
     TextRange,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
     FileRecord::new(
@@ -45,7 +46,15 @@ fn model() -> EmbeddingModelInfo {
 
 fn metadata_store(path: &Path) -> Fragments {
     super::super::zvec::initialize().expect("initialize zvec");
-    Fragments::open(path, &[model()], false).expect("fragment storage")
+    Fragments::open(
+        IndexLayout::new(path),
+        &[ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        }],
+        false,
+    )
+    .expect("fragment storage")
 }
 
 const DIRECTORY_LOOKUP: fn(&SourcePath) -> EngineResult<Option<DirectoryId>> =
@@ -71,6 +80,14 @@ fn metadata_fragments(
     file_id: u32,
     label: &str,
 ) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
+    metadata_fragments_with_content(file_id, label, Content::Text)
+}
+
+fn metadata_fragments_with_content(
+    file_id: u32,
+    label: &str,
+    content: fn(String) -> Content,
+) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
     let source = file(file_id, "harvest.rs");
     let mut text = "Harvest outline".to_owned();
     text.push_str(&" ".repeat(20 - text.len()));
@@ -78,7 +95,7 @@ fn metadata_fragments(
     text.push_str(&" ".repeat(40 - text.len()));
     text.push_str(label);
     text.push_str(&" ".repeat(100 - text.len()));
-    let content = Content::Text(text);
+    let content = content(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
     let id = EntityId::new(source.id(), &content, &source_range).expect("entity id");
@@ -127,7 +144,7 @@ fn metadata_fragments(
         ])
         .map(|(fragment, (vector, text))| IndexedFragment {
             fts_text: format!("harvest 春'\\crop\nGarden\npub async fn harvest() -> Crop\nProduces the seasonal crop.\n{text}"),
-            model: "fixture/fixture".into(),
+            kind: owner.content().kind(),
             entity_id: owner.id().clone(),
             fragment_id: fragment.id.clone(),
             vector,
@@ -197,7 +214,7 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
     {
-        let collection = &store.indexes["fixture/fixture"];
+        let collection = &store.indexes[&ContentKind::Text];
         let schema = collection.schema().expect("retrieval schema");
         for IndexField::String(name) in EntityMetadata::index_schema() {
             assert!(schema.has_field(name), "missing metadata field: {name}");
@@ -232,7 +249,7 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
         write_fixture(&store, &source, &entities, &entries);
         store.flush().expect("flush fragments");
         {
-            let collection = &store.indexes["fixture/fixture"];
+            let collection = &store.indexes[&ContentKind::Text];
             for entry in &entries {
                 let doc = fragment_document(collection, entry.fragment_id.as_str());
                 for IndexField::String(name) in EntityMetadata::index_schema() {
@@ -283,6 +300,11 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         .expect("file status");
     write_fixture(&store, &source, &entities, &entries);
     store.flush().expect("flush storage");
+    let vector_search = |filter: Option<&str>| {
+        store.search_vector(ContentKind::Text, &entries[1].vector, 10, filter)
+    };
+    let keyword_search =
+        |filter: Option<&str>| store.search_fts(ContentKind::Text, "orchard", 10, filter);
 
     for (index, symbol_type) in [SymbolType::Class, SymbolType::Enum]
         .into_iter()
@@ -294,11 +316,8 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         };
         let filter = build_filter(Some(&filter), &DIRECTORY_LOOKUP).expect("symbol filter");
         for (hits, count) in [
-            (store.search_fts("orchard", 10, filter.as_deref()), 1),
-            (
-                store.search_vector("fixture/fixture", &entries[1].vector, 10, filter.as_deref()),
-                2,
-            ),
+            (keyword_search(filter.as_deref()), 1),
+            (vector_search(filter.as_deref()), 2),
         ] {
             let hits = hits.expect("filtered results");
             assert_eq!(hits.len(), count);
@@ -323,19 +342,8 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
     };
     let classified = build_filter(Some(&classified), &DIRECTORY_LOOKUP).expect("classified filter");
     for (all, filtered) in [
-        (
-            store.search_fts("orchard", 10, None),
-            store.search_fts("orchard", 10, classified.as_deref()),
-        ),
-        (
-            store.search_vector("fixture/fixture", &entries[1].vector, 10, None),
-            store.search_vector(
-                "fixture/fixture",
-                &entries[1].vector,
-                10,
-                classified.as_deref(),
-            ),
-        ),
+        (keyword_search(None), keyword_search(classified.as_deref())),
+        (vector_search(None), vector_search(classified.as_deref())),
     ] {
         let all = all.expect("unfiltered results");
         assert!(
@@ -422,7 +430,7 @@ fn filename_like_negation_propagates_native_query_errors() {
     ] {
         let mut query = SearchQuery::scalar(10).expect("native query");
         query.set_filter(sql).expect("native filter");
-        let native_error = store.indexes["fixture/fixture"]
+        let native_error = store.indexes[&ContentKind::Text]
             .query(&query)
             .err()
             .expect("the pinned zvec release does not parse NOT LIKE");
@@ -434,11 +442,11 @@ fn filename_like_negation_propagates_native_query_errors() {
         for (operation, result) in [
             (
                 "search full-text index",
-                store.search_fts("orchard", 10, filter.as_deref()),
+                store.search_fts(ContentKind::Text, "orchard", 10, filter.as_deref()),
             ),
             (
                 "search vector index",
-                store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, filter.as_deref()),
+                store.search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, filter.as_deref()),
             ),
         ] {
             let error = result.expect_err("native rejection reaches the caller");
@@ -480,12 +488,12 @@ fn assert_filter_file_ids(store: &Fragments, path: &StoragePathFilter, expected:
     for (label, result, fragments_per_file) in [
         (
             "FTS",
-            store.search_fts("orchard", 100, filter.as_deref()),
+            store.search_fts(ContentKind::Text, "orchard", 100, filter.as_deref()),
             1,
         ),
         (
             "vector",
-            store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 100, filter.as_deref()),
+            store.search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 100, filter.as_deref()),
             2,
         ),
     ] {
@@ -505,7 +513,15 @@ fn assert_filter_file_ids(store: &Fragments, path: &StoragePathFilter, expected:
 }
 
 fn reopen_filter_store(path: &Path) -> Fragments {
-    Fragments::open(path, &[model()], true).expect("reopen fragments")
+    Fragments::open(
+        IndexLayout::new(path),
+        &[ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        }],
+        true,
+    )
+    .expect("reopen fragments")
 }
 
 #[test]
@@ -622,7 +638,7 @@ fn negated_directory_contains_empty_root_arrays_before_and_after_reopen() {
 }
 
 #[test]
-fn projection_validation_keeps_one_model_and_one_row_per_fragment() {
+fn projection_validation_keeps_owner_kind_and_one_row_per_fragment() {
     let (_, entities, entries) = metadata_fragments(0, "owner");
     validate_projections(&entities, &entries).expect("complete projections");
     assert!(validate_projections(&entities, &entries[..1]).is_err());
@@ -630,21 +646,25 @@ fn projection_validation_keeps_one_model_and_one_row_per_fragment() {
     duplicate.push(entries[0].clone());
     assert!(validate_projections(&entities, &duplicate).is_err());
     let mut mixed = entries;
-    mixed[1].model = "fixture/other".into();
+    mixed[1].kind = ContentKind::Code;
     assert!(validate_projections(&entities, &mixed).is_err());
 }
 
 #[test]
-fn fragment_ownership_is_checked_across_model_collections() {
+fn fragment_ownership_is_checked_across_kind_collections() {
     super::super::zvec::initialize().expect("initialize zvec");
     let home = tempfile::tempdir().expect("storage");
-    let mut other = model();
-    {
-        let mut metadata = serde_json::to_value(&other).expect("model metadata");
-        metadata["model"]["name"] = serde_json::json!("other");
-        other = serde_json::from_value(metadata).expect("valid model metadata");
-    }
-    let store = Fragments::open(home.path(), &[model(), other], false).expect("two models");
+    let indexes = [
+        ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        },
+        ContentIndex {
+            kind: ContentKind::Code,
+            embedding: model(),
+        },
+    ];
+    let store = Fragments::open(IndexLayout::new(home.path()), &indexes, false).expect("two kinds");
     let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
     write_fixture(&store, &source, &entities, &entries);
     store
@@ -652,10 +672,12 @@ fn fragment_ownership_is_checked_across_model_collections() {
         .expect("same file");
     let mut foreign = entries.clone();
     for entry in &mut foreign {
-        entry.model = "fixture/other".into();
+        entry.kind = ContentKind::Code;
     }
     assert!(store.validate_ownership(&foreign, FileId::new(0)).is_err());
-    let hits = store.search_fts("orchard", 10, None).expect("search");
+    let hits = store
+        .search_fts(ContentKind::Text, "orchard", 10, None)
+        .expect("search");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].file_id, source.id());
     assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
@@ -664,7 +686,7 @@ fn fragment_ownership_is_checked_across_model_collections() {
     store.delete_file(source.id()).expect("idempotent delete");
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("search deleted")
             .is_empty()
     );
@@ -681,7 +703,7 @@ fn embeddings_round_trip_as_fp16_and_remain_searchable() {
     store.flush().expect("flush storage");
 
     let collection = store
-        .collection("fixture/fixture")
+        .collection(ContentKind::Text)
         .expect("model collection");
     let stored = collection
         .fetch(&[entries[1].fragment_id.as_str()])
@@ -700,7 +722,7 @@ fn embeddings_round_trip_as_fp16_and_remain_searchable() {
     assert_ne!(decoded[0].to_bits(), entries[1].vector[0].to_bits());
 
     let hits = store
-        .search_vector("fixture/fixture", &entries[1].vector, 1, None)
+        .search_vector(ContentKind::Text, &entries[1].vector, 1, None)
         .expect("vector search");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
@@ -743,30 +765,31 @@ fn query_limits_and_nul_text_preserve_native_boundaries() {
 }
 
 #[test]
-fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets() {
+fn exact_symbol_lookup_collects_all_kinds_and_deduplicates_large_fragment_sets() {
     super::super::zvec::initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
-    let first = model();
-    let second = EmbeddingModelInfo::new(
-        crate::domain::model::ModelInfo::new(
-            first.model().provider(),
-            "second",
-            first.model().content_kinds().iter().copied(),
-            first.model().max_batch_size(),
-        )
-        .expect("second model metadata"),
-        first.dimension(),
-        first.metric(),
-        first.max_input_tokens(),
-        first.max_image_bytes(),
-    )
-    .expect("second model");
-    let store = Fragments::open(root.path(), &[first.clone(), second.clone()], false)
-        .expect("model tables");
+    let indexes = [
+        ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        },
+        ContentIndex {
+            kind: ContentKind::Code,
+            embedding: model(),
+        },
+    ];
+    let store =
+        Fragments::open(IndexLayout::new(root.path()), &indexes, false).expect("kind tables");
     let mut entities = Vec::new();
     let mut entries = Vec::new();
     for i in 0..125 {
-        let (_, mut owners, mut projections) = metadata_fragments(1, &format!("body-{i}"));
+        let content = if i == 124 {
+            Content::Code
+        } else {
+            Content::Text
+        };
+        let (_, mut owners, mut projections) =
+            metadata_fragments_with_content(1, &format!("body-{i}"), content);
         let mut owner = owners.remove(0);
         if i == 0 {
             // One entity alone fills a query batch; splitting must skip its
@@ -792,16 +815,11 @@ fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets(
                 .map(|fragment| IndexedFragment {
                     entity_id: owner.id().clone(),
                     fragment_id: fragment.id.clone(),
-                    model: first.model().reference(),
+                    kind: owner.content().kind(),
                     vector: vec![1.0, 0.0, 0.0],
                     fts_text: "harvest".into(),
                 })
                 .collect();
-        }
-        if i == 124 {
-            for projection in &mut projections {
-                projection.model = second.model().reference();
-            }
         }
         entities.push(owner);
         entries.extend(projections);

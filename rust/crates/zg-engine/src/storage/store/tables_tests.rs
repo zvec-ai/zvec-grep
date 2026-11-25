@@ -36,7 +36,10 @@ fn metadata_store(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: path.to_owned(),
-        embeddings: vec![model()],
+        indexes: vec![ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        }],
     })
     .expect("metadata storage")
 }
@@ -121,7 +124,7 @@ fn pdf_markdown_search_round_trip_keeps_pages_and_blocks() {
             entries.push(IndexedFragment {
                 entity_id: id.clone(),
                 fragment_id: fragment.id.clone(),
-                model: "fixture/fixture".into(),
+                kind: draft.content.kind(),
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text,
             });
@@ -146,7 +149,7 @@ fn pdf_markdown_search_round_trip_keeps_pages_and_blocks() {
     store.write(|state| super::flush(state)).expect("flush");
     drop(store);
     let store = metadata_store(temporary.path());
-    let hits = store.search_fts("continuation", 10, None).expect("FTS");
+    let hits = store.search_fts(ContentKind::Text, "continuation", 10, None).expect("FTS");
     assert!(!hits.is_empty());
     let loaded = store.load_search_hits(&hits).expect("load");
     let stored = &loaded.entities[entities[0].id()];
@@ -200,11 +203,11 @@ fn entity_document(store: &IndexStore, id: &str) -> Doc {
         .expect("fetch entity")
 }
 
-fn fragment_document(store: &IndexStore, model: &str, id: &str) -> Doc {
+fn fragment_document(store: &IndexStore, kind: ContentKind, id: &str) -> Doc {
     store
         .read(|state| {
             Ok(
-                fetch_map(state.fragments.collection(model)?, &[id.to_owned()])?
+                fetch_map(state.fragments.collection(kind)?, &[id.to_owned()])?
                     .remove(id)
                     .expect("stored fragment"),
             )
@@ -233,6 +236,14 @@ fn metadata_fragments(
     file_id: u32,
     label: &str,
 ) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
+    metadata_fragments_with_content(file_id, label, Content::Text)
+}
+
+fn metadata_fragments_with_content(
+    file_id: u32,
+    label: &str,
+    content: fn(String) -> Content,
+) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
     let source = file(file_id, "harvest.rs");
     let mut text = "Harvest outline".to_owned();
     text.push_str(&" ".repeat(20 - text.len()));
@@ -240,7 +251,7 @@ fn metadata_fragments(
     text.push_str(&" ".repeat(40 - text.len()));
     text.push_str(label);
     text.push_str(&" ".repeat(100 - text.len()));
-    let content = Content::Text(text);
+    let content = content(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
     let id = EntityId::new(source.id(), &content, &source_range).expect("entity id");
@@ -289,7 +300,7 @@ fn metadata_fragments(
         ])
         .map(|(fragment, (vector, text))| IndexedFragment {
             fts_text: format!("harvest 春'\\crop\nGarden\npub async fn harvest() -> Crop\nProduces the seasonal crop.\n{text}"),
-            model: "fixture/fixture".into(),
+            kind: owner.content().kind(),
             entity_id: owner.id().clone(),
             fragment_id: fragment.id.clone(),
             vector,
@@ -300,7 +311,7 @@ fn metadata_fragments(
 
 fn assert_projection(store: &IndexStore, entry: &IndexedFragment) {
     let id = entry.fragment_id.as_str();
-    let doc = fragment_document(store, "fixture/fixture", id);
+    let doc = fragment_document(store, ContentKind::Text, id);
     assert_eq!(
         string_field(&doc, "text").expect("prepared searchable text"),
         entry.fts_text.replace('\0', " "),
@@ -327,25 +338,31 @@ fn assert_projection(store: &IndexStore, entry: &IndexedFragment) {
 }
 
 #[test]
-fn counts_live_fragments_across_models_and_read_only_reopens() {
+fn shared_model_keeps_text_and_code_separate_across_reopen() {
     let temporary = tempfile::tempdir().expect("temporary storage");
-    let mut other = serde_json::to_value(model()).expect("model metadata");
-    other["model"]["name"] = serde_json::json!("other");
-    let embeddings = vec![
-        model(),
-        serde_json::from_value(other).expect("second model"),
+    let indexes = vec![
+        ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        },
+        ContentIndex {
+            kind: ContentKind::Code,
+            embedding: model(),
+        },
     ];
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: temporary.path().to_owned(),
-        embeddings: embeddings.clone(),
+        indexes: indexes.clone(),
     })
-    .expect("two model storage");
+    .expect("shared-model storage");
     assert_eq!(store.count_fragments().expect("empty count"), 0);
 
-    for (id, name) in ["fixture", "other"].into_iter().enumerate() {
-        let (source, entities, mut entries) =
-            metadata_fragments(u32::try_from(id).expect("fixture ID"), name);
+    for (id, name, content) in [
+        (0, "fixture", Content::Text as fn(_) -> _),
+        (1, "other", Content::Code),
+    ] {
+        let (source, entities, entries) = metadata_fragments_with_content(id, name, content);
         let source = FileRecord::new(
             source.id(),
             SourcePath::new(format!("{name}.rs")).expect("source path"),
@@ -353,9 +370,6 @@ fn counts_live_fragments_across_models_and_read_only_reopens() {
             source.index_status().clone(),
         )
         .expect("file record");
-        for entry in &mut entries {
-            entry.model = format!("fixture/{name}");
-        }
         store
             .apply_fixture_records(&source, &entities, &entries)
             .expect("write one entity with two fragments");
@@ -377,12 +391,33 @@ fn counts_live_fragments_across_models_and_read_only_reopens() {
     })
     .expect("read-only storage");
     assert_eq!(reader.count_fragments().expect("persisted count"), 4);
+    for kind in [ContentKind::Text, ContentKind::Code] {
+        let keywords = reader
+            .search_fts(kind, "orchard", 10, None)
+            .expect("keyword search");
+        let neighbors = reader
+            .search_vector(kind, &[1.0, 0.0, 0.0], 10, None)
+            .expect("vector search");
+        assert_eq!(keywords.len(), 1);
+        assert_eq!(neighbors.len(), 2);
+        let matches = reader
+            .load_search_hits(&neighbors)
+            .expect("canonical owners");
+        assert_eq!(matches.entities.len(), 1);
+        assert!(
+            matches
+                .entities
+                .values()
+                .all(|owner| owner.entity.content().kind() == kind)
+        );
+        assert_eq!(keywords[0].file_id, neighbors[0].file_id);
+    }
     reader.close().expect("close reader");
 
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: temporary.path().to_owned(),
-        embeddings,
+        indexes,
     })
     .expect("reopen writer");
     store
@@ -438,12 +473,12 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
         ..StorageSearchFilter::default()
     };
     let hits = store
-        .search_fts("orchard", 10, Some(&filter))
+        .search_fts(ContentKind::Text, "orchard", 10, Some(&filter))
         .expect("filtered FTS");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document_id, entities[0].fragments()[1].id.as_str());
     let vectors = store
-        .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
+        .search_vector(ContentKind::Text, &entries[1].vector, 10, Some(&filter))
         .expect("filtered vector retrieval");
     assert_eq!(vectors.len(), 2);
     assert!(
@@ -474,13 +509,13 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     ] {
         assert!(
             store
-                .search_fts("orchard", 10, Some(&rejected))
+                .search_fts(ContentKind::Text, "orchard", 10, Some(&rejected))
                 .expect("filtered FTS")
                 .is_empty()
         );
         assert!(
             store
-                .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&rejected))
+                .search_vector(ContentKind::Text, &entries[1].vector, 10, Some(&rejected))
                 .expect("filtered vector retrieval")
                 .is_empty()
         );
@@ -507,10 +542,10 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
 
     for hits in [
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("lightweight FTS"),
         store
-            .search_vector("fixture/fixture", &entries[1].vector, 10, None)
+            .search_vector(ContentKind::Text, &entries[1].vector, 10, None)
             .expect("lightweight vectors"),
     ] {
         let window = hits
@@ -549,10 +584,10 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
     };
     for hits in [
         store
-            .search_fts("orchard", 10, Some(&filter))
+            .search_fts(ContentKind::Text, "orchard", 10, Some(&filter))
             .expect("ID-filtered FTS"),
         store
-            .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
+            .search_vector(ContentKind::Text, &entries[1].vector, 10, Some(&filter))
             .expect("ID-filtered vectors"),
     ] {
         assert!(hits.iter().all(|hit| &hit.entity_id == entity_id));
@@ -576,7 +611,7 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
         string_field(&entity_doc, "entity_id").expect("stored owner ID"),
         entity_id.as_str()
     );
-    let doc = fragment_document(&store, "fixture/fixture", window_id);
+    let doc = fragment_document(&store, ContentKind::Text, window_id);
     assert_eq!(doc_key(&doc).expect("fragment primary key"), window_id);
     assert_eq!(
         string_field(&doc, "entity_id").expect("stored owner ID"),
@@ -589,7 +624,7 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
 }
 
 #[test]
-fn entity_content_is_canonical_and_fragments_have_one_model() {
+fn entity_content_is_canonical_and_fragments_match_owner_kind() {
     let home = tempfile::tempdir().expect("storage");
     let text = EmbeddingModelInfo::new(
         crate::domain::model::ModelInfo::new(
@@ -618,21 +653,32 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: home.path().to_owned(),
-        embeddings: vec![text, other],
+        indexes: vec![
+            ContentIndex {
+                kind: ContentKind::Text,
+                embedding: text,
+            },
+            ContentIndex {
+                kind: ContentKind::Code,
+                embedding: other,
+            },
+        ],
     })
     .expect("two models");
     let (source, entities, mut entries) = metadata_fragments(0, "owner");
-    entries[1].model = "fixture/other".into();
+    entries[1].kind = ContentKind::Code;
     assert!(
         fragments::validate_projections(&entities, &entries).is_err(),
-        "one entity cannot span model tables"
+        "one entity cannot span kind tables"
     );
     assert!(store.list_files().expect("unmodified").is_empty());
-    entries[1].model = "fixture/fixture".into();
+    entries[1].kind = ContentKind::Text;
     store
         .apply_fixture_records(&source, &entities, &entries)
-        .expect("one model owns entire entity");
-    let hits = store.search_fts("orchard", 10, None).expect("window match");
+        .expect("all projections match their canonical owner");
+    let hits = store
+        .search_fts(ContentKind::Text, "orchard", 10, None)
+        .expect("window match");
     assert_eq!(hits.len(), 1);
     let loaded = store.load_search_hits(&hits).expect("canonical bundle");
     assert_eq!(
@@ -650,8 +696,8 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
     );
     store
         .read(|state| {
-            for model in ["fixture/fixture", "fixture/other"] {
-                let schema = state.fragments.collection(model)?.schema().expect("schema");
+            for kind in [ContentKind::Text, ContentKind::Code] {
+                let schema = state.fragments.collection(kind)?.schema().expect("schema");
                 assert!(schema.has_index("text"));
                 assert!(schema.has_index("embedding"));
                 assert!(!schema.has_field("payload"));
@@ -673,7 +719,7 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
 }
 
 #[test]
-fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
+fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_kind_table() {
     let home = tempfile::tempdir().expect("storage");
     let first = EmbeddingModelInfo::new(
         crate::domain::model::ModelInfo::new(
@@ -702,7 +748,16 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: home.path().to_owned(),
-        embeddings: vec![first, second],
+        indexes: vec![
+            ContentIndex {
+                kind: ContentKind::Text,
+                embedding: first,
+            },
+            ContentIndex {
+                kind: ContentKind::Code,
+                embedding: second,
+            },
+        ],
     })
     .expect("two models");
     let (source, entities, entries) = metadata_fragments(0, "owner");
@@ -717,14 +772,18 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     )
     .expect("file record");
     let owner = &entities[0];
-    let foreign_id = EntityId::new(foreign_source.id(), owner.content(), &owner.source_range())
+    let Content::Text(text) = owner.content() else {
+        panic!("text fixture")
+    };
+    let foreign_content = Content::Code(text.clone());
+    let foreign_id = EntityId::new(foreign_source.id(), &foreign_content, &owner.source_range())
         .expect("entity id");
     let foreign_entities = vec![
         Entity::new(
             foreign_id,
             foreign_source.id(),
             owner.source_range(),
-            owner.content().clone(),
+            foreign_content,
             owner.metadata().cloned(),
             owner.fragments().to_vec(),
         )
@@ -732,7 +791,7 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     ];
     let mut foreign = entries.clone();
     for entry in &mut foreign {
-        entry.model = "fixture/other".into();
+        entry.kind = ContentKind::Code;
         entry.entity_id = foreign_entities[0].id().clone();
     }
     assert!(
@@ -743,14 +802,14 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     assert_eq!(store.list_files().expect("original file").len(), 1);
     assert_eq!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("original fragments")
             .len(),
         1
     );
     assert!(
         store
-            .search_vector("fixture/other", &[1.0, 0.0, 0.0], 10, None)
+            .search_vector(ContentKind::Code, &[1.0, 0.0, 0.0], 10, None)
             .expect("no foreign fragments")
             .is_empty()
     );
@@ -771,7 +830,9 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
-    let old_hits = store.search_fts("orchard", 10, None).expect("old hits");
+    let old_hits = store
+        .search_fts(ContentKind::Text, "orchard", 10, None)
+        .expect("old hits");
 
     // Simulate interruption after the retry marker but before replacing old rows.
     let mut unfinished = source.clone();
@@ -822,7 +883,7 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
     assert_eq!(store.list_files().expect("completed file"), [source]);
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("stale text removed")
             .is_empty()
     );
@@ -833,7 +894,9 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
             .entities
             .is_empty()
     );
-    let new_hits = store.search_fts("Harvest", 10, None).expect("new results");
+    let new_hits = store
+        .search_fts(ContentKind::Text, "Harvest", 10, None)
+        .expect("new results");
     assert_eq!(new_hits.len(), 1);
     assert_eq!(new_hits[0].entity_id, *replacement[0].id());
 }
@@ -867,7 +930,9 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
         store.list_files().expect("deletion still pending"),
         [deleting]
     );
-    let hits = store.search_fts("orchard", 10, None).expect("stale hit");
+    let hits = store
+        .search_fts(ContentKind::Text, "orchard", 10, None)
+        .expect("stale hit");
     assert_eq!(hits.len(), 1);
     assert!(
         store
@@ -881,7 +946,7 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
     assert!(store.list_files().expect("no files").is_empty());
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("no stale hits")
             .is_empty()
     );
@@ -895,7 +960,9 @@ fn result_loading_skips_missing_files_and_canonical_fragments() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
-    let hits = store.search_fts("orchard", 10, None).expect("window hit");
+    let hits = store
+        .search_fts(ContentKind::Text, "orchard", 10, None)
+        .expect("window hit");
     entities[0] = Entity::new(
         entities[0].id().clone(),
         entities[0].file_id(),
@@ -929,7 +996,8 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     metadata_store(temporary.path())
         .close()
         .expect("create tables");
-    let directory_table = Directories::open(temporary.path(), false).expect("directory table");
+    let directory_table =
+        Directories::open(IndexLayout::new(temporary.path()), false).expect("directory table");
     let mut doc = Doc::new().expect("directory doc");
     doc.set_pk(&format!("d{}", u32::MAX));
     doc.add_u32("directory_id", u32::MAX).expect("directory ID");
@@ -967,7 +1035,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
                 "optimize directories",
             )?;
             native(
-                state.fragments.collection("fixture/fixture")?.optimize(),
+                state.fragments.collection(ContentKind::Text)?.optimize(),
                 "optimize membership",
             )
         })
@@ -986,14 +1054,14 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     };
     assert_eq!(
         reader
-            .search_fts("orchard", 10, Some(&filter))
+            .search_fts(ContentKind::Text, "orchard", 10, Some(&filter))
             .expect("FTS membership")
             .len(),
         1
     );
     assert_eq!(
         reader
-            .search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, Some(&filter))
+            .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, Some(&filter))
             .expect("vector membership")
             .len(),
         2

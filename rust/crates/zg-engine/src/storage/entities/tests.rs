@@ -43,7 +43,8 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
 fn table_preserves_entities_metadata_and_ownership_across_reopen() {
     super::super::zvec::initialize().expect("native runtime");
     let root = tempfile::tempdir().expect("storage");
-    let table = Entities::open(root.path(), false).expect("entities");
+    let layout = IndexLayout::new(root.path());
+    let table = Entities::open(layout, false).expect("entities");
     let entities = [entity(1, true), entity(2, false)];
     let ids = entities
         .iter()
@@ -74,7 +75,7 @@ fn table_preserves_entities_metadata_and_ownership_across_reopen() {
     table.flush().expect("persist entities");
     drop(table);
 
-    let table = Entities::open(root.path(), false).expect("reopen entities");
+    let table = Entities::open(layout, false).expect("reopen entities");
     let loaded = table.fetch(&ids).expect("load canonical entities");
     assert_eq!(loaded.len(), 2);
     for entity in &entities {
@@ -143,7 +144,8 @@ fn indexed_entity(id: &str, file_id: u32) -> Doc {
 fn file_ids_are_complete_isolated_and_preserved_across_reopen() {
     super::super::zvec::initialize().expect("native runtime");
     let root = tempfile::tempdir().expect("storage");
-    let table = Entities::open(root.path(), false).expect("entities");
+    let layout = IndexLayout::new(root.path());
+    let table = Entities::open(layout, false).expect("entities");
     let ids: Vec<_> = (0..2301)
         .map(|ordinal| format!("00000001{ordinal:024x}"))
         .collect();
@@ -171,7 +173,7 @@ fn file_ids_are_complete_isolated_and_preserved_across_reopen() {
     table.flush().expect("persist entities");
     drop(table);
 
-    let table = Entities::open(root.path(), false).expect("reopen entities");
+    let table = Entities::open(layout, false).expect("reopen entities");
     assert_eq!(
         table
             .list_ids_for_file(FileId::new(1))
@@ -197,7 +199,7 @@ fn file_ids_are_complete_isolated_and_preserved_across_reopen() {
 fn full_file_id_batch_handles_escaped_range_bounds() {
     super::super::zvec::initialize().expect("native runtime");
     let root = tempfile::tempdir().expect("storage");
-    let table = Entities::open(root.path(), false).expect("entities");
+    let table = Entities::open(IndexLayout::new(root.path()), false).expect("entities");
     let ids: Vec<_> = (0..1024)
         .map(|ordinal| format!("quoted'\\id-{ordinal:04}"))
         .collect();
@@ -220,7 +222,7 @@ fn full_file_id_batch_handles_escaped_range_bounds() {
 fn file_id_listing_rejects_inconsistent_indexed_identity() {
     super::super::zvec::initialize().expect("native runtime");
     let root = tempfile::tempdir().expect("storage");
-    let table = Entities::open(root.path(), false).expect("entities");
+    let table = Entities::open(IndexLayout::new(root.path()), false).expect("entities");
     let mut doc = indexed_entity("entity", 1);
     doc.add_string("entity_id", "different")
         .expect("corrupt indexed identity");

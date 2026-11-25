@@ -38,8 +38,9 @@ fn options(path: &Path, read_only: bool, graph_enabled: bool) -> WorkspaceIndexS
         WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled,
             storage_path: path.to_owned(),
-            embeddings: vec![
-                EmbeddingModelInfo::new(
+            indexes: vec![ContentIndex {
+                kind: ContentKind::Code,
+                embedding: EmbeddingModelInfo::new(
                     ModelInfo::new(
                         "fixture",
                         "graph",
@@ -53,7 +54,7 @@ fn options(path: &Path, read_only: bool, graph_enabled: bool) -> WorkspaceIndexS
                     None,
                 )
                 .expect("embedding model"),
-            ],
+            }],
         }
     }
 }
@@ -78,7 +79,7 @@ fn snapshot(store: &IndexStore, path: impl Into<PathBuf>, symbols: &[&str]) -> S
     let entities = symbols
         .iter()
         .map(|symbol| {
-            let content = Content::Text((*symbol).into());
+            let content = Content::Code((*symbol).into());
             let entity_id = EntityId::new(id, &content, &Range::Full).expect("entity identity");
             Entity::new(
                 entity_id.clone(),
@@ -100,7 +101,7 @@ fn snapshot(store: &IndexStore, path: impl Into<PathBuf>, symbols: &[&str]) -> S
         .map(|(entity, symbol)| IndexedFragment {
             entity_id: entity.id().clone(),
             fragment_id: entity.fragments()[0].id.clone(),
-            model: "fixture/graph".into(),
+            kind: ContentKind::Code,
             vector: vec![1.0, 0.0, 0.0],
             fts_text: (*symbol).into(),
         })
@@ -263,20 +264,20 @@ fn default_storage_skips_graph_io_and_preserves_existing_database() {
     store.finalize_writes().expect("finalize update");
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Code, "orchard", 10, None)
             .expect("old text")
             .is_empty()
     );
     assert_eq!(
         store
-            .search_fts("vineyard", 10, None)
+            .search_fts(ContentKind::Code, "vineyard", 10, None)
             .expect("new text")
             .len(),
         1
     );
     assert_eq!(
         store
-            .search_vector("fixture/graph", &[1.0, 0.0, 0.0], 10, None)
+            .search_vector(ContentKind::Code, &[1.0, 0.0, 0.0], 10, None)
             .expect("vector search")
             .len(),
         1
@@ -290,7 +291,7 @@ fn default_storage_skips_graph_io_and_preserves_existing_database() {
     assert!(reader.list_files().expect("deleted file").is_empty());
     assert!(
         reader
-            .search_fts("vineyard", 10, None)
+            .search_fts(ContentKind::Code, "vineyard", 10, None)
             .expect("deleted text")
             .is_empty()
     );
@@ -359,7 +360,7 @@ fn disabled_graph_rejects_data_and_resolution_without_changing_files() {
     assert!(stored_entities(&store, &replacement.entities).is_empty());
     assert_eq!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Code, "orchard", 10, None)
             .expect("original text")
             .len(),
         1
@@ -576,14 +577,14 @@ fn unavailable_graph_preserves_canonical_reads_and_rejects_writes_without_recrea
         assert_eq!(stored_entities(&reader, &source.entities).len(), 1);
         assert_eq!(
             reader
-                .search_fts("orchard", 10, None)
+                .search_fts(ContentKind::Code, "orchard", 10, None)
                 .expect("text search")
                 .len(),
             1
         );
         assert_eq!(
             reader
-                .search_vector("fixture/graph", &[1.0, 0.0, 0.0], 10, None)
+                .search_vector(ContentKind::Code, &[1.0, 0.0, 0.0], 10, None)
                 .expect("vector search")
                 .len(),
             1

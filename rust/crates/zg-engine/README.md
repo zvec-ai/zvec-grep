@@ -73,11 +73,11 @@ for the shared Direct, Server and MCP selection policy.
 
 ### Vector storage
 
-Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. See [index compatibility](src/workspace/README.md#key-conventions) for the current format and rebuild policy.
+Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. Index format 3 stores each enabled collection in `.zvec-grep/index/<kind>/`. An image-capable route creates an `image` collection. The file indexer currently skips standalone images. Rebuild an older index from source with `zg --index --rebuild`.
 
 ### Embedding models
 
-Each workspace uses an embedding model for semantic search. Local models run on your machine and may need an initial download; remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
+Each workspace inherits the content kinds its default embedding model supports. A per-kind override can replace that model or enable an additional kind. Search uses the model for each selected collection. Local models run on your machine and may need an initial download. Remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
 
 Model selection runs at the shared engine boundary for Direct, Server and MCP.
 An existing compatible index keeps its stored model unless a replacement is

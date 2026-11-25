@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::domain::{
-    Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId, SourcePath, SymbolType,
-    model::EmbeddingModelInfo,
+    ContentIndex, ContentKind, Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId,
+    SourcePath, SymbolType,
 };
 
 /// Opening options. With `graph_enabled: false`, neither mode opens SQLite;
@@ -21,7 +21,7 @@ pub(crate) enum WorkspaceIndexStorageOptions {
     ReadWrite {
         storage_path: PathBuf,
         graph_enabled: bool,
-        embeddings: Vec<EmbeddingModelInfo>,
+        indexes: Vec<ContentIndex>,
     },
 }
 
@@ -83,8 +83,7 @@ impl From<&FileRecord> for StoredFileAttributes {
 pub(crate) struct IndexedFragment {
     pub entity_id: EntityId,
     pub fragment_id: FragmentId,
-    /// Unique configured embedding model reference (provider/name).
-    pub model: String,
+    pub kind: ContentKind,
     pub vector: Vec<f32>,
     pub fts_text: String,
 }
@@ -98,7 +97,7 @@ pub(crate) struct StorageSearchFilter {
     pub symbol_types: Option<Vec<SymbolType>>,
 }
 
-/// Boolean predicates over metadata projected into each model collection.
+/// Boolean predicates over metadata projected into each fragment collection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StoragePathFilter {
     All,

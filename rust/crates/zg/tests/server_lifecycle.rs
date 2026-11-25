@@ -1,3 +1,5 @@
+#[path = "server_lifecycle/content_kinds.rs"]
+mod content_kinds;
 #[path = "server_lifecycle/http_models.rs"]
 mod http_models;
 #[path = "server_lifecycle/mcp_parity.rs"]
@@ -882,7 +884,9 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     let response = loop {
         let response = post_json(port, Some(&session), &index_status.to_string())?;
         assert!(!response.contains("\"job_state\":\"failed\""), "{response}");
-        if response.contains("\"job_state\":\"succeeded\"") {
+        // The first build has published the index and activated its watcher.
+        // A follow-up watcher job can already have replaced the build in status.
+        if response.contains("\"indexed\":true") && response.contains("\"watcher_active\":true") {
             break response;
         }
         assert!(
@@ -891,14 +895,11 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    assert!(response.contains("\"indexed\":true"), "{response}");
     assert!(response.contains("\"index_policy\":\"enabled\""));
     assert!(response.contains("\"source\":\"index\""));
     assert!(response.contains("\"runtime\":"));
     assert!(response.contains("\"isError\":false"));
 
-    // A no-op watcher job may replace the initial job's progress before this
-    // status call; the search below verifies that the source was indexed.
     let search = json!({
         "jsonrpc": "2.0",
         "id": 7,

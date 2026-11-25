@@ -334,12 +334,13 @@ mod tests {
         let reply = super::DaemonReply::Info(Box::new(InfoResult {
             root: "/workspace".into(),
             indexed: true,
-            compatibility: IndexCompatibility::Compatible { version: 2 },
+            compatibility: IndexCompatibility::Compatible { version: 3 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
+                content_indexes: Vec::new(),
                 path: "/workspace/.zvec-grep".into(),
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
@@ -349,7 +350,7 @@ mod tests {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
                 }),
-                index_version: Some(2),
+                index_version: Some(3),
 
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
@@ -365,7 +366,7 @@ mod tests {
         let encoded = serde_json::to_value(&reply).expect("info reply should serialize");
         assert_eq!(
             encoded["reply"]["compatibility"],
-            serde_json::json!({"status": "compatible", "version": 2})
+            serde_json::json!({"status": "compatible", "version": 3})
         );
         assert!(encoded["reply"]["workspace_index"].get("name").is_none());
         assert_eq!(encoded["reply"]["workspace_index"]["root"], "/workspace");

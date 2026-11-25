@@ -110,7 +110,7 @@ pub(super) fn source_kind(formats: &[FileFormat]) -> Option<SourceKind> {
     }
 }
 
-pub(super) fn is_code_source(formats: &[FileFormat]) -> bool {
+pub(crate) fn is_code_source(formats: &[FileFormat]) -> bool {
     !has_category(formats, FileCategory::Data) && has_category(formats, FileCategory::Code)
 }
 

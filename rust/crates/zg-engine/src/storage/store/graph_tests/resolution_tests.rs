@@ -62,7 +62,7 @@ fn candidates_are_complete_and_distinct_without_loading_source_bodies() {
             entity.fragments().iter().map(|fragment| IndexedFragment {
                 entity_id: entity.id().clone(),
                 fragment_id: fragment.id.clone(),
-                model: "fixture/graph".into(),
+                kind: entity.content().kind(),
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: "target'quoted".into(),
             })

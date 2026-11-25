@@ -86,6 +86,90 @@ fn configure_command(command: &mut Command, home: &Path, workspace: &Path) {
 }
 
 #[test]
+fn code_route_reuses_its_saved_http_model_and_consent_with_a_local_default()
+-> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let embedding = HttpModelServer::start(false)?;
+    std::fs::write(
+        workspace.path().join("lib.rs"),
+        "pub fn authenticate() {}\n",
+    )?;
+    let config_dir = home.path().join(".zvec-grep");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&json!({"version": 1, "models": {"http/fixture": {
+            "endpoint": format!("http://{}/v1", embedding.server.address),
+            "model": "code-encoder", "dimension": 4, "maxInputTokens": 128,
+            "queryPrefix": "query: ", "documentPrefix": "document: ",
+            "auth": "bearer", "apiKeyEnv": "ZG_HTTP_FIXTURE_KEY"
+        }}}))?,
+    )?;
+    let configure = |command: &mut Command| {
+        configure_command(command, home.path(), workspace.path());
+        command.env("ZG_HTTP_FIXTURE_KEY", "code-route-key");
+    };
+    let run = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        configure(&mut command);
+        command.args(args).output()
+    };
+    assert_command_success(&run(&[
+        "--mode",
+        "direct",
+        "--index",
+        "--allow-remote",
+        "--embedding",
+        "local/potion-code-16m-v2",
+        "--embedding",
+        "code=http/fixture",
+    ])?);
+    assert_eq!(
+        embedding.last_authorization().as_deref(),
+        Some("Bearer code-route-key")
+    );
+    std::fs::remove_file(config_path)?;
+    let query = |mode| {
+        run(&[
+            "--mode",
+            mode,
+            "--vector",
+            "authentication",
+            "--kind",
+            "code",
+            "--refresh",
+            "off",
+        ])
+    };
+    let previous = embedding.request_count();
+    let denied = query("direct")?;
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("http/fixture"));
+    assert_eq!(embedding.request_count(), previous);
+    assert_command_success(&run(&[
+        "--auth",
+        "grant",
+        "--capability",
+        "embedding",
+        "--scope",
+        "workspace",
+        "--embedding",
+        "http/fixture",
+    ])?);
+    let (mut daemon, _) = start_server(&binary, &home, "full", None, configure)?;
+    let result = query("server")?;
+    assert_command_success(&result);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("lib.rs"));
+    assert_eq!(embedding.request_count(), previous + 1);
+    assert_command_success(&daemon.stop()?);
+    Ok(())
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "Verify CLI, daemon, and MCP against the same persisted model definition"

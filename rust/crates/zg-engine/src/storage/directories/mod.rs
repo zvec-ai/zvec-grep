@@ -1,9 +1,6 @@
 //! Directory identities and their parent relationships.
 
-use std::{
-    path::Path,
-    sync::{Mutex, MutexGuard},
-};
+use std::sync::{Mutex, MutexGuard};
 use zvec_rust::{Collection, CollectionSchema, DataType, Doc};
 
 use super::{
@@ -14,7 +11,7 @@ use super::{
 };
 use crate::{
     EngineError, EngineResult,
-    domain::{DirectoryId, DirectoryRecord, SourcePath},
+    domain::{DirectoryId, DirectoryRecord, IndexLayout, SourcePath},
 };
 
 mod ids;
@@ -27,10 +24,10 @@ pub(super) struct Directories {
 }
 
 impl Directories {
-    pub(super) fn open(root: &Path, read_only: bool) -> EngineResult<Self> {
+    pub(super) fn open(layout: IndexLayout<'_>, read_only: bool) -> EngineResult<Self> {
         Ok(Self {
             collection: open_collection(
-                &root.join("directories"),
+                &layout.directories_dir(),
                 &directories_schema()?,
                 read_only,
             )?,

@@ -35,7 +35,13 @@ impl Fixture {
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: true,
             storage_path: storage_home.clone(),
-            embeddings: vec![schema()],
+            indexes: [ContentKind::Text, ContentKind::Code]
+                .into_iter()
+                .map(|kind| crate::domain::ContentIndex {
+                    kind,
+                    embedding: schema(),
+                })
+                .collect(),
         })
         .expect("writable index");
         let local = write_symbols(
@@ -92,7 +98,13 @@ impl Fixture {
         IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: true,
             storage_path: self.storage_home().to_owned(),
-            embeddings: vec![schema()],
+            indexes: [ContentKind::Text, ContentKind::Code]
+                .into_iter()
+                .map(|kind| crate::domain::ContentIndex {
+                    kind,
+                    embedding: schema(),
+                })
+                .collect(),
         })
         .expect("open test storage")
     }
@@ -267,7 +279,7 @@ pub(super) fn write_symbols(
             entity.fragments().iter().map(|fragment| IndexedFragment {
                 entity_id: entity.id().clone(),
                 fragment_id: fragment.id.clone(),
-                model: schema().model().reference(),
+                kind: entity.content().kind(),
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: match entity.content() {
                     Content::Text(text) | Content::Code(text) => text.clone(),

@@ -22,28 +22,26 @@ use super::graph_assembly::assemble_file_graph;
 use super::graph_resolver::resolve_pending;
 use super::pipeline::bind_entities;
 
-const MODEL: &str = "fixture/fixture-model";
-
 pub(super) fn open(path: &std::path::Path) -> IndexStore {
+    let kinds = [ContentKind::Text, ContentKind::Code];
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: path.to_owned(),
         graph_enabled: true,
-        embeddings: vec![
-            EmbeddingModelInfo::new(
-                ModelInfo::new(
-                    "fixture".to_owned(),
-                    "fixture-model".to_owned(),
-                    [ContentKind::Text, ContentKind::Code, ContentKind::Image],
-                    32,
+        indexes: kinds
+            .into_iter()
+            .map(|kind| crate::domain::ContentIndex {
+                kind,
+                embedding: EmbeddingModelInfo::new(
+                    ModelInfo::new("fixture".to_owned(), "fixture-model".to_owned(), kinds, 32)
+                        .expect("valid model metadata"),
+                    3,
+                    EmbeddingMetric::Cosine,
+                    None,
+                    None,
                 )
-                .expect("valid model metadata"),
-                3,
-                EmbeddingMetric::Cosine,
-                None,
-                None,
-            )
-            .expect("valid embedding metadata"),
-        ],
+                .expect("valid embedding metadata"),
+            })
+            .collect(),
     })
     .expect("open storage")
 }
@@ -87,7 +85,7 @@ fn index_source_with_graph(
             entity.fragments().iter().map(|fragment| IndexedFragment {
                 entity_id: entity.id().clone(),
                 fragment_id: fragment.id.clone(),
-                model: MODEL.to_owned(),
+                kind: entity.content().kind(),
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: text.to_owned(),
             })

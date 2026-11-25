@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, marker::PhantomData};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,90 +49,6 @@ pub(crate) struct IndexDescriptor {
     graph_indexing: bool,
     #[serde(skip)]
     fts: FtsConfig,
-}
-
-impl<'de> Deserialize<'de> for IndexDescriptor {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Fields {
-            default_embedding_model: EmbeddingModelInfo,
-            #[serde(default, deserialize_with = "deserialize_unique_map")]
-            embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
-            #[serde(default, deserialize_with = "deserialize_unique_map")]
-            embedding_configs: BTreeMap<String, ModelConfig<EncryptedApiKey>>,
-            // Released v2 indexes predate the optional code graph.
-            #[serde(default)]
-            graph_indexing: bool,
-        }
-
-        let fields = Fields::deserialize(deserializer)?;
-        Self::new(
-            fields.default_embedding_model,
-            fields.embedding_routes,
-            fields.embedding_configs,
-            fields.graph_indexing,
-            FTS_CONFIG,
-        )
-        .map_err(serde::de::Error::custom)
-    }
-}
-
-fn deserialize_unique_map<'de, D, K, V>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    K: Deserialize<'de> + Ord + fmt::Debug,
-    V: Deserialize<'de>,
-{
-    struct MapVisitor<K, V>(PhantomData<(K, V)>);
-
-    impl<'de, K, V> serde::de::Visitor<'de> for MapVisitor<K, V>
-    where
-        K: Deserialize<'de> + Ord + fmt::Debug,
-        V: Deserialize<'de>,
-    {
-        type Value = BTreeMap<K, V>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("an index metadata map with unique keys")
-        }
-
-        fn visit_map<A: serde::de::MapAccess<'de>>(
-            self,
-            mut map: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut values = BTreeMap::new();
-            while let Some(key) = map.next_key::<K>()? {
-                let entry = match values.entry(key) {
-                    std::collections::btree_map::Entry::Occupied(entry) => {
-                        return Err(serde::de::Error::custom(format!(
-                            "duplicate index metadata key {:?}",
-                            entry.key(),
-                        )));
-                    }
-                    std::collections::btree_map::Entry::Vacant(entry) => entry,
-                };
-                // Serde errors can include the input value, including plaintext credentials.
-                let value = map.next_value::<V>().map_err(|_| {
-                    <A::Error as serde::de::Error>::custom(format!(
-                        "invalid index metadata for {:?}",
-                        entry.key(),
-                    ))
-                })?;
-                entry.insert(value);
-            }
-            Ok(values)
-        }
-    }
-
-    deserializer.deserialize_map(MapVisitor(PhantomData))
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ContentIndex {
-    pub kind: ContentKind,
-    pub embedding: EmbeddingModelInfo,
 }
 
 impl IndexDescriptor {
@@ -190,8 +106,13 @@ impl IndexDescriptor {
                         "HTTP model with auth none cannot store an API key",
                     ));
                 }
-                http.model_info(&reference)?
-                    .ensure_index_compatible(model)?;
+                let schema = http.model_info(&reference)?;
+                schema.ensure_index_compatible(model)?;
+                if schema.model().content_kinds() != model.model().content_kinds() {
+                    return Err(EngineError::invalid_argument(
+                        "HTTP model content kinds differ from its descriptor",
+                    ));
+                }
                 let endpoint = config.endpoint.as_deref().ok_or_else(|| {
                     EngineError::invalid_argument(
                         "HTTP model endpoint is missing from index metadata",
@@ -216,19 +137,6 @@ impl IndexDescriptor {
         })
     }
 
-    /// Whether the persisted index carries the walk-time code graph.
-    pub(crate) fn graph_indexing(&self) -> bool {
-        self.graph_indexing
-    }
-
-    /// Records whether the published index carries the walk-time code graph.
-    /// Production sets the switch through [`Self::new`]; tests use this to
-    /// derive a variant of a fixture descriptor.
-    #[cfg(test)]
-    pub(crate) fn set_graph_indexing(&mut self, enabled: bool) {
-        self.graph_indexing = enabled;
-    }
-
     pub(crate) fn default_embedding_model(&self) -> &EmbeddingModelInfo {
         &self.default_embedding_model
     }
@@ -241,32 +149,44 @@ impl IndexDescriptor {
         &self.embedding_configs
     }
 
+    pub(crate) fn graph_indexing(&self) -> bool {
+        self.graph_indexing
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_graph_indexing(&mut self, enabled: bool) {
+        self.graph_indexing = enabled;
+    }
+
     pub(crate) fn fts(&self) -> FtsConfig {
         self.fts
     }
 
-    /// An unsupported default yields no content index.
     pub(crate) fn model_for(&self, kind: ContentKind) -> Option<&EmbeddingModelInfo> {
-        if let Some(embedding) = self.embedding_routes.get(&kind) {
-            return Some(embedding);
-        }
-        self.default_embedding_model
-            .model()
-            .supports_content(kind)
-            .then_some(&self.default_embedding_model)
+        let default = &self.default_embedding_model;
+        self.embedding_routes
+            .get(&kind)
+            .or_else(|| default.model().supports_content(kind).then_some(default))
     }
 
     pub(crate) fn content_indexes(&self) -> Vec<ContentIndex> {
-        let mut indexes = Vec::new();
-        for kind in [ContentKind::Text, ContentKind::Code, ContentKind::Image] {
-            if let Some(embedding) = self.model_for(kind) {
-                indexes.push(ContentIndex {
+        let kinds: BTreeSet<_> = self
+            .default_embedding_model
+            .model()
+            .content_kinds()
+            .iter()
+            .chain(self.embedding_routes.keys())
+            .copied()
+            .collect();
+        kinds
+            .into_iter()
+            .filter_map(|kind| {
+                self.model_for(kind).map(|embedding| ContentIndex {
                     kind,
                     embedding: embedding.clone(),
-                });
-            }
-        }
-        indexes
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn embeddings(&self) -> Vec<&EmbeddingModelInfo> {
@@ -281,67 +201,129 @@ impl IndexDescriptor {
         models.into_values().collect()
     }
 
-    pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
-        let indexes = self.content_indexes();
-        let other_indexes = other.content_indexes();
-        if self.fts != other.fts || indexes.len() != other_indexes.len() {
-            return Err(EngineError::invalid_argument(
-                "existing index uses different content kinds or FTS configuration; rebuild the index",
-            ));
-        }
-        for (index, other_index) in indexes.iter().zip(&other_indexes) {
-            if index.kind != other_index.kind {
-                return Err(EngineError::invalid_argument(
-                    "existing index uses different content kinds; rebuild the index",
-                ));
-            }
-            index
-                .embedding
-                .ensure_index_compatible(&other_index.embedding)?;
-        }
-        for model in self
-            .embeddings()
-            .into_iter()
-            .filter(|model| model.model().provider() == "http")
-        {
-            let reference = model.model().reference();
-            let saved = &self.embedding_configs[&reference];
-            let requested = other.embedding_configs.get(&reference).ok_or_else(|| {
-                EngineError::invalid_argument("HTTP model descriptor is missing; rebuild the index")
-            })?;
-            saved
-                .http
-                .as_ref()
-                .expect("validated HTTP descriptor")
-                .ensure_index_compatible(requested.http.as_ref().ok_or_else(|| {
-                    EngineError::invalid_argument(
-                        "HTTP model descriptor is missing; rebuild the index",
-                    )
-                })?)?;
-            let canonical = |config: &ModelConfig<EncryptedApiKey>| {
-                crate::authorization::canonical_remote_endpoint(
-                    &reference,
-                    config.endpoint.as_deref().unwrap_or_default(),
-                )
-            };
-            if canonical(saved)? != canonical(requested)? {
-                return Err(EngineError::invalid_argument(
-                    "HTTP embedding endpoint changed; rebuild the index",
-                ));
-            }
-        }
-        if self.graph_indexing != other.graph_indexing {
-            let existing = if self.graph_indexing {
-                "stores the code graph"
-            } else {
-                "has no code graph"
-            };
+    pub(crate) fn ensure_index_compatible(&self, requested: &Self) -> EngineResult<()> {
+        let stored_indexes = self.content_indexes();
+        let requested_indexes = requested.content_indexes();
+        let kind_names = |indexes: &[ContentIndex]| {
+            indexes
+                .iter()
+                .map(|index| index.kind.as_str())
+                .collect::<Vec<_>>()
+        };
+        let stored_kinds = kind_names(&stored_indexes);
+        let requested_kinds = kind_names(&requested_indexes);
+        if stored_kinds != requested_kinds {
             return Err(EngineError::invalid_argument(format!(
-                "existing index {existing}; rebuild the index to change graph indexing",
+                "indexed content kinds would change from [{}] to [{}]",
+                stored_kinds.join(", "),
+                requested_kinds.join(", "),
+            )));
+        }
+        for (stored, next) in stored_indexes.iter().zip(&requested_indexes) {
+            stored
+                .embedding
+                .ensure_index_compatible(&next.embedding)
+                .map_err(|error| {
+                    EngineError::invalid_argument(format!(
+                        "{} {}",
+                        stored.kind.as_str(),
+                        error.message(),
+                    ))
+                })?;
+            if stored.embedding.model().provider() == "http" {
+                let reference = stored.embedding.model().reference();
+                let saved_config = &self.embedding_configs[&reference];
+                let next_config = &requested.embedding_configs[&reference];
+                saved_config
+                    .http
+                    .as_ref()
+                    .expect("validated HTTP descriptor")
+                    .ensure_index_compatible(
+                        next_config
+                            .http
+                            .as_ref()
+                            .expect("validated HTTP descriptor"),
+                    )?;
+                let canonical_endpoint = |config: &ModelConfig<EncryptedApiKey>| {
+                    crate::authorization::canonical_remote_endpoint(
+                        &reference,
+                        config.endpoint.as_deref().expect("validated HTTP endpoint"),
+                    )
+                };
+                if canonical_endpoint(saved_config)? != canonical_endpoint(next_config)? {
+                    return Err(EngineError::invalid_argument(
+                        "HTTP embedding endpoint changed; rebuild the index",
+                    ));
+                }
+            }
+        }
+
+        if self.graph_indexing != requested.graph_indexing {
+            return Err(EngineError::invalid_argument(if requested.graph_indexing {
+                "code graph indexing would change from disabled to enabled"
+            } else {
+                "code graph indexing would change from enabled to disabled"
+            }));
+        }
+
+        if self.fts.tokenizer != requested.fts.tokenizer {
+            return Err(EngineError::invalid_argument(format!(
+                "full-text tokenizer would change from {} to {}",
+                self.fts.tokenizer, requested.fts.tokenizer,
+            )));
+        }
+        if self.fts.filters != requested.fts.filters {
+            return Err(EngineError::invalid_argument(format!(
+                "full-text filters would change from [{}] to [{}]",
+                self.fts.filters.join(", "),
+                requested.fts.filters.join(", "),
             )));
         }
         Ok(())
     }
+}
+
+impl<'de> Deserialize<'de> for IndexDescriptor {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Fields {
+            default_embedding_model: EmbeddingModelInfo,
+            #[serde(default, with = "serde_with::rust::maps_duplicate_key_is_error")]
+            embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
+            #[serde(default, deserialize_with = "deserialize_embedding_configs")]
+            embedding_configs: BTreeMap<String, ModelConfig<EncryptedApiKey>>,
+            #[serde(default)]
+            graph_indexing: bool,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(
+            fields.default_embedding_model,
+            fields.embedding_routes,
+            fields.embedding_configs,
+            fields.graph_indexing,
+            FTS_CONFIG,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_embedding_configs<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, ModelConfig<EncryptedApiKey>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_with::rust::maps_duplicate_key_is_error::deserialize(deserializer)
+        .map_err(|_| serde::de::Error::custom("invalid embeddingConfigs in index manifest"))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ContentIndex {
+    pub kind: ContentKind,
+    pub embedding: EmbeddingModelInfo,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -361,23 +343,50 @@ mod tests {
     use super::*;
     use crate::domain::model::{EmbeddingMetric, ModelInfo};
 
+    fn embedding(name: &str, kinds: impl IntoIterator<Item = ContentKind>) -> EmbeddingModelInfo {
+        EmbeddingModelInfo::new(
+            ModelInfo::new("local", name, kinds, 8).expect("model"),
+            8,
+            EmbeddingMetric::Cosine,
+            Some(128),
+            None,
+        )
+        .expect("embedding")
+    }
+
     fn descriptor() -> IndexDescriptor {
         IndexDescriptor::new(
-            EmbeddingModelInfo::new(
-                ModelInfo::new("local", "test", [ContentKind::Text, ContentKind::Code], 8)
-                    .expect("model"),
-                8,
-                EmbeddingMetric::Cosine,
-                Some(128),
-                None,
-            )
-            .expect("embedding"),
+            embedding("test", [ContentKind::Text, ContentKind::Code]),
             BTreeMap::new(),
             BTreeMap::new(),
             false,
             FTS_CONFIG,
         )
         .expect("index descriptor")
+    }
+
+    #[test]
+    fn content_indexes_resolve_models_by_kind() {
+        use ContentKind::{Code, Image, Text};
+
+        let base = descriptor();
+        assert_eq!(base.model_for(Image), None);
+
+        let default = base.default_embedding_model;
+        let media = embedding("media", [Code, Image]);
+        let index = IndexDescriptor::new(
+            default.clone(),
+            BTreeMap::from([(Code, media.clone()), (Image, media.clone())]),
+            BTreeMap::new(),
+            false,
+            FTS_CONFIG,
+        )
+        .expect("valid routes");
+        let expected = [(Text, default), (Code, media.clone()), (Image, media)];
+        assert_eq!(
+            index.content_indexes(),
+            expected.map(|(kind, embedding)| ContentIndex { kind, embedding })
+        );
     }
 
     #[test]
@@ -405,56 +414,75 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<IndexState>(json).is_err(), "{json}");
         }
+
+        let enabled = IndexState::Enabled(Box::new(descriptor()));
+        let mut json = serde_json::to_value(&enabled).expect("encode enabled index");
+        let fields = json["descriptor"]
+            .as_object_mut()
+            .expect("descriptor object");
+        assert_eq!(fields.remove("graphIndexing"), Some(false.into()));
+        let restored: IndexState =
+            serde_json::from_value(json.clone()).expect("descriptor defaults");
+        assert_eq!(restored, enabled);
+        json["descriptor"]["graphIndexing"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<IndexState>(json).is_err());
     }
 
     #[test]
-    fn graph_setting_mismatch_requires_a_rebuild() {
-        let published = descriptor();
-        let requested = IndexDescriptor {
-            graph_indexing: true,
-            ..descriptor()
-        };
-        let error = published
+    fn incompatible_content_kinds_report_both_sets_even_when_the_counts_match() {
+        let stored = descriptor();
+        let mut value = serde_json::to_value(&stored).expect("descriptor");
+        value["defaultEmbeddingModel"]["model"]["contentKinds"] =
+            serde_json::json!(["text", "image"]);
+        let requested = serde_json::from_value(value).expect("image instead of code");
+        let error = stored
             .ensure_index_compatible(&requested)
-            .expect_err("graph setting changed");
-        assert!(
-            error.message().contains("has no code graph"),
-            "{}",
-            error.message()
+            .expect_err("kind mismatch");
+        assert_eq!(
+            error.message(),
+            "indexed content kinds would change from [text, code] to [text, image]"
         );
-        let error = requested
-            .ensure_index_compatible(&published)
-            .expect_err("graph setting changed");
-        assert!(
-            error.message().contains("stores the code graph"),
-            "{}",
-            error.message()
-        );
-        published
-            .ensure_index_compatible(&descriptor())
-            .expect("matching graph setting");
     }
 
     #[test]
-    fn legacy_descriptor_defaults_to_indexing_without_a_graph() {
-        let encoded =
-            serde_json::to_string(&IndexState::Enabled(Box::new(descriptor()))).expect("encode");
-        assert!(encoded.contains("\"graphIndexing\":false"));
+    fn index_settings_compatibility_reports_the_first_change() {
+        let base = descriptor();
+        let mut tokenizer = base.clone();
+        tokenizer.fts.tokenizer = "simple";
+        let mut filters = base.clone();
+        filters.fts.filters = &[];
+        let mut graph_and_tokenizer = tokenizer.clone();
+        graph_and_tokenizer.graph_indexing = true;
 
-        let incomplete = encoded.replace(",\"graphIndexing\":false", "");
-        assert_ne!(incomplete, encoded);
-        let restored = serde_json::from_str::<IndexState>(&incomplete).expect("v2 descriptor");
-        let restored = restored.descriptor().expect("enabled index");
-        assert!(!restored.graph_indexing());
-        restored
-            .ensure_index_compatible(&descriptor())
-            .expect("existing v2 index remains compatible");
-        assert!(
-            serde_json::from_str::<IndexState>(
-                &encoded.replace("\"graphIndexing\":false", "\"graphIndexing\":null")
-            )
-            .is_err()
-        );
+        base.ensure_index_compatible(&base)
+            .expect("matching settings");
+        for (stored, requested, message) in [
+            (
+                &base,
+                &tokenizer,
+                "full-text tokenizer would change from jieba to simple",
+            ),
+            (
+                &base,
+                &filters,
+                "full-text filters would change from [lowercase] to []",
+            ),
+            (
+                &base,
+                &graph_and_tokenizer,
+                "code graph indexing would change from disabled to enabled",
+            ),
+            (
+                &graph_and_tokenizer,
+                &base,
+                "code graph indexing would change from enabled to disabled",
+            ),
+        ] {
+            let error = stored
+                .ensure_index_compatible(requested)
+                .expect_err("settings changed");
+            assert_eq!(error.message(), message);
+        }
     }
 
     #[test]
@@ -470,14 +498,17 @@ mod tests {
             "\"embeddingConfigs\":{}",
             r#""embeddingConfigs":{"local/test":{},"local/test":{}}"#,
         );
-        for value in [duplicate_route, duplicate_config] {
-            assert!(serde_json::from_str::<IndexDescriptor>(&value).is_err());
-        }
+        assert!(serde_json::from_str::<IndexDescriptor>(&duplicate_route).is_err());
         let plaintext = json.replace(
             "\"embeddingConfigs\":{}",
             r#""embeddingConfigs":{"local/test":{"apiKey":"private-token"}}"#,
         );
-        let error = serde_json::from_str::<IndexDescriptor>(&plaintext).expect_err("plaintext key");
-        assert!(!error.to_string().contains("private-token"));
+        for value in [duplicate_config, plaintext] {
+            let error = serde_json::from_str::<IndexDescriptor>(&value)
+                .expect_err("invalid embedding config")
+                .to_string();
+            assert!(error.contains("invalid embeddingConfigs in index manifest"));
+            assert!(!error.contains("private-token"));
+        }
     }
 }

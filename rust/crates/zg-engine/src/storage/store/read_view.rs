@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use super::{IndexStore, StoreState, graph_error};
 use crate::{
     EngineError, EngineResult,
-    domain::{CodeMetadata, Entity, EntityId, FileEdge, FileId, FileRecord, GraphEdgeKind},
+    domain::{
+        CodeMetadata, ContentKind, Entity, EntityId, FileEdge, FileId, FileRecord, GraphEdgeKind,
+    },
     storage::{
         fragments,
         graph::Direction,
@@ -160,6 +162,7 @@ impl ReadView<'_> {
 
     pub(crate) fn search_fts(
         &self,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
@@ -170,7 +173,7 @@ impl ReadView<'_> {
         let filter = fragments::build_filter(filter, &|path| self.state.directories.get(path))?;
         self.state
             .fragments
-            .search_fts(query, limit, filter.as_deref())
+            .search_fts(kind, query, limit, filter.as_deref())
     }
 }
 

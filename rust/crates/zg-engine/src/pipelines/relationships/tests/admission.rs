@@ -283,7 +283,13 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: false,
             storage_path: storage_home,
-            embeddings: vec![schema()],
+            indexes: [ContentKind::Text, ContentKind::Code]
+                .into_iter()
+                .map(|kind| crate::domain::ContentIndex {
+                    kind,
+                    embedding: schema(),
+                })
+                .collect(),
         })
         .expect("unpublished storage");
         let writer = indexing.writers.register(

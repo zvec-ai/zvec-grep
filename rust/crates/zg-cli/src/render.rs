@@ -559,6 +559,7 @@ File filters:
   --iglob <glob>                    Case-insensitive path glob; repeatable
   -t, --type <format>               Include an engine format, e.g. rust or markdown
   -T, --type-not <format>           Exclude an engine format; repeatable
+  --kind <text|code|image>          Search an enabled content collection; repeatable
   --category <category>             Include an engine category, e.g. code or document
   --category-not <category>         Exclude a file category; repeatable
   --modified-after <time>           Only files modified after a date or epoch milliseconds
@@ -608,7 +609,8 @@ index requires --rebuild, for example: zg --index --rebuild --graph.
 Dropping an index runs immediately without a confirmation prompt.
 
 Embedding options:
-  --embedding <model>               Single text embedding model for this workspace
+  --embedding <model|kind=model>    Set the default or a per-kind model; repeatable
+                                    Use kind=default to inherit the workspace default
   --api-key <key>                   Embedding provider API key
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
@@ -674,7 +676,9 @@ cancel. Non-interactive indexing requires --allow-remote or a workspace grant.
 
 Workspaces are identified by their root paths; different roots may share a directory name.
 
-This version indexes text only with one embedding model per workspace.
+Each content kind supported by the default model or a per-kind override gets
+its own collection. Use --embedding code=MODEL to override one kind.
+The indexer currently skips image files.
 For a new index, zg --index uses --embedding, then ZVEC_GREP_EMBEDDING, then
 the configured default, then a workspace recommendation: local/potion-code-16m-v2
 for code or local/bekko-256-int8 for text. Analysis uses index scan rules and

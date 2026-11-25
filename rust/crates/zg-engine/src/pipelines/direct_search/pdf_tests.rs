@@ -47,11 +47,14 @@ fn write_fixture(root: &Path, texts: &[&[(u32, &str)]], names: &[&str], offsets:
         None,
     )
     .expect("schema");
+    let descriptor =
+        IndexDescriptor::new(schema, BTreeMap::new(), BTreeMap::new(), false, FTS_CONFIG)
+            .expect("descriptor");
     fs::create_dir_all(layout.index_dir()).expect("index directory");
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: layout.index_dir().into(),
-        embeddings: vec![schema.clone()],
+        indexes: descriptor.content_indexes(),
     })
     .expect("store");
     fs::write(root.join("a.md"), "Recovery wait is 5 minutes.\n").expect("ordinary text");
@@ -128,7 +131,7 @@ fn write_fixture(root: &Path, texts: &[&[(u32, &str)]], names: &[&str], offsets:
             fragments.push(IndexedFragment {
                 entity_id,
                 fragment_id,
-                model: schema.model().reference(),
+                kind: ContentKind::Text,
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: format!("unrelated search projection {index}"),
             });
@@ -147,10 +150,7 @@ fn write_fixture(root: &Path, texts: &[&[(u32, &str)]], names: &[&str], offsets:
         Some(uuid::Uuid::new_v4().to_string()),
         1,
         1,
-        IndexState::Enabled(Box::new(
-            IndexDescriptor::new(schema, BTreeMap::new(), BTreeMap::new(), false, FTS_CONFIG)
-                .expect("descriptor"),
-        )),
+        IndexState::Enabled(Box::new(descriptor)),
     )
     .expect("workspace");
     write_workspace_manifest(layout.manifest_path(), &workspace).expect("publish");
@@ -648,19 +648,17 @@ async fn pdf_rg_borrows_published_writer_and_excludes_failed_files() {
     let workspace = read_workspace_manifest(dir.path(), &layout)
         .expect("manifest")
         .expect("workspace");
-    let schema = workspace
-        .index()
-        .descriptor()
-        .expect("descriptor")
-        .default_embedding_model()
-        .clone();
     let lock = Arc::new(
         acquire_workspace_lock(&layout, LockMode::Exclusive, "test writer").expect("lock"),
     );
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: layout.index_dir().into(),
-        embeddings: vec![schema],
+        indexes: workspace
+            .index()
+            .descriptor()
+            .expect("descriptor")
+            .content_indexes(),
     })
     .expect("store");
     let writers = WriterContexts::default();

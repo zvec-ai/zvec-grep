@@ -481,18 +481,13 @@ async fn text_and_code_share_one_model_and_support_incremental_search() -> TestR
     assert_eq!(kinds, BTreeSet::from(["code".into(), "text".into()]));
     let schema_before = fs::read(info.index_path.join("schema.json"))?;
     let schema: Value = serde_json::from_slice(&schema_before)?;
-    assert_eq!(schema["embeddings"].as_array().expect("models").len(), 1);
-    assert!(schema.get("tables").is_none());
-    assert_eq!(
-        fs::read_dir(&info.index_path)?
-            .filter_map(Result::ok)
-            .filter(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("fragments_"))
-            .count(),
-        1,
-    );
+    let tables = schema["indexes"].as_array().expect("kind collections");
+    assert_eq!(tables.len(), 2);
+    assert_eq!(tables[0]["kind"], "text");
+    assert_eq!(tables[1]["kind"], "code");
+    assert_eq!(tables[0]["embedding"], tables[1]["embedding"]);
+    assert!(info.index_path.join("text").is_dir());
+    assert!(info.index_path.join("code").is_dir());
     assert_eq!(
         fts_paths(&engine, root, "orchardguide").await?,
         [PathBuf::from("code.rs")]
@@ -535,6 +530,139 @@ async fn text_and_code_share_one_model_and_support_incremental_search() -> TestR
     );
     assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 0);
     engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn per_kind_models_select_the_destination_and_rank_groups_after_reopen() -> TestResult {
+    use zg_engine::api::index::options::{ContentKind, Device, EmbeddingModelSpec};
+    let directory = tempdir()?;
+    let root = directory.path();
+    let code = EmbeddingServer::start()?;
+    let docs = EmbeddingServer::start()?;
+    fs::write(root.join("guide.txt"), "Login checks the password.")?;
+    fs::write(root.join("login.rs"), "pub fn login() {}")?;
+    configure_remote_model(root, code.address)?;
+    let engine = ZvecGrep::new();
+    engine.index(index_options(root)).await?;
+    let spec = |name: &str, server: &EmbeddingServer| EmbeddingModelSpec {
+        reference: name.to_owned(),
+        endpoint: Some(format!("http://{}/embeddings", server.address)),
+        revision: None,
+        cache_dir: None,
+        device: Device::Auto,
+    };
+    let mut rebuild = index_options(root);
+    rebuild.rebuild = true;
+    rebuild.embedding = Some(spec("qwen/qwen3.7-text-embedding", &docs));
+    rebuild
+        .embedding_routes
+        .insert(ContentKind::Code, spec("qwen/text-embedding-v4", &code));
+    let built = engine.index(rebuild).await?;
+    assert_eq!(built.files_failed, 0);
+    engine.close();
+
+    let engine = ZvecGrep::new();
+    let query = ContextOptions {
+        root: Some(root.to_owned()),
+        routes: vec![ContextRoute {
+            mode: ContextRouteMode::Vector,
+            query: "login".into(),
+        }],
+        refresh: Some(RefreshPolicy::Off),
+        ..Default::default()
+    };
+    for (kind, path, target, other) in [
+        (ContentKind::Code, "login.rs", &code, &docs),
+        (ContentKind::Text, "guide.txt", &docs, &code),
+    ] {
+        let before = target.requests.load(Ordering::Acquire);
+        let other_before = other.requests.load(Ordering::Acquire);
+        let mut request = ContextOptions {
+            target_kinds: vec![kind],
+            ..query.clone()
+        };
+        let grants = zg_engine::authorization::query_authorizations(&request)?;
+        assert_eq!(grants.len(), 1);
+        assert!(grants[0].query_text);
+        assert!(!grants[0].workspace_content);
+        assert!(
+            grants[0]
+                .target
+                .endpoint
+                .contains(&target.address.to_string())
+        );
+        request.authorized_remote = vec![grants[0].target.clone()];
+        let found = engine.context(request).await?;
+        assert!(!found.items.is_empty());
+        assert!(
+            found
+                .items
+                .iter()
+                .all(|item| item.relative_path == Path::new(path))
+        );
+        assert_eq!(target.requests.load(Ordering::Acquire), before + 1);
+        assert_eq!(other.requests.load(Ordering::Acquire), other_before);
+    }
+    let mut combined = query;
+    combined.allow_remote = true;
+    combined.limit = Some(2);
+    let result = engine.context(combined.clone()).await?;
+    let groups = result
+        .diagnostics
+        .index
+        .expect("index diagnostics")
+        .result_groups;
+    assert_eq!(groups.len(), 2);
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(groups[0].kinds, [ContentKind::Text]);
+    assert_eq!(groups[1].kinds, [ContentKind::Code]);
+    let schema_path = engine
+        .info(info_options(root))
+        .await?
+        .index_path
+        .join("schema.json");
+    engine.close();
+
+    assert_mismatched_text_collection_rejected(root, &schema_path, combined, [&docs, &code]).await
+}
+
+async fn assert_mismatched_text_collection_rejected(
+    root: &Path,
+    schema_path: &Path,
+    mut query: ContextOptions,
+    servers: [&EmbeddingServer; 2],
+) -> TestResult {
+    use zg_engine::api::index::options::ContentKind;
+
+    // A restored collection can belong to another model with the same dimension.
+    let mut schema: Value = serde_json::from_slice(&fs::read(schema_path)?)?;
+    let text = &mut schema["indexes"][0];
+    assert_eq!(text["kind"], "text");
+    text["embedding"]["model"]["name"] = json!("other-embedding-model");
+    fs::write(schema_path, serde_json::to_vec(&schema)?)?;
+    let engine = ZvecGrep::new();
+    let requests = || servers.map(|server| server.requests.load(Ordering::Acquire));
+    let before = requests();
+    assert_eq!(
+        fts_paths(&engine, root, "password").await?,
+        [PathBuf::from("guide.txt")]
+    );
+    let error = engine
+        .context(query.clone())
+        .await
+        .expect_err("incompatible text collection");
+    assert_eq!(
+        error.message(),
+        "embedding model would change from qwen/other-embedding-model to qwen/qwen3.7-text-embedding",
+    );
+    assert_eq!(requests(), before);
+    query.target_kinds = vec![ContentKind::Code];
+    assert_eq!(
+        engine.context(query).await?.items[0].relative_path,
+        Path::new("login.rs")
+    );
     engine.close();
     Ok(())
 }
@@ -583,10 +711,8 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .index_version,
         Some(3)
     );
-    let collections = model_collections(&info.index_path)?;
-    assert_eq!(collections.len(), 1);
     assert_vector_indexes_complete(&info.index_path)?;
-    assert_eq!(native_documents(&collections[0])?.len(), 1);
+    assert_eq!(native_documents(&info.index_path.join("text"))?.len(), 1);
     assert_eq!(
         native_documents(&info.index_path.join("entities"))?.len(),
         1
@@ -631,6 +757,85 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     assert_vector_indexes_complete(&info.index_path)?;
     engine.drop_index(info_options(root)).await?;
     engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn image_collection_follows_model_capabilities_while_image_files_are_skipped() -> TestResult {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use zg_engine::api::index::{
+        options::{ContentKind, Device, EmbeddingModelSpec, ScanRulesUpdate},
+        result::SkippedFileReason,
+    };
+
+    let png = STANDARD.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC",
+    )?;
+    let server = EmbeddingServer::start()?;
+    for (reference, supports_images) in [
+        ("qwen/text-embedding-v4", false),
+        ("qwen/qwen3-vl-embedding", true),
+    ] {
+        let temporary = tempdir()?;
+        let root = temporary.path();
+        fs::write(root.join("diagram.png"), &png)?;
+        let engine = ZvecGrep::new();
+        let indexed = engine
+            .index(IndexOptions {
+                embedding: Some(EmbeddingModelSpec {
+                    reference: reference.to_owned(),
+                    endpoint: Some(format!("http://{}/embeddings", server.address)),
+                    revision: None,
+                    cache_dir: None,
+                    device: Device::Auto,
+                }),
+                scan: ScanRulesUpdate {
+                    globs: Some(vec!["*.png".into()]),
+                    ..Default::default()
+                },
+                ..index_options(root)
+            })
+            .await?;
+        assert_eq!(indexed.skipped.len(), 1);
+        assert_eq!(indexed.skipped[0].reason, SkippedFileReason::Unsupported);
+
+        let info = engine.info(info_options(root)).await?;
+        let collections = info.workspace_index.expect("workspace").content_indexes;
+        let image = collections
+            .iter()
+            .find(|table| table.kind == ContentKind::Image);
+        assert_eq!(
+            image.map(|table| table.inherited),
+            supports_images.then_some(true)
+        );
+        let path = info.index_path.join("image");
+        let search = engine
+            .context(ContextOptions {
+                root: Some(root.to_owned()),
+                target_kinds: vec![ContentKind::Image],
+                routes: vec![ContextRoute {
+                    mode: ContextRouteMode::Fts,
+                    query: "diagram".into(),
+                }],
+                refresh: Some(RefreshPolicy::Off),
+                ..Default::default()
+            })
+            .await;
+        if supports_images {
+            assert!(native_documents(&path)?.is_empty());
+            assert!(search?.items.is_empty());
+        } else {
+            assert!(!path.exists());
+            let error = search.expect_err("image collection is unavailable");
+            assert_eq!(error.code(), EngineError::UNSUPPORTED);
+            assert_eq!(
+                error.message(),
+                "This index is not configured to search images."
+            );
+        }
+        engine.close();
+    }
+    assert_eq!(server.requests.load(Ordering::Acquire), 0);
     Ok(())
 }
 
@@ -833,9 +1038,8 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
     }
     assert!(coverage.into_iter().all(|covered| covered));
     assert_eq!(server.inputs.load(Ordering::Acquire), fragments.len());
-    let collections = model_collections(&info.index_path)?;
-    assert_eq!(collections.len(), 1);
-    let projected = native_documents(&collections[0])?;
+    assert!(native_documents(&info.index_path.join("text"))?.is_empty());
+    let projected = native_documents(&info.index_path.join("code"))?;
     assert_eq!(projected.len(), fragments.len());
     let mut projected_ids = BTreeSet::new();
     for doc in projected {
@@ -1395,10 +1599,7 @@ async fn incremental_failure_removes_all_old_searchable_content_for_the_file() -
         fts_paths(&engine, root, "vineyard").await?,
         [PathBuf::from("stable.txt")]
     );
-    assert_eq!(native_documents(&index_path.join("entities"))?.len(), 1);
-    for collection in model_collections(&index_path)? {
-        assert_eq!(native_documents(&collection)?.len(), 1);
-    }
+    assert_single_text_projection(&index_path, "stable.txt")?;
     let status = engine
         .info(info_options(root))
         .await?
@@ -1492,25 +1693,7 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         );
     }
     assert_eq!(recovered["index_status"], json!({"kind": "not_indexed"}));
-    let collections = fs::read_dir(&index_path)?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name == "entities" || name.starts_with("fragments_"))
-        })
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-    assert_eq!(collections.len(), 2);
-    for collection in collections {
-        assert!(
-            !native_documents(&collection)?.is_empty(),
-            "opening storage preserves intermediate records in {}",
-            collection.display()
-        );
-    }
+    assert_single_text_projection(&index_path, "note.txt")?;
     assert_eq!(fs::read_to_string(&source_path)?, contents);
     assert_eq!(fs::metadata(&source_path)?.modified()?, modified);
     assert_eq!(server.requests.load(Ordering::Acquire), requests);
@@ -1950,22 +2133,21 @@ async fn fts_paths(
     Ok(paths)
 }
 
-fn model_collections(index_path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    Ok(fs::read_dir(index_path)?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with("fragments_"))
-        })
-        .map(|entry| entry.path())
-        .collect())
+fn assert_single_text_projection(index_path: &Path, filename: &str) -> TestResult {
+    let entities = native_documents(&index_path.join("entities"))?;
+    let text = native_documents(&index_path.join("text"))?;
+    assert_eq!(entities.len(), 1);
+    assert_eq!(text.len(), 1);
+    assert_eq!(text[0].get_string("file_name")?.as_deref(), Some(filename));
+    let owner = text[0].get_string("entity_id")?.expect("fragment owner");
+    assert_eq!(entities[0].get_pk(), Some(owner.as_str()));
+    assert!(native_documents(&index_path.join("code"))?.is_empty());
+    Ok(())
 }
 
 fn assert_vector_indexes_complete(index_path: &Path) -> TestResult {
-    for path in model_collections(index_path)? {
+    for kind in ["text", "code"] {
+        let path = index_path.join(kind);
         #[cfg(windows)]
         let path = dunce::simplified(&path);
         let mut options = zvec_rust::CollectionOptions::new()?;
@@ -1975,7 +2157,10 @@ fn assert_vector_indexes_complete(index_path: &Path) -> TestResult {
             Some(&options),
         )?;
         let stats = collection.stats()?;
-        assert!(stats.doc_count > 0);
+        if stats.doc_count == 0 {
+            collection.close()?;
+            continue;
+        }
         assert_eq!(stats.indexes.len(), 1);
         assert!(
             stats.indexes[0].completeness >= 1.0,

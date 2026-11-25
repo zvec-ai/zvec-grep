@@ -3,6 +3,7 @@ use super::types::{
     TransformersConfig,
 };
 use crate::domain::model::EmbeddingMetric;
+use crate::models::ModelError;
 use crate::models::artifacts::{ArtifactConfig, ArtifactDownloadConfig, ArtifactSourceConfig};
 
 const DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT: &str =
@@ -607,6 +608,20 @@ pub fn get_embedding_model_catalog_entry(reference: &str) -> Option<EmbeddingCat
         .iter()
         .copied()
         .find(|entry| entry.reference() == reference)
+}
+
+impl TryFrom<&str> for EmbeddingCatalogEntry {
+    type Error = ModelError;
+
+    fn try_from(reference: &str) -> Result<Self, Self::Error> {
+        get_embedding_model_catalog_entry(reference).ok_or_else(|| {
+            ModelError::new(
+                crate::EngineError::NOT_FOUND,
+                "Embedding model is not in the zvec-grep catalog",
+                Some(format!("embedding={reference}")),
+            )
+        })
+    }
 }
 
 #[cfg(test)]

@@ -198,18 +198,18 @@ impl IndexJobScheduler {
             // Once another caller relies on a job, request cancellation must not stop it.
             active.shared.store(true, Ordering::Release);
             let active_snapshot = lock(&active.snapshot).clone();
-            // A graph switch is a saved configuration change: a job that already
-            // started under the other value cannot apply it, so the request needs
-            // its own job instead of being absorbed by the active one.
-            let graph_setting_request = {
+            // A running job has already claimed its settings; later changes need a follow-up.
+            let settings_changed = {
                 let current = lock(&active.options);
                 changes_graph_setting(current.as_ref(), &options)
+                    || changes_embedding_routes(current.as_ref(), &options)
             };
             let needs_followup = reason == JobReason::Watch
                 || active_snapshot.reason == JobReason::Watch
                 || options.rebuild
                 || has_selection_update(&options)
-                || graph_setting_request;
+                || has_default_embedding_update(&options)
+                || settings_changed;
             if needs_followup && active_snapshot.state == JobState::Queued {
                 let queued_full_manual = active_snapshot.reason == JobReason::Manual
                     && reason == JobReason::Watch
@@ -583,6 +583,14 @@ fn has_selection_update(options: &IndexOptions) -> bool {
     options.reset_paths || options.scan != ScanRulesUpdate::default()
 }
 
+fn has_default_embedding_update(options: &IndexOptions) -> bool {
+    options.embedding.is_some()
+        || options.endpoint.is_some()
+        || options.api_key.is_some()
+        || options.device.is_some()
+        || options.model_cache.is_some()
+}
+
 fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions) {
     let Some(current) = current.as_mut() else {
         return;
@@ -680,6 +688,7 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
 }
 
 fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions) {
+    let routes_changed = changes_embedding_routes(Some(current), incoming);
     let destination_changed = incoming
         .embedding
         .as_ref()
@@ -692,11 +701,16 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
             .endpoint
             .as_ref()
             .is_some_and(|endpoint| current.endpoint.as_ref() != Some(endpoint));
-    if destination_changed {
+    // A new destination needs fresh blanket permission. The engine checks each
+    // exact grant against the workspace, model, and endpoint when it is used.
+    if destination_changed || routes_changed {
         current.allow_remote = incoming.allow_remote;
-        current.authorized_remote.clear();
+    }
+    if destination_changed || changes_default_route_endpoint(current, incoming) {
         current.api_key = None;
         current.runtime_api_key = None;
+    }
+    if destination_changed {
         current.endpoint = None;
     }
     // A later saved setting replaces an earlier operation's temporary override.
@@ -726,6 +740,7 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     // filter-only request must not erase a queued manual job's model or credentials.
     merge_update(&mut current.root, incoming.root.take());
     merge_update(&mut current.embedding, incoming.embedding.take());
+    merge_embedding_routes(current, incoming);
     merge_update(
         &mut current.embedding_default,
         incoming.embedding_default.take(),
@@ -768,6 +783,68 @@ fn changes_graph_setting(current: Option<&IndexOptions>, incoming: &IndexOptions
     incoming.graph_indexing.is_some_and(|requested| {
         current.and_then(|current| current.graph_indexing) != Some(requested)
     })
+}
+
+fn changes_embedding_routes(current: Option<&IndexOptions>, incoming: &IndexOptions) -> bool {
+    incoming.embedding_routes.iter().any(|(kind, spec)| {
+        current.and_then(|options| options.embedding_routes.get(kind)) != Some(spec)
+    }) || incoming
+        .clear_embedding_routes
+        .iter()
+        .any(|kind| !current.is_some_and(|options| options.clear_embedding_routes.contains(kind)))
+}
+
+/// A route can also supply the default model's endpoint when the references match.
+fn changes_default_route_endpoint(current: &IndexOptions, incoming: &IndexOptions) -> bool {
+    if current.endpoint.is_some()
+        || current
+            .embedding
+            .as_ref()
+            .is_some_and(|spec| spec.endpoint.is_some())
+    {
+        return false;
+    }
+    let is_default = |reference: &str| {
+        current
+            .embedding
+            .as_ref()
+            .is_none_or(|spec| spec.reference == reference)
+    };
+    incoming
+        .embedding_routes
+        .keys()
+        .chain(&incoming.clear_embedding_routes)
+        .any(|kind| {
+            let before = current
+                .embedding_routes
+                .get(kind)
+                .filter(|spec| is_default(&spec.reference))
+                .and_then(|spec| spec.endpoint.as_ref());
+            let after = incoming
+                .embedding_routes
+                .get(kind)
+                .filter(|spec| is_default(&spec.reference))
+                .and_then(|spec| spec.endpoint.as_ref());
+            before != after
+        })
+}
+
+fn merge_embedding_routes(current: &mut IndexOptions, incoming: &mut IndexOptions) {
+    // Replace just the kinds edited by the incoming request. Keep duplicate edits
+    // within that request intact for the engine's normal validation.
+    current
+        .embedding_routes
+        .retain(|kind, _| !incoming.clear_embedding_routes.contains(kind));
+    current.clear_embedding_routes.retain(|kind| {
+        !incoming.embedding_routes.contains_key(kind)
+            && !incoming.clear_embedding_routes.contains(kind)
+    });
+    current
+        .embedding_routes
+        .append(&mut incoming.embedding_routes);
+    current
+        .clear_embedding_routes
+        .append(&mut incoming.clear_embedding_routes);
 }
 
 fn merge_update<T>(current: &mut Option<T>, incoming: Option<T>) {
@@ -2015,6 +2092,244 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn default_model_edits_are_applied_while_an_index_job_is_pending() {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        for queued in [true, false] {
+            let executor = Arc::new(RecordingExecutor {
+                calls: Mutex::new(Vec::new()),
+                started: Notify::new(),
+                releases: tokio::sync::Semaphore::new(0),
+            });
+            let scheduler = IndexJobScheduler::new(
+                executor.clone(),
+                SchedulerConfig {
+                    concurrency: 1,
+                    ..SchedulerConfig::default()
+                },
+            );
+            let root = PathBuf::from("/workspace");
+            if queued {
+                scheduler
+                    .submit(
+                        "/blocker".into(),
+                        IndexOptions::default(),
+                        JobReason::Manual,
+                    )
+                    .expect("block the writer");
+                executor.started.notified().await;
+            }
+            let first = scheduler
+                .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+                .expect("submit initial job");
+            if !queued {
+                executor.started.notified().await;
+            }
+            let model = EmbeddingModelSpec {
+                reference: "local/embeddinggemma-300m".into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: Device::Auto,
+            };
+            let edit = scheduler
+                .submit(
+                    root,
+                    IndexOptions {
+                        embedding: Some(model.clone()),
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("submit model edit");
+            assert_eq!(first.job.id == edit.job.id, queued);
+            executor.releases.add_permits(2);
+            scheduler
+                .wait(edit.job.id)
+                .await
+                .expect("model edit completed");
+            assert_eq!(
+                executor
+                    .calls
+                    .lock()
+                    .expect("recorded calls")
+                    .last()
+                    .expect("model edit executed")
+                    .embedding
+                    .as_ref(),
+                Some(&model)
+            );
+            scheduler.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn route_edit_submitted_after_admission_gets_its_own_job() {
+        use zg_engine::api::index::options::ContentKind;
+
+        let executor = Arc::new(GatedExecutor {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let scheduler = IndexJobScheduler::new(executor.clone(), SchedulerConfig::default());
+        let root = PathBuf::from("/workspace");
+        let active = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+            .expect("active");
+        executor.started.notified().await;
+        let followup = scheduler
+            .submit(
+                root,
+                IndexOptions {
+                    clear_embedding_routes: vec![ContentKind::Code],
+                    ..IndexOptions::default()
+                },
+                JobReason::Manual,
+            )
+            .expect("route edit");
+        assert_ne!(active.job.id, followup.job.id);
+        executor.release.notify_one();
+        executor.started.notified().await;
+        executor.release.notify_one();
+        scheduler
+            .wait(followup.job.id)
+            .await
+            .expect("route edit executed");
+        scheduler.shutdown().await;
+    }
+
+    #[test]
+    fn route_edits_survive_job_merges_and_invalidate_blanket_consent() {
+        use zg_engine::{
+            api::index::options::{ContentKind, Device, EmbeddingModelSpec},
+            authorization::index_authorization,
+        };
+        let model = EmbeddingModelSpec {
+            reference: "qwen/text-embedding-v4".into(),
+            revision: None,
+            cache_dir: None,
+            endpoint: Some("https://a.test/embeddings".into()),
+            device: Device::Auto,
+        };
+        let workspace = tempfile::tempdir().expect("workspace");
+        let default = IndexOptions {
+            root: Some(workspace.path().to_owned()),
+            embedding: Some(model.clone()),
+            ..IndexOptions::default()
+        };
+        let target = index_authorization(&default)
+            .expect("preflight")
+            .expect("remote default requires consent");
+        let mut pending = Some(IndexOptions {
+            authorized_remote: vec![target],
+            embedding_routes: [(ContentKind::Code, model.clone())].into(),
+            clear_embedding_routes: vec![ContentKind::Text],
+            allow_remote: true,
+            ..default
+        });
+        assert!(!super::changes_embedding_routes(
+            pending.as_ref(),
+            &IndexOptions::default()
+        ));
+        let update = IndexOptions {
+            embedding_routes: [(ContentKind::Text, model.clone())].into(),
+            clear_embedding_routes: vec![ContentKind::Code],
+            ..IndexOptions::default()
+        };
+        assert!(super::changes_embedding_routes(None, &update));
+        assert!(super::changes_embedding_routes(pending.as_ref(), &update));
+        super::merge_options(&mut pending, update.clone());
+        assert!(!super::changes_embedding_routes(pending.as_ref(), &update));
+        super::merge_options(&mut pending, IndexOptions::default());
+        assert_eq!(
+            pending.as_ref().expect("queued options").embedding_routes,
+            update.embedding_routes
+        );
+        assert_eq!(
+            pending
+                .as_ref()
+                .expect("queued options")
+                .clear_embedding_routes,
+            [ContentKind::Code]
+        );
+        assert!(!pending.as_ref().expect("queued options").allow_remote);
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                embedding_routes: [(ContentKind::Code, model.clone())].into(),
+                ..IndexOptions::default()
+            },
+        );
+        let merged = pending.as_ref().expect("queued options");
+        assert_eq!(
+            merged.embedding_routes,
+            [
+                (ContentKind::Text, model.clone()),
+                (ContentKind::Code, model.clone())
+            ]
+            .into()
+        );
+        assert!(merged.clear_embedding_routes.is_empty());
+        assert!(
+            index_authorization(merged)
+                .expect("retained default consent")
+                .is_none()
+        );
+
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                embedding: Some(EmbeddingModelSpec {
+                    reference: "local/potion-code-16m-v2".into(),
+                    endpoint: None,
+                    ..model
+                }),
+                ..IndexOptions::default()
+            },
+        );
+        assert!(
+            index_authorization(&pending.expect("new default"))
+                .expect("retained route consent")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn route_destination_changes_discard_previous_default_credentials_only_when_applicable() {
+        use zg_engine::api::index::options::{ContentKind, Device, EmbeddingModelSpec};
+        let default = EmbeddingModelSpec {
+            reference: "fixture/default".into(),
+            revision: None,
+            endpoint: None,
+            cache_dir: None,
+            device: Device::Auto,
+        };
+        for (reference, retain) in [("fixture/default", false), ("fixture/other", true)] {
+            let mut current = Some(IndexOptions {
+                embedding: Some(default.clone()),
+                api_key: Some("saved-key".into()),
+                runtime_api_key: Some("temporary-key".into()),
+                ..IndexOptions::default()
+            });
+            let route = EmbeddingModelSpec {
+                reference: reference.into(),
+                endpoint: Some("https://updated.example/embeddings".into()),
+                ..default.clone()
+            };
+            super::merge_options(
+                &mut current,
+                IndexOptions {
+                    embedding_routes: [(ContentKind::Code, route)].into(),
+                    ..IndexOptions::default()
+                },
+            );
+            let merged = current.expect("queued request");
+            assert_eq!(merged.api_key.is_some(), retain);
+            assert_eq!(merged.runtime_api_key.is_some(), retain);
+        }
+    }
+
     fn assert_merged_selection(applied: &IndexOptions) {
         assert_eq!(
             applied.scan.included_formats,
@@ -2193,14 +2508,28 @@ mod tests {
 
     #[test]
     fn merged_refresh_preserves_target_scoped_once_consent() {
-        let target = zg_engine::authorization::IndexAuthorization {
-            root: std::env::temp_dir(),
-            workspace_roots: vec![std::env::temp_dir()],
-            model: "qwen/text-embedding-v4".into(),
-            endpoint: "https://a.test/embeddings".into(),
-            endpoint_host: "a.test".into(),
+        use zg_engine::{
+            api::index::options::{Device, EmbeddingModelSpec},
+            authorization::index_authorization,
         };
-        let mut pending = Some(IndexOptions::default());
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let options = IndexOptions {
+            root: Some(workspace.path().to_owned()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "qwen/text-embedding-v4".into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: Device::Auto,
+            }),
+            endpoint: Some("https://a.test/embeddings".into()),
+            ..IndexOptions::default()
+        };
+        let target = index_authorization(&options)
+            .expect("preflight")
+            .expect("initial destination");
+        let mut pending = Some(options);
         super::merge_options(
             &mut pending,
             IndexOptions {
@@ -2240,12 +2569,10 @@ mod tests {
                 ..IndexOptions::default()
             },
         );
-        assert!(
-            pending
-                .expect("new destination")
-                .authorized_remote
-                .is_empty()
-        );
+        let missing = index_authorization(&pending.expect("new destination"))
+            .expect("preflight")
+            .expect("the new endpoint needs consent");
+        assert_eq!(missing.endpoint, "https://b.test/embeddings");
     }
 
     #[test]

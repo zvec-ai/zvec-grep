@@ -25,6 +25,7 @@ pub(crate) use entity::FragmentId;
 pub use glob::GlobRule;
 
 // Indexes.
+pub(crate) use index::ContentIndex;
 pub(crate) use index::FTS_CONFIG;
 pub(crate) use index::FtsConfig;
 pub(crate) use index::IndexDescriptor;
@@ -77,6 +78,7 @@ pub(crate) use source::{PdfBlock, PdfRange, PdfSourceMap, PdfSourcePart};
 pub(crate) use source::{formats_for_path, reference_compatible_with};
 
 // Workspaces.
+pub(crate) use workspace::IndexLayout;
 pub use workspace::ScanRules;
 pub(crate) use workspace::SourceRoot;
 pub(crate) use workspace::Workspace;

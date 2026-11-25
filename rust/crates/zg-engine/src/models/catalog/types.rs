@@ -1,4 +1,7 @@
-use crate::domain::model::EmbeddingMetric;
+use crate::domain::{
+    ContentKind,
+    model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
+};
 use crate::models::artifacts::ArtifactDownloadConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11,6 +14,70 @@ pub(crate) enum EmbeddingCatalogEntry {
 }
 
 impl EmbeddingCatalogEntry {
+    /// Index schemas can describe an inherited model even when every active
+    /// kind overrides it. Constructing metadata never requests credentials.
+    pub(crate) fn embedding_info(self) -> EmbeddingModelInfo {
+        let (provider, name, batch, dimension, metric, tokens, image_bytes) = match self {
+            Self::Bekko(c) => (
+                c.provider,
+                c.model,
+                c.max_batch_size,
+                c.dimension,
+                c.metric,
+                c.max_input_tokens,
+                None,
+            ),
+            Self::LlamaCpp(c) => (
+                c.provider,
+                c.model,
+                c.max_batch_size,
+                c.dimension,
+                c.metric,
+                c.context_size,
+                None,
+            ),
+            Self::Model2Vec(c) => (
+                c.provider,
+                c.model,
+                c.max_batch_size,
+                c.dimension,
+                c.metric,
+                c.max_input_tokens,
+                None,
+            ),
+            Self::Transformers(c) => (
+                c.provider,
+                c.model,
+                c.max_batch_size,
+                c.dimension,
+                c.metric,
+                c.max_input_tokens,
+                None,
+            ),
+            Self::Qwen(c) => (
+                c.provider,
+                c.model,
+                c.max_batch_size,
+                c.dimension,
+                c.metric,
+                c.max_input_tokens,
+                c.max_image_bytes,
+            ),
+        };
+        let mut kinds = vec![ContentKind::Text, ContentKind::Code];
+        if matches!(self, Self::Qwen(c) if c.kind == "multimodal") {
+            kinds.push(ContentKind::Image);
+        }
+        EmbeddingModelInfo::new(
+            ModelInfo::new(provider, name, kinds, batch).expect("catalog model metadata"),
+            dimension,
+            metric,
+            Some(tokens),
+            image_bytes,
+        )
+        .expect("catalog embedding metadata")
+    }
+
     #[cfg(test)]
     pub(crate) const fn backend(self) -> &'static str {
         match self {

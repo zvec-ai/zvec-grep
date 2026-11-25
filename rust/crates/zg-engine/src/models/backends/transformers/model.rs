@@ -19,8 +19,7 @@ use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::model::{
-    Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelInfo,
-    ModelProgress,
+    Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelProgress,
 };
 use crate::models::{
     artifacts::{
@@ -92,23 +91,7 @@ impl TransformersEmbeddingModel {
             .unwrap_or_else(|| default_model_cache(LocalModelBackend::Transformers));
         Self {
             entry,
-            info: EmbeddingModelInfo::new(
-                ModelInfo::new(
-                    entry.provider.to_owned(),
-                    entry.model.to_owned(),
-                    [
-                        crate::domain::ContentKind::Text,
-                        crate::domain::ContentKind::Code,
-                    ],
-                    entry.max_batch_size,
-                )
-                .expect("valid model metadata"),
-                entry.dimension,
-                entry.metric,
-                Some(entry.max_input_tokens),
-                None,
-            )
-            .expect("valid embedding metadata"),
+            info: crate::models::EmbeddingCatalogEntry::Transformers(entry).embedding_info(),
             model_cache_dir,
             device: options.device,
             compute_runtime,

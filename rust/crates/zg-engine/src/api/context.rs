@@ -9,7 +9,7 @@ pub mod stage_trace;
 
 /// Options accepted by [`crate::ZvecGrep::context`].
 pub mod options {
-    pub use crate::domain::{FileCategory, FileFormat, GlobRule, SymbolType};
+    pub use crate::domain::{ContentKind, FileCategory, FileFormat, GlobRule, SymbolType};
 
     use std::path::PathBuf;
 
@@ -62,6 +62,9 @@ pub mod options {
         pub rg_options: RgOptions,
         pub rg_paths: Vec<PathBuf>,
         pub routes: Vec<ContextRoute>,
+        /// Content tables to search. An empty list selects all enabled tables.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub target_kinds: Vec<ContentKind>,
         pub fuse: bool,
         /// Workspace root. `None` uses the process working directory.
         pub root: Option<PathBuf>,
@@ -102,9 +105,6 @@ pub mod options {
         pub api_key: Option<String>,
         #[serde(default)]
         pub endpoint: Option<String>,
-        /// Model disclosed by an interactive caller; reject a changed index model.
-        #[serde(default)]
-        pub authorization_model: Option<String>,
         #[serde(default)]
         pub device: Option<crate::api::index::options::Device>,
         #[serde(default)]
@@ -118,7 +118,36 @@ pub mod options {
     }
 
     impl ContextOptions {
+        /// Check an explicit target before a caller schedules indexing or asks for consent.
+        /// A missing index is left to the caller's normal setup flow.
+        ///
+        /// # Errors
+        /// Returns an error for invalid options, unreadable manifests or unavailable kind tables.
+        pub fn validate_index_targets(&self) -> crate::EngineResult<()> {
+            self.validate_file_selection()?;
+            if !self.target_kinds.is_empty() {
+                let root = crate::utils::resolve_directory(self.root.as_deref())?;
+                if let Some((root, layout)) = crate::workspace::find_nearest_workspace(&root)? {
+                    crate::pipelines::indexed_search::service::validate_existing_targets(
+                        &root, &layout, self,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+
         pub(crate) fn validate_file_selection(&self) -> crate::EngineResult<()> {
+            if self.rg && !self.target_kinds.is_empty() {
+                return Err(crate::EngineError::invalid_argument(
+                    "content kind targets apply to indexed searches only",
+                ));
+            }
+            let mut seen = std::collections::HashSet::new();
+            if self.target_kinds.iter().any(|kind| !seen.insert(kind)) {
+                return Err(crate::EngineError::invalid_argument(
+                    "target kinds must be distinct",
+                ));
+            }
             if self.rg {
                 if self.filter != QueryFilter::default() {
                     return Err(crate::EngineError::invalid_argument(
@@ -155,6 +184,7 @@ pub mod options {
                 rg_options: RgOptions::default(),
                 rg_paths: Vec::new(),
                 routes: Vec::new(),
+                target_kinds: Vec::new(),
                 fuse: false,
                 root: None,
                 limit: None,
@@ -179,7 +209,6 @@ pub mod options {
                 authorized_remote: Vec::new(),
                 api_key: None,
                 endpoint: None,
-                authorization_model: None,
                 device: None,
                 model_cache: None,
                 on_progress: None,
@@ -462,6 +491,9 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextGroupResult {
+        /// Ranking groups indexing this query group's own item list.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub result_groups: Vec<IndexResultGroup>,
         pub id: String,
         pub query: String,
         pub role: ContextQueryGroupRole,
@@ -504,7 +536,7 @@ pub mod result {
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextItem {
         pub kind: ContextItemKind,
-        /// One-based position in the final result order.
+        /// One-based position within the result group, or within the result list when ungrouped.
         pub rank: usize,
         pub absolute_path: PathBuf,
         pub relative_path: PathBuf,
@@ -606,8 +638,19 @@ pub mod result {
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct IndexDiagnostics {
         pub hits_returned: usize,
+        /// Contiguous slices of the returned items, each ranked in one score space.
+        #[serde(default)]
+        pub result_groups: Vec<IndexResultGroup>,
         pub query_groups: Vec<IndexQueryGroupDiagnostics>,
         pub routes: Vec<IndexRouteDiagnostics>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct IndexResultGroup {
+        pub kinds: Vec<super::options::ContentKind>,
+        pub models: Vec<String>,
+        pub item_start: usize,
+        pub item_count: usize,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

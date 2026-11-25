@@ -30,11 +30,9 @@ pub mod options {
         pub rebuild: bool,
         /// Turns walk-time code graph indexing on or off for this workspace.
         ///
-        /// Omitted keeps the saved setting, and a workspace saved before this
-        /// option existed indexes without a graph. Changing the setting requires
-        /// `rebuild`: the graph and the rest of the index must describe the same
-        /// build, so a refresh that flips the switch is rejected and the published
-        /// index stays untouched.
+        /// Omission keeps the saved setting. New indexes default to graph indexing
+        /// off. Changing the setting on an existing index requires `rebuild` so the
+        /// graph and the content indexes describe the same generation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub graph_indexing: Option<bool>,
         /// Automatic refreshes require an existing enabled index instead of creating one.
@@ -48,8 +46,18 @@ pub mod options {
         pub changes: Vec<WorkspaceChange>,
         #[serde(default)]
         pub scan: ScanRulesUpdate,
-        /// The single model used to embed text content in this workspace.
+        /// Default embedding model inherited by compatible content kinds.
         pub embedding: Option<EmbeddingModelSpec>,
+        /// Overrides the default model for selected content kinds.
+        #[serde(
+            default,
+            deserialize_with = "serde_with::rust::maps_duplicate_key_is_error::deserialize",
+            skip_serializing_if = "std::collections::BTreeMap::is_empty"
+        )]
+        pub embedding_routes: std::collections::BTreeMap<ContentKind, EmbeddingModelSpec>,
+        /// Restores inheritance of the default model for selected content kinds.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub clear_embedding_routes: Vec<ContentKind>,
         /// Caller-resolved default, used only if neither an explicit model nor
         /// an existing index is present at writer admission. Daemon clients must
         /// check setup capabilities before sending this optional v2 extension.
@@ -833,18 +841,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_removed_content_routing_in_index_requests() {
-        for routes in [
-            serde_json::json!({}),
-            serde_json::json!({"text": "local/model"}),
-        ] {
-            let mut request = serde_json::to_value(IndexOptions::default()).expect("index request");
-            assert!(request.get("embedding_routes").is_none());
-            request["embedding_routes"] = routes;
-            let error =
-                serde_json::from_value::<IndexOptions>(request).expect_err("removed routing");
-            assert!(error.to_string().contains("embedding_routes"));
-        }
+    fn content_model_updates_round_trip_with_index_requests() {
+        let mut request = serde_json::to_value(IndexOptions::default()).expect("index request");
+        assert!(request.get("embedding_routes").is_none());
+        request["embedding_routes"] =
+            serde_json::json!({"code": {"reference": "local/model", "device": "auto"}});
+        request["clear_embedding_routes"] = serde_json::json!(["text"]);
+        let decoded =
+            serde_json::from_value::<IndexOptions>(request.clone()).expect("routed request");
+        let encoded = serde_json::to_value(decoded).expect("serialized updates");
+        assert_eq!(
+            encoded["embedding_routes"]["code"]["reference"],
+            "local/model"
+        );
+        assert_eq!(
+            encoded["clear_embedding_routes"],
+            request["clear_embedding_routes"]
+        );
     }
 
     #[test]

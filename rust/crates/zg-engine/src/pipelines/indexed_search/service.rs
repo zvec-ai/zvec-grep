@@ -1,6 +1,9 @@
 //! Resolve the indexed workspace, refresh it when requested, and execute retrieval.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     EngineError,
@@ -8,7 +11,9 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::IndexOptions,
     },
-    domain::{IndexDescriptor, IndexState, Workspace, model::ModelConfig},
+    domain::{
+        ContentIndex, ContentKind, IndexDescriptor, IndexState, Workspace, model::ModelConfig,
+    },
     models::{ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest},
     pipelines::{
         indexing::service::{
@@ -54,6 +59,9 @@ pub(crate) async fn context(
             "no workspace manifest was found",
         ));
     };
+    if !refresh_completed && !options.target_kinds.is_empty() {
+        validate_existing_targets(&source_root, &layout, options)?;
+    }
     if !refresh_completed
         && options.refresh.map_or(options.auto_update, |policy| {
             policy == crate::api::context::options::RefreshPolicy::Wait
@@ -92,28 +100,7 @@ pub(crate) async fn context(
         }
         ReadSource::Read(lock) => lock,
     };
-    let workspace = read_workspace_manifest(&source_root, &layout)?.ok_or_else(|| {
-        workspace_index_unavailable(&source_root, "workspace manifest disappeared")
-    })?;
-    if workspace.index() == &IndexState::Disabled {
-        return Err(EngineError::unsupported(format!(
-            "workspace indexing is disabled at {}",
-            source_root.display()
-        )));
-    }
-    if !workspace.index_enabled() {
-        return Err(workspace_index_unavailable(
-            &source_root,
-            "workspace index has not been built",
-        ));
-    }
-    if !directory_exists(workspace.layout().index_dir())? {
-        return Err(workspace_index_unavailable(
-            &source_root,
-            "index storage is missing",
-        ));
-    }
-    let acquired = query_models(models, &workspace, options, &request)?;
+    let workspace = read_ready_workspace(&source_root, &layout)?;
     let graph_enabled = workspace
         .index()
         .descriptor()
@@ -129,11 +116,41 @@ pub(crate) async fn context(
         )?,
         None => ReadSessionLease::open(workspace.layout().index_dir(), graph_enabled)?,
     };
+    let requests = query_model_requests(&workspace, storage.storage(), options, &request)?;
+    let acquired = acquire_query_models(models, &workspace, requests)?;
     let result = query_storage(&acquired, &workspace, storage.storage(), options, &request).await;
     let close = storage.close();
     let result = result?;
     close?;
     Ok(result)
+}
+
+fn read_ready_workspace(
+    source_root: &Path,
+    layout: &crate::domain::WorkspaceLayout,
+) -> crate::EngineResult<Workspace> {
+    let workspace = read_workspace_manifest(source_root, layout)?.ok_or_else(|| {
+        workspace_index_unavailable(source_root, "workspace manifest disappeared")
+    })?;
+    if workspace.index() == &IndexState::Disabled {
+        return Err(EngineError::unsupported(format!(
+            "workspace indexing is disabled at {}",
+            source_root.display()
+        )));
+    }
+    if !workspace.index_enabled() {
+        return Err(workspace_index_unavailable(
+            source_root,
+            "workspace index has not been built",
+        ));
+    }
+    if !directory_exists(workspace.layout().index_dir())? {
+        return Err(workspace_index_unavailable(
+            source_root,
+            "index storage is missing",
+        ));
+    }
+    Ok(workspace)
 }
 
 fn prepare_writer_context(
@@ -142,57 +159,114 @@ fn prepare_writer_context(
     request: &super::context::NormalizedContextRequest,
     writer: &super::writer::WriterSession,
 ) -> Result<Option<Vec<ModelRuntimeLease>>, EngineError> {
-    let workspace = &writer.workspace;
-    let acquired = if uses_vectors(request) {
-        let schema = workspace
-            .index()
-            .descriptor()
-            .map(crate::domain::IndexDescriptor::default_embedding_model)
-            .ok_or_else(|| {
-                workspace_index_unavailable(
-                    workspace.source_root(),
-                    "writer model information is missing",
-                )
-            })?;
-        let model_request = search_model_request(workspace, schema, options)?;
-        if !writer
+    let requests = query_model_requests(&writer.workspace, &writer.storage, options, request)?;
+    if requests.iter().any(|request| {
+        !writer
             .models
-            .first()
-            .is_some_and(|model| model.matches_query_request(&model_request))
-        {
-            return Ok(None);
-        }
-        // Reuse the configuration that passed authorization and the writer-key check.
-        let model = models
-            .acquire(model_request)
-            .map_err(ModelError::into_engine_error)?;
-        assert_embedding_compatible(workspace.index().descriptor(), model.info())?;
-        vec![model]
-    } else {
-        Vec::new()
-    };
-    Ok(Some(acquired))
+            .iter()
+            .any(|model| model.matches_query_request(request))
+    }) {
+        return Ok(None);
+    }
+    acquire_query_models(models, &writer.workspace, requests).map(Some)
 }
 
-fn uses_vectors(request: &super::context::NormalizedContextRequest) -> bool {
+pub(super) fn uses_vectors(request: &super::context::NormalizedContextRequest) -> bool {
     request
         .routes
         .iter()
         .any(|route| route.mode == crate::api::context::options::ContextRouteMode::Vector)
 }
 
-fn query_models(
-    models: &ModelRuntimeManager,
+pub(crate) fn validate_existing_targets(
+    root: &Path,
+    layout: &crate::domain::WorkspaceLayout,
+    options: &ContextOptions,
+) -> crate::EngineResult<()> {
+    if let Some(workspace) = read_workspace_manifest(root, layout)?
+        && let Some(descriptor) = workspace.index().descriptor()
+    {
+        query_targets(descriptor, options)?;
+    }
+    Ok(())
+}
+
+/// Resolve physical target tables in stable order for execution and consent preflight.
+pub(crate) fn query_targets(
+    descriptor: &IndexDescriptor,
+    options: &ContextOptions,
+) -> crate::EngineResult<Vec<ContentIndex>> {
+    options.validate_file_selection()?;
+    let enabled = descriptor.content_indexes();
+    for kind in &options.target_kinds {
+        if !enabled.iter().any(|table| table.kind == *kind) {
+            let target = match kind {
+                ContentKind::Image => "images",
+                other => other.as_str(),
+            };
+            return Err(EngineError::unsupported(format!(
+                "This index is not configured to search {target}."
+            )));
+        }
+    }
+    Ok(enabled
+        .into_iter()
+        .filter(|table| {
+            options.target_kinds.is_empty() || options.target_kinds.contains(&table.kind)
+        })
+        .collect())
+}
+
+fn query_model_requests(
     workspace: &Workspace,
+    storage: &IndexStore,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
-) -> Result<Vec<ModelRuntimeLease>, EngineError> {
+) -> crate::EngineResult<Vec<ModelRuntimeRequest>> {
+    let descriptor = workspace.index().descriptor().ok_or_else(|| {
+        workspace_index_unavailable(
+            workspace.source_root(),
+            "embedding model information is missing",
+        )
+    })?;
+    let targets = query_targets(descriptor, options)?;
     if !uses_vectors(request) {
         return Ok(Vec::new());
     }
-    let model = acquire_search_model(models, workspace, options)?;
-    assert_embedding_compatible(workspace.index().descriptor(), model.info())?;
-    Ok(vec![model])
+    storage.validate_vector_targets(&targets)?;
+    if options.device.is_some()
+        && !targets
+            .iter()
+            .any(|t| t.embedding.model().provider() == "local")
+    {
+        return Err(EngineError::invalid_argument(
+            "--device is only supported for local embedding models",
+        ));
+    }
+    let mut seen = HashSet::new();
+    targets
+        .iter()
+        .map(|table| &table.embedding)
+        .filter(|schema| seen.insert(schema.model().reference()))
+        .map(|schema| search_model_request(workspace, schema, options))
+        .collect()
+}
+
+fn acquire_query_models(
+    models: &ModelRuntimeManager,
+    workspace: &Workspace,
+    requests: Vec<ModelRuntimeRequest>,
+) -> crate::EngineResult<Vec<ModelRuntimeLease>> {
+    requests
+        .into_iter()
+        .map(|request| {
+            let model = models
+                .acquire(request)
+                .map_err(ModelError::into_engine_error)?;
+            assert_embedding_compatible(workspace.index().descriptor(), model.info())?;
+            Ok(model)
+        })
+        .collect()
 }
 
 async fn query_storage(
@@ -245,6 +319,7 @@ pub(in crate::pipelines) fn refresh_options(
     }
 }
 
+#[cfg(test)]
 pub(in crate::pipelines) fn acquire_search_model(
     models: &ModelRuntimeManager,
     workspace: &Workspace,
@@ -260,15 +335,6 @@ pub(in crate::pipelines) fn acquire_search_model(
                 "embedding model information is missing",
             )
         })?;
-    acquire_search_model_for(models, workspace, schema, options)
-}
-
-fn acquire_search_model_for(
-    models: &ModelRuntimeManager,
-    workspace: &Workspace,
-    schema: &crate::domain::EmbeddingModelInfo,
-    options: &ContextOptions,
-) -> Result<ModelRuntimeLease, EngineError> {
     models
         .acquire(search_model_request(workspace, schema, options)?)
         .map_err(ModelError::into_engine_error)
@@ -280,15 +346,11 @@ fn search_model_request(
     options: &ContextOptions,
 ) -> Result<ModelRuntimeRequest, EngineError> {
     let reference = schema.model().reference();
-    if options
-        .authorization_model
-        .as_ref()
-        .is_some_and(|expected| expected != &reference)
-    {
-        return Err(EngineError::permission_denied(
-            "Workspace embedding model changed after authorization; retry the query",
-        ));
-    }
+    let is_default = workspace.index().descriptor().is_some_and(|descriptor| {
+        descriptor.default_embedding_model().model().reference() == reference
+    });
+    let override_endpoint = options.endpoint.as_deref().filter(|_| is_default);
+    let override_key = options.api_key.as_deref().filter(|_| is_default);
     let runtime = workspace
         .index()
         .descriptor()
@@ -297,34 +359,14 @@ fn search_model_request(
         .unwrap_or_default();
     let config = crate::config::read()?;
     let local = schema.model().provider() == "local";
-    if !local && options.device.is_some() {
-        return Err(EngineError::invalid_argument(
-            "--device is only supported for local embedding models",
-        ));
-    }
-    let http = crate::config::resolve_http_model(
-        &config,
-        &reference,
-        Some(&runtime),
-        options.endpoint.as_deref(),
-        false,
-    )?;
-    let (http_descriptor, endpoint) = if let Some(http) = http {
-        let endpoint = http.endpoint.expect("resolved HTTP endpoint");
-        crate::authorization::require_with_targets(
-            workspace.source_root(),
-            &reference,
-            &endpoint,
-            options.allow_remote,
-            &options.authorized_remote,
-        )?;
-        (http.http, Some(endpoint))
-    } else if local {
-        (None, None)
+    let endpoint = if local {
+        None
     } else {
-        let endpoint = crate::authorization::remote_endpoint(
+        let endpoint = crate::authorization::indexed_query_endpoint(
+            &config,
             &reference,
-            options.endpoint.as_deref().or(runtime.endpoint.as_deref()),
+            Some(&runtime),
+            override_endpoint,
         )?;
         crate::authorization::require_with_targets(
             workspace.source_root(),
@@ -333,17 +375,18 @@ fn search_model_request(
             options.allow_remote,
             &options.authorized_remote,
         )?;
-        (None, Some(endpoint))
+        Some(endpoint)
     };
     let api_key = resolve_remote_api_key(
         &config,
         &reference,
-        http_descriptor.as_ref(),
+        runtime.http.as_ref(),
         Some(workspace),
         Some(&runtime),
-        options.api_key.as_deref(),
+        override_key,
+        endpoint.as_deref(),
     )?;
-    let cache_dir = if http_descriptor.is_some() {
+    let cache_dir = if runtime.http.is_some() {
         None
     } else {
         crate::config::model_cache(
@@ -355,7 +398,7 @@ fn search_model_request(
     Ok(ModelRuntimeRequest::new(
         reference.clone(),
         ModelConfig {
-            http: http_descriptor,
+            http: runtime.http,
             api_key,
             endpoint,
             device: if local {

@@ -1,9 +1,8 @@
-//! Search projections: one zvec collection per embedding model, with FTS and FP16 vectors.
+//! Search projections: one zvec collection per content kind, with FTS and FP16 vectors.
 
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    path::Path,
 };
 
 use zvec_rust::{
@@ -25,9 +24,9 @@ use super::{
 use crate::{
     EngineError, EngineResult,
     domain::{
-        CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FTS_CONFIG,
-        FileId, FileRecord, FragmentId, IndexField, SourcePath,
-        model::{EmbeddingMetric, EmbeddingModelInfo},
+        CodeMetadata, ContentIndex, ContentKind, DirectoryId, Entity, EntityFragment, EntityId,
+        EntityMetadata, FTS_CONFIG, FileId, FileRecord, FragmentId, IndexField, IndexLayout,
+        SourcePath, model::EmbeddingMetric,
     },
     utils::sha256_hex_parts,
 };
@@ -35,17 +34,18 @@ use crate::{
 const MAX_TOP_K: usize = 100_000;
 
 pub(super) struct Fragments {
-    indexes: BTreeMap<String, Collection>,
+    indexes: BTreeMap<ContentKind, Collection>,
 }
 
 impl Fragments {
     pub(super) fn open(
-        root: &Path,
-        embeddings: &[EmbeddingModelInfo],
+        layout: IndexLayout<'_>,
+        routes: &[ContentIndex],
         read_only: bool,
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
-        for embedding in embeddings {
+        for route in routes {
+            let embedding = &route.embedding;
             let dimension = u32::try_from(embedding.dimension())
                 .ok()
                 .filter(|value| (1..=20_000).contains(value))
@@ -59,17 +59,13 @@ impl Fragments {
                 EmbeddingMetric::DotProduct => MetricType::Ip,
                 EmbeddingMetric::Euclidean => MetricType::L2,
             };
-            let name = fragment_collection_name(embedding);
             let collection = open_collection(
-                &root.join(&name),
+                &layout.content_dir(route.kind),
                 &fragments_schema(dimension, metric)?,
                 read_only,
             )?;
-            if indexes
-                .insert(embedding.model().reference(), collection)
-                .is_some()
-            {
-                return Err(EngineError::invalid_argument("duplicate embedding model"));
+            if indexes.insert(route.kind, collection).is_some() {
+                return Err(EngineError::invalid_argument("duplicate content kind"));
             }
         }
         Ok(Self { indexes })
@@ -81,7 +77,7 @@ impl Fragments {
         entities: &[Entity],
         entries: &[IndexedFragment],
         directories: &[DirectoryId],
-    ) -> EngineResult<BTreeMap<String, Vec<Doc>>> {
+    ) -> EngineResult<BTreeMap<ContentKind, Vec<Doc>>> {
         let owners = entities
             .iter()
             .map(|entity| {
@@ -102,7 +98,7 @@ impl Fragments {
             .flat_map(Entity::fragments)
             .map(|fragment| (&fragment.id, fragment))
             .collect::<HashMap<_, _>>();
-        let mut projections: BTreeMap<String, Vec<Doc>> = BTreeMap::new();
+        let mut projections: BTreeMap<ContentKind, Vec<Doc>> = BTreeMap::new();
         for entry in entries {
             let (owner, fields) = owners.get(&entry.entity_id).ok_or_else(|| {
                 EngineError::invalid_argument("search projection references a missing entity")
@@ -119,17 +115,14 @@ impl Fragments {
                 zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
                 "encode embedding vector",
             )?;
-            projections
-                .entry(entry.model.clone())
-                .or_default()
-                .push(doc);
+            projections.entry(entry.kind).or_default().push(doc);
         }
         Ok(projections)
     }
 
-    pub(super) fn write(&self, projections: &BTreeMap<String, Vec<Doc>>) -> EngineResult<()> {
-        for (model, docs) in projections {
-            write_docs(self.index(model)?, docs, "write model fragments")?;
+    pub(super) fn write(&self, projections: &BTreeMap<ContentKind, Vec<Doc>>) -> EngineResult<()> {
+        for (&kind, docs) in projections {
+            write_docs(self.index(kind)?, docs, "write fragments")?;
         }
         Ok(())
     }
@@ -217,6 +210,7 @@ impl Fragments {
 
     pub(super) fn search_fts(
         &self,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&str>,
@@ -238,32 +232,19 @@ impl Fragments {
             filter,
             &["document_id", "entity_id", "file_id"],
         )?;
-        let mut hits = Vec::new();
-        for index in self.indexes.values() {
-            for (rank, doc) in native(index.query(&request), "search full-text index")?
-                .into_iter()
-                .enumerate()
-            {
-                let mut hit = decode_search_hit(&doc, StorageSearchPath::Fts)?;
-                // BM25 is computed against each table's corpus; merge independent rankings.
-                if self.indexes.len() > 1 {
-                    let rank = u32::try_from(rank + 1)
-                        .map_err(|_| corrupt("FTS rank exceeds query limit"))?;
-                    hit.score = 1.0 / (60.0 + f64::from(rank));
-                }
-                hits.push(hit);
-            }
-        }
+        let mut hits = native(self.index(kind)?.query(&request), "search full-text index")?
+            .into_iter()
+            .map(|doc| decode_search_hit(&doc, StorageSearchPath::Fts))
+            .collect::<EngineResult<Vec<_>>>()?;
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.document_id.cmp(&b.document_id))
         });
-        hits.truncate(limit);
         Ok(hits)
     }
 
-    /// Collect all matching entities across model tables, independent of fragment count.
+    /// Collect all matching entities across fragment tables, independent of fragment count.
     /// The existing hashed symbol-name projection preserves exact case and literals.
     pub(super) fn find_symbol_entity_ids(
         &self,
@@ -285,12 +266,12 @@ impl Fragments {
 
     pub(super) fn search_vector(
         &self,
-        model: &str,
+        kind: ContentKind,
         vector: &[f32],
         limit: usize,
         filter: Option<&str>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        let index = self.index(model)?;
+        let index = self.index(kind)?;
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -309,36 +290,20 @@ impl Fragments {
             .collect()
     }
 
-    fn index(&self, model: &str) -> EngineResult<&Collection> {
-        self.indexes.get(model).ok_or_else(|| {
-            EngineError::invalid_argument(format!("unknown embedding model {model:?}"))
+    fn index(&self, kind: ContentKind) -> EngineResult<&Collection> {
+        self.indexes.get(&kind).ok_or_else(|| {
+            EngineError::invalid_argument(format!("missing {} fragment collection", kind.as_str()))
         })
     }
 
     #[cfg(test)]
-    pub(super) fn collection(&self, model: &str) -> EngineResult<&Collection> {
-        self.index(model)
+    pub(super) fn collection(&self, kind: ContentKind) -> EngineResult<&Collection> {
+        self.index(kind)
     }
 }
 
 fn primary_key(namespace: &str, value: &str) -> String {
     sha256_hex_parts([namespace.as_bytes(), b"\0", value.as_bytes()])
-}
-
-pub(super) fn fragment_collection_name(embedding: &EmbeddingModelInfo) -> String {
-    format!(
-        "fragments_{:.4}",
-        primary_key(
-            "space",
-            &format!(
-                "{}\0{}\0{}\0{:?}",
-                embedding.model().provider(),
-                embedding.model().name(),
-                embedding.dimension(),
-                embedding.metric()
-            )
-        )
-    )
 }
 
 fn identity_schema(name: &str) -> EngineResult<CollectionSchema> {
@@ -682,7 +647,7 @@ fn reject_foreign_ids(
     Ok(())
 }
 
-/// Every canonical fragment has exactly one projection, and its entity has one model.
+/// Every canonical fragment has exactly one projection, in its owning entity's content kind.
 pub(super) fn validate_projections(
     entities: &[Entity],
     entries: &[IndexedFragment],
@@ -693,28 +658,19 @@ pub(super) fn validate_projections(
             entity
                 .fragments()
                 .iter()
-                .map(move |fragment| (&fragment.id, entity.id()))
+                .map(move |fragment| (&fragment.id, (entity.id(), entity.content().kind())))
         })
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
-    let mut models = HashMap::new();
     for entry in entries {
-        if expected.get(&entry.fragment_id).copied() != Some(&entry.entity_id) {
+        if expected.get(&entry.fragment_id).copied() != Some((&entry.entity_id, entry.kind)) {
             return Err(EngineError::invalid_argument(
-                "search projection does not reference its canonical entity fragment",
+                "search projection does not reference its canonical entity fragment and kind",
             ));
         }
         if !seen.insert(&entry.fragment_id) {
             return Err(EngineError::invalid_argument(
                 "canonical fragment has more than one search projection",
-            ));
-        }
-        if models
-            .insert(&entry.entity_id, &entry.model)
-            .is_some_and(|previous| previous != &entry.model)
-        {
-            return Err(EngineError::invalid_argument(
-                "all fragments of an entity must use one embedding model",
             ));
         }
     }

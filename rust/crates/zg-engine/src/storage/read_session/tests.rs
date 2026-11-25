@@ -1,4 +1,4 @@
-use std::{fs, sync::Barrier};
+use std::{collections::BTreeMap, fs, sync::Barrier};
 
 use crate::{
     api::context::{
@@ -6,8 +6,8 @@ use crate::{
         options::{ContextRoute, ContextRouteMode},
     },
     domain::{
-        Content, Entity, EntityFragment, EntityId, FileIndexStatus, FileRecord, FileSnapshot,
-        FragmentId, IndexDescriptor, IndexState, Range, SourcePath, Workspace,
+        Content, ContentKind, Entity, EntityFragment, EntityId, FileIndexStatus, FileRecord,
+        FileSnapshot, FragmentId, IndexDescriptor, IndexState, Range, SourcePath, Workspace,
         model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
     },
     models::ModelRuntimeManager,
@@ -63,16 +63,7 @@ impl Fixture {
             Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,
-            IndexState::Enabled(Box::new(
-                IndexDescriptor::new(
-                    schema(),
-                    std::collections::BTreeMap::new(),
-                    std::collections::BTreeMap::new(),
-                    false,
-                    crate::domain::FTS_CONFIG,
-                )
-                .expect("index descriptor"),
-            )),
+            IndexState::Enabled(Box::new(descriptor())),
         )
         .expect("manifest");
         write_workspace_manifest(self.layout.manifest_path(), &manifest).expect("publish manifest");
@@ -89,16 +80,12 @@ impl Fixture {
     }
 }
 
-fn schema() -> EmbeddingModelInfo {
-    EmbeddingModelInfo::new(
+fn descriptor() -> IndexDescriptor {
+    let model = EmbeddingModelInfo::new(
         ModelInfo::new(
             "fixture",
             "read-cache",
-            [
-                crate::domain::ContentKind::Text,
-                crate::domain::ContentKind::Code,
-                crate::domain::ContentKind::Image,
-            ],
+            [ContentKind::Text, ContentKind::Code],
             32,
         )
         .expect("valid model metadata"),
@@ -107,7 +94,15 @@ fn schema() -> EmbeddingModelInfo {
         None,
         None,
     )
-    .expect("valid embedding metadata")
+    .expect("valid embedding metadata");
+    IndexDescriptor::new(
+        model,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        false,
+        crate::domain::FTS_CONFIG,
+    )
+    .expect("index descriptor")
 }
 
 fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
@@ -125,7 +120,7 @@ fn write_unclosed_text(
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: storage_home.to_path_buf(),
-        embeddings: vec![schema()],
+        indexes: descriptor().content_indexes(),
     })
     .expect("writable storage");
     let relative_path = SourcePath::new("source.txt").expect("source path");
@@ -174,7 +169,7 @@ fn write_unclosed_text(
             &[IndexedFragment {
                 entity_id,
                 fragment_id,
-                model: schema().model().reference(),
+                kind: ContentKind::Text,
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: text.into(),
             }],
@@ -301,7 +296,7 @@ fn sequential_and_concurrent_queries_reuse_the_session() {
                 assert_eq!(
                     lease
                         .storage()
-                        .search_fts("orchard", 10, None)
+                        .search_fts(ContentKind::Text, "orchard", 10, None)
                         .expect("search")
                         .len(),
                     1
@@ -442,7 +437,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     assert_eq!(
         first
             .storage()
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("old reader")
             .len(),
         1
@@ -450,7 +445,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     assert_eq!(
         second
             .storage()
-            .search_fts("vineyard", 10, None)
+            .search_fts(ContentKind::Text, "vineyard", 10, None)
             .expect("new reader")
             .len(),
         1
@@ -489,14 +484,14 @@ fn writes_invalidate_every_local_cache_and_next_query_sees_changes() {
         assert!(
             lease
                 .storage()
-                .search_fts("orchard", 10, None)
+                .search_fts(ContentKind::Text, "orchard", 10, None)
                 .expect("old text removed")
                 .is_empty()
         );
         assert_eq!(
             lease
                 .storage()
-                .search_fts("vineyard", 10, None)
+                .search_fts(ContentKind::Text, "vineyard", 10, None)
                 .expect("new text visible")
                 .len(),
             1
@@ -527,7 +522,7 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
     assert_eq!(
         lease
             .storage()
-            .search_fts("vineyard", 10, None)
+            .search_fts(ContentKind::Text, "vineyard", 10, None)
             .expect("query")
             .len(),
         1
@@ -677,7 +672,7 @@ fn cold_open_does_not_block_another_workspaces_cache_hit() {
                 .send(
                     lease
                         .storage()
-                        .search_fts("orchard", 10, None)
+                        .search_fts(ContentKind::Text, "orchard", 10, None)
                         .expect("warm search")
                         .len(),
                 )

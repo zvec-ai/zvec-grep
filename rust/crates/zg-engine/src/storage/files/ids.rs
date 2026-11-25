@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{FileId, FileRecord, SourcePath},
+    domain::{FileId, FileRecord, IndexLayout, SourcePath},
     utils::{atomic_write, directory_exists, reject_symlink},
 };
 
@@ -31,8 +31,8 @@ struct Sequence {
 
 impl FileIds {
     /// Initialize allocation before creating the collection, or load its durable sequence.
-    pub(super) fn open(root: &Path) -> EngineResult<Self> {
-        let sequence_path = root.join("file-ids.json");
+    pub(super) fn open(layout: IndexLayout<'_>) -> EngineResult<Self> {
+        let sequence_path = layout.file_ids_path();
         reject_symlink(&sequence_path)?;
         let next = match fs::read(&sequence_path) {
             Ok(bytes) => {
@@ -48,7 +48,7 @@ impl FileIds {
                 sequence.next
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let collection = root.join("files");
+                let collection = layout.files_dir();
                 if directory_exists(&collection)? {
                     return Err(invalid_sequence(
                         &sequence_path,
@@ -210,7 +210,7 @@ mod tests {
             .max()
             .unwrap_or(0);
         write_sequence(&root.path().join("file-ids.json"), next)?;
-        let mut ids = FileIds::open(root.path())?;
+        let mut ids = FileIds::open(IndexLayout::new(root.path()))?;
         ids.restore(paths)?;
         Ok((root, ids))
     }
@@ -245,7 +245,8 @@ mod tests {
             ids.resolve(&[PathBuf::from("old")]).expect("existing"),
             [FileId::new(u32::MAX - 1)]
         );
-        let mut reopened = FileIds::open(root.path()).expect("reopen exhausted allocator");
+        let mut reopened =
+            FileIds::open(IndexLayout::new(root.path())).expect("reopen exhausted allocator");
         assert!(reopened.resolve(&[PathBuf::from("new")]).is_err());
     }
 
@@ -270,7 +271,8 @@ mod tests {
         let (root, mut ids) = from_paths([]).expect("allocator");
         let first = ids.resolve(&[PathBuf::from("old")]).expect("first ID")[0];
         drop(ids);
-        let mut reopened = FileIds::open(root.path()).expect("reopen empty collection");
+        let mut reopened =
+            FileIds::open(IndexLayout::new(root.path())).expect("reopen empty collection");
         let second = reopened.resolve(&[PathBuf::from("new")]).expect("new ID")[0];
         assert!(second > first);
     }
@@ -286,7 +288,8 @@ mod tests {
         fs::remove_dir(&ids.sequence_path).expect("unblock sequence publication");
         let id = ids.resolve(&[PathBuf::from("new")]).expect("reserve ID")[0];
         assert_eq!(id, FileId::new(0));
-        let mut reopened = FileIds::open(root.path()).expect("reopen durable sequence");
+        let mut reopened =
+            FileIds::open(IndexLayout::new(root.path())).expect("reopen durable sequence");
         assert_eq!(
             reopened
                 .resolve(&[PathBuf::from("other")])
@@ -298,10 +301,11 @@ mod tests {
     #[test]
     fn corrupt_or_missing_sequences_are_rejected_without_resetting_allocation() {
         let root = tempfile::tempdir().expect("allocation directory");
+        let layout = IndexLayout::new(root.path());
         let collection = root.path().join("files");
         let path = root.path().join("file-ids.json");
         fs::write(&collection, b"not a directory").expect("invalid collection entry");
-        assert!(FileIds::open(root.path()).is_err());
+        assert!(FileIds::open(layout).is_err());
         assert!(!path.exists());
         assert_eq!(
             fs::read(&collection).expect("unchanged entry"),
@@ -312,12 +316,12 @@ mod tests {
         {
             std::os::unix::fs::symlink(root.path().join("missing"), &collection)
                 .expect("dangling collection link");
-            assert!(FileIds::open(root.path()).is_err());
+            assert!(FileIds::open(layout).is_err());
             assert!(!path.exists());
             fs::remove_file(&collection).expect("remove collection link");
         }
         fs::create_dir(&collection).expect("existing collection");
-        assert!(FileIds::open(root.path()).is_err());
+        assert!(FileIds::open(layout).is_err());
         assert!(!path.exists());
         for bytes in [
             b"not JSON".as_slice(),
@@ -328,11 +332,11 @@ mod tests {
             b"{\"next\":2,\"unknown\":true}",
         ] {
             fs::write(&path, bytes).expect("corrupt sequence");
-            assert!(FileIds::open(root.path()).is_err());
+            assert!(FileIds::open(layout).is_err());
             assert_eq!(fs::read(&path).expect("unchanged sequence"), bytes);
         }
         write_sequence(&path, 2).expect("sequence");
-        let mut ids = FileIds::open(root.path()).expect("valid sequence");
+        let mut ids = FileIds::open(layout).expect("valid sequence");
         assert!(
             ids.restore([(FileId::new(2), PathBuf::from("out-of-range"))])
                 .is_err()

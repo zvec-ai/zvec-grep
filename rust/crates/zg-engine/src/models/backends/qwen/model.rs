@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{Content, FileFormat};
 
-use crate::domain::model::{EmbeddingModelInfo, EmbeddingResult, ModelConfig, ModelInfo};
+use crate::domain::model::{EmbeddingModelInfo, EmbeddingResult, ModelConfig};
 use crate::models::{
     catalog::QwenConfig,
     spi::{
@@ -63,31 +63,7 @@ impl QwenEmbeddingModel {
         }
         Ok(Self {
             entry,
-            info: EmbeddingModelInfo::new(
-                ModelInfo::new(
-                    entry.provider.to_owned(),
-                    entry.model.to_owned(),
-                    if entry.kind == "multimodal" {
-                        vec![
-                            crate::domain::ContentKind::Text,
-                            crate::domain::ContentKind::Code,
-                            crate::domain::ContentKind::Image,
-                        ]
-                    } else {
-                        vec![
-                            crate::domain::ContentKind::Text,
-                            crate::domain::ContentKind::Code,
-                        ]
-                    },
-                    entry.max_batch_size,
-                )
-                .expect("valid model metadata"),
-                entry.dimension,
-                entry.metric,
-                Some(entry.max_input_tokens),
-                entry.max_image_bytes,
-            )
-            .expect("valid embedding metadata"),
+            info: crate::models::EmbeddingCatalogEntry::Qwen(entry).embedding_info(),
             api_key,
             endpoint,
             http,

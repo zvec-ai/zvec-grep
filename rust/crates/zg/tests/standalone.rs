@@ -1281,7 +1281,18 @@ async fn mcp_ping(command: Command) -> Result<(), Box<dyn std::error::Error + Se
                 let response: Value = serde_json::from_str(&line)?;
                 if response["id"] == request["id"] {
                     if response.get("result").is_none() {
-                        return Err(io::Error::other(format!("MCP response: {response}")).into());
+                        let error = &response["error"];
+                        // rmcp reports an in-flight HTTP stream closing via a process-local token.
+                        let kind = if error["code"] == -32603
+                            && error["data"]["io.modelcontextprotocol/transportClosed"].is_u64()
+                        {
+                            io::ErrorKind::UnexpectedEof
+                        } else {
+                            io::ErrorKind::Other
+                        };
+                        return Err(
+                            io::Error::new(kind, format!("MCP response: {response}")).into()
+                        );
                     }
                     break;
                 }

@@ -609,10 +609,6 @@ impl ModelRuntimeLease {
         self.inner.key.endpoint.as_deref()
     }
 
-    pub(crate) fn configured_http(&self) -> Option<&HttpEmbeddingConfig> {
-        self.inner.key.http.as_ref()
-    }
-
     pub(crate) fn matches_query_request(&self, request: &ModelRuntimeRequest) -> bool {
         // Queries may borrow writer storage while using a separate native budget.
         let mut key = ModelRuntimeKey::new(&request.reference, &request.options);
