@@ -3,9 +3,9 @@
 The shared indexed-search engine uses RRF fusion to assign result positions for
 direct, server, and MCP queries. With `--prefer-symbol`, hits from an exact-symbol
 recall route win RRF ties, then entity ID breaks any remaining ties.
-Non-code entities keep their fusion positions
-among loaded hits and their raw RRF scores. Positions occupied by code within
-the result limit are filled by ranking all recalled, loaded `ContentKind::Code`
+Non-code entities keep their fusion order and raw RRF scores. They keep their
+positions while distinct code candidates are available. Positions occupied by
+code within the result limit are filled by ranking all recalled, loaded `ContentKind::Code`
 entities, including those below the cutoff and those without symbol metadata.
 The engine skips rule ranking when the visible results contain no code.
 
@@ -39,7 +39,15 @@ are dependency code. Neither `dist/` nor `.d.ts` alone implies generated code.
 Final selection is greedy: after each selected entity, remaining entities from
 the same file receive a soft factor of `1 / (1 + 0.5 * selected_count)`. There is
 no hard per-file cap. A code pool from a single file skips this selection
-penalty. Context group coverage is handled outside this module.
+penalty.
+
+When two code symbols in the same file have source spans such that one fully
+contains the other, the first one selected keeps the slot. A class and its
+method therefore occupy one position. If the method wins, its siblings can
+still be selected. Selection continues down the candidate pool to fill the
+limit. Once distinct code hits run out, subsequent documents can move up.
+The result can be shorter than the limit. For multiple query groups, the final
+merge applies the same rule to the results each group returned.
 
 Before selection, a file's representative definition can gain up to 0.15 from
 at most two additional definitions. Support must have name or path evidence,

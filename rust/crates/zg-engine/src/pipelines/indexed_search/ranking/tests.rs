@@ -139,6 +139,67 @@ fn run(query: &str, hits: Vec<SearchHit>, filter: &QueryFilter, limit: usize) ->
     )
 }
 
+fn symbol_at(id: &str, rank: usize, kind: SymbolType, start: u64, end: u64) -> SearchHit {
+    let mut candidate = hit(id, 1, "example.py", 1.0, rank, Some(code(kind, id, None)));
+    let entity = &candidate.entity;
+    candidate.entity = Entity::new(
+        entity.id().clone(),
+        entity.file_id(),
+        Range::Byte(crate::domain::ByteRange::new(start, end).expect("symbol range")),
+        entity.content().clone(),
+        entity.metadata().cloned(),
+        entity.fragments().to_vec(),
+    )
+    .expect("entity");
+    candidate
+}
+
+#[test]
+fn a_class_replaces_its_nested_method_and_backfills_the_top_ten() {
+    let mut hits = vec![
+        symbol_at("Parser", 1, SymbolType::Class, 0, 100),
+        symbol_at("parse", 2, SymbolType::Function, 10, 20),
+    ];
+    for index in 0_u16..9 {
+        let start = 100 + u64::from(index) * 10;
+        hits.push(symbol_at(
+            &format!("other_{index}"),
+            usize::from(index) + 3,
+            SymbolType::Function,
+            start,
+            start + 10,
+        ));
+    }
+    let out = run("behavior", hits, &QueryFilter::default(), 10);
+    assert_eq!(out.len(), 10);
+    assert_eq!(out[0].entity.id().as_str(), "Parser");
+    assert!(out.iter().all(|hit| hit.entity.id().as_str() != "parse"));
+    let last = &out[9];
+    assert_eq!(last.entity.id().as_str(), "other_8");
+    let trace = last.trace.as_ref().expect("trace");
+    assert_eq!((trace.fusion.rank, last.rank), (11, 10));
+}
+
+#[test]
+fn a_higher_ranked_method_keeps_its_siblings_and_documents_can_fill_vacancies() {
+    let hits = vec![
+        symbol_at("parse", 1, SymbolType::Function, 10, 20),
+        symbol_at("Parser", 2, SymbolType::Class, 0, 100),
+        document("guide", 2, "guide.md", 0.9, 3),
+        symbol_at("validate", 4, SymbolType::Function, 30, 40),
+        document("notes", 3, "notes.md", 0.8, 5),
+    ];
+    for limit in [4, 10] {
+        let out = run("behavior", hits.clone(), &QueryFilter::default(), limit);
+        assert_eq!(
+            out.iter()
+                .map(|hit| (hit.entity.id().as_str(), hit.rank))
+                .collect::<Vec<_>>(),
+            [("parse", 1), ("validate", 2), ("guide", 3), ("notes", 4)]
+        );
+    }
+}
+
 #[test]
 fn documents_keep_fusion_order_and_scores_across_paths_and_repeated_files() {
     let candidates = vec![

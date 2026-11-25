@@ -10,7 +10,10 @@ use super::{
     stage_trace::StageTraceCollector,
 };
 use crate::{
-    api::context::{options::QueryFilter, result::SearchRankingTrace},
+    api::context::{
+        options::QueryFilter,
+        result::{ContentRange, SearchRankingTrace},
+    },
     domain::{ContentKind, EntityMetadata, FileId},
 };
 use paths::Roles;
@@ -126,17 +129,16 @@ fn rank_with_policy(
     let mut ranked_code = ranked_code.into_iter().peekable();
     let mut documents = hits.into_iter();
     (1..=result_count)
-        .map(|rank| {
+        .map_while(|rank| {
             let mut hit = ranked_code
                 .next_if(|hit| hit.rank == rank)
-                .or_else(|| documents.next())
-                .expect("each result position has a loaded hit");
+                .or_else(|| documents.next())?;
             hit.rank = rank;
             if let Some(trace) = &mut hit.trace {
                 trace.final_selection.returned_by_limit = true;
                 trace.final_selection.cutoff_rank = limit;
             }
-            hit
+            Some(hit)
         })
         .collect()
 }
@@ -228,11 +230,13 @@ fn select(
             };
             item.static_score / (1.0 + FILE_DECAY * f64::from(count))
         };
-        let best = scored
+        let Some((best, _)) = scored
             .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| compare(a, b, effective(a), effective(b)))
-            .map_or(0, |(index, _)| index);
+        else {
+            break;
+        };
         let mut item = scored.swap_remove(best);
         let count = selected_per_file.entry(item.hit.file.id()).or_default();
         let factor = if single_file {
@@ -264,6 +268,14 @@ fn select(
             });
         }
         *count = count.saturating_add(1);
+        if matches!(item.hit.entity.metadata(), Some(EntityMetadata::Code(_))) {
+            let range = ContentRange::from(item.hit.entity.source_range());
+            scored.retain(|other| {
+                other.hit.file.id() != item.hit.file.id()
+                    || !matches!(other.hit.entity.metadata(), Some(EntityMetadata::Code(_)))
+                    || !range.is_nested_with(&other.hit.entity.source_range().into())
+            });
+        }
         output.push(item.hit);
     }
     output

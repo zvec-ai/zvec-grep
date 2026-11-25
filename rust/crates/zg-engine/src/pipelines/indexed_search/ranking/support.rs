@@ -2,7 +2,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::Scored;
-use crate::domain::{EntityMetadata, FileId, Range, SymbolType};
+use crate::{
+    api::context::result::ContentRange,
+    domain::{EntityMetadata, FileId, Range, SymbolType},
+};
 
 pub(super) fn apply(scored: &mut [Scored], weight: f64) {
     let mut files = HashMap::<FileId, Vec<usize>>::new();
@@ -77,15 +80,7 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
 }
 
 fn interval(range: Range) -> Option<(u64, u64)> {
-    match range {
-        Range::Byte(range) => Some((range.start_offset(), range.end_offset())),
-        Range::Text(range) => Some((
-            u64::try_from(range.start_byte_offset()).ok()?,
-            u64::try_from(range.end_byte_offset()).ok()?,
-        )),
-        Range::Full => None,
-    }
-    .filter(|(start, end)| start < end)
+    ContentRange::from(range).byte_interval()
 }
 
 fn overlaps(a: Range, b: Range) -> bool {
