@@ -1,0 +1,2 @@
+# Exclude the benchmark ignore file uploaded into the repository.
+.zg-bench-index.ignore

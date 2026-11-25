@@ -4,6 +4,17 @@
 
 # SWE-QA benchmark
 
+新增可选的 [caller/callee 符号题集](docs/symbol-probes.md)，包含 5 道自拟题，
+覆盖调用者、被调用者、别名调用、构造函数和 Python 内建函数。题目固定在
+Requests、Matplotlib、Sympy 的源码版本上；[Gold 核对记录](docs/symbol-probes-gold.md)
+与参考答案均留在答题环境之外。
+
+Actions 使用 `task_set=caller-callee-symbols`，支持 `scope=smoke`（两题）或
+`all-full`（五题）；本地使用 `zg-bench run caller-callee-symbols`。
+沿用现有 baseline/zvec-grep 执行、评审和报告链路，zvec-grep 显式启用 graph，
+图配置进入索引缓存身份。原 QA20 默认设置保留。工具自主选择，零调用样本保留；
+这个定向题集的结果不能解释为 SWE-QA 整体收益。
+
 此 benchmark 用于衡量 `zvec-grep` 对 Agent 回答代码仓库级软件工程问题的能力有何影响。发布结果中，两个 profile 使用相同的 Claude Code Agent、Claude Opus 5 模型、任务 prompt、代码仓库 commit、环境和限制：
 
 - **Baseline：** Claude Code 使用其标准工具。

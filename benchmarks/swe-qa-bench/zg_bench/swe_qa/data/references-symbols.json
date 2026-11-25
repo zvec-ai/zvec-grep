@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "benchmark": "peng-weihan/SWE-QA-Bench",
+  "benchmark_revision": "c13deac7a0d99b0ca2e593e004c4739475785b08",
+  "index_base": 0,
+  "visibility": "judge-only",
+  "suite": "caller-callee-symbols",
+  "reference_revision": 1,
+  "references": [
+    {
+      "task_id": "requests:cc1",
+      "source_file": "self-authored/caller-callee",
+      "source_index": null,
+      "role": "smoke",
+      "scenario": "anchor",
+      "category": "where",
+      "provenance": "self-authored",
+      "repository": "psf/requests",
+      "repository_commit": "46e939b5525d9c72b677340985582b04b128478a",
+      "question_hash": "b30a3b29889f5892889a6e6e482b5228b87c96b81b14650507d857deba55bd7c",
+      "question": "Which functions in src/requests directly call resolve_redirects? List each calling function with its file path and call-site line numbers.",
+      "reference_answer": "The only production caller of resolve_redirects under src/requests is Session.send (class Session, src/requests/sessions.py, defined at lines 673-748). There are two call sites: line 723, `gen = self.resolve_redirects(r, request, **kwargs)`, inside the `if allow_redirects:` branch; and line 740, `self.resolve_redirects(r, request, yield_requests=True, **kwargs)`, inside the `if not allow_redirects:` branch that pre-populates Response.next(). resolve_redirects itself is defined in SessionRedirectMixin at src/requests/sessions.py:159-280. Supplementary fact outside the question's src/ scope: five test functions in tests/test_requests.py also call it directly (test_header_and_body_removal_on_redirect at line 322, test_transfer_enc_removal_on_redirect at line 345, test_cookielib_cookiejar_on_redirect at line 458, test_manual_redirect_with_partial_body_read at line 1953, test_requests_are_updated_each_time at line 2601). Verified by source inspection at pinned commit 46e939b5525d9c72b677340985582b04b128478a."
+    },
+    {
+      "task_id": "matplotlib:cc1",
+      "source_file": "self-authored/caller-callee",
+      "source_index": null,
+      "role": "task",
+      "scenario": "anchor",
+      "category": "where",
+      "provenance": "self-authored",
+      "repository": "matplotlib/matplotlib",
+      "repository_commit": "a5e1f6086e92d5cc0a23f85685d03d85b89a8395",
+      "question_hash": "da4148ca357962489006a373a9aee9c5da4d5a24c1115c88329ef2dd593736a4",
+      "question": "Which method in lib/matplotlib/axes/_base.py invokes _make_line, and through what exact call mechanism? Give file and line evidence.",
+      "reference_answer": "_process_plot_var_args._plot_args (lib/matplotlib/axes/_base.py, defined at line 395) is the method that invokes _make_line, but not through a direct call expression. At line 504, inside the `if self.output == 'Line2D':` branch, it binds the method to a local alias: `make_artist = self._make_line`. The invocation happens at lines 531-533 inside a generator expression: `result = (make_artist(axes, x[:, j % ncx], y[:, j % ncy], kw, {**kwargs, 'label': label}) for j, label in enumerate(labels))`. _make_line itself is defined at lines 334-338. Verified by source inspection at pinned commit a5e1f6086e92d5cc0a23f85685d03d85b89a8395."
+    },
+    {
+      "task_id": "sympy:cc1",
+      "source_file": "self-authored/caller-callee",
+      "source_index": null,
+      "role": "task",
+      "scenario": "anchor",
+      "category": "where",
+      "provenance": "self-authored",
+      "repository": "sympy/sympy",
+      "repository_commit": "3c817ed8ab551d71e36907ce869afe5e4ca789ff",
+      "question_hash": "9f9870f42a2cc0f5cc0fcf92f36d41f5af5196b1432076190392bf2ee8ca8944",
+      "question": "Which functions in sympy/solvers/ode/systems.py directly call ode_order? List each calling function with its call-site line numbers.",
+      "reference_answer": "Four functions in sympy/solvers/ode/systems.py directly call ode_order (imported from sympy.solvers.deutils at line 20): 1) _get_func_order (defined at line 28), at line 29 inside the dict comprehension `return {func: max(ode_order(eq, func) for eq in eqs) for func in funcs}`; 2) linear_ode_to_matrix (defined at line 342), at line 462 inside `if any(ode_order(eq, func) > order for eq in eqs for func in funcs):`; 3) _strong_component_solver (defined at line 1696), at line 1719 inside `new_constants = [Dummy() for _ in range(ode_order(eqs[0], funcs[0]))]`; 4) the nested helper _get_coeffs_from_subs_expression (defined at line 1890) inside _higher_order_to_first_order (defined at line 1876), at line 1894: `return {ode_order(term, free_symbol): 1}`. Verified by source inspection at pinned commit 3c817ed8ab551d71e36907ce869afe5e4ca789ff."
+    },
+    {
+      "task_id": "matplotlib:cc2",
+      "source_file": "self-authored/caller-callee",
+      "source_index": null,
+      "role": "task",
+      "scenario": "anchor",
+      "category": "where",
+      "provenance": "self-authored",
+      "repository": "matplotlib/matplotlib",
+      "repository_commit": "a5e1f6086e92d5cc0a23f85685d03d85b89a8395",
+      "question_hash": "05bc10819222c6c65a82ccc933453c9e72c2710c825dc094404511bb606c0552",
+      "question": "Which functions or constructors does _process_plot_var_args._make_line in lib/matplotlib/axes/_base.py call directly? Give each target, its call-site line number, and the evaluation order of the nested calls.",
+      "relationship_direction": "outgoing",
+      "reference_answer": "_process_plot_var_args._make_line is defined at lib/matplotlib/axes/_base.py:334-338. On line 336 it calls self._getdefaults(kw) first, then passes that result to self._setdefaults(..., kw). Both methods belong to _process_plot_var_args and are defined at lines 310 and 325 respectively. On line 337 it calls mlines.Line2D(x, y, **kw), the matplotlib.lines.Line2D constructor, to create seg. These are the three direct call expressions in this method; calls made inside those targets are not additional direct callees of _make_line."
+    },
+    {
+      "task_id": "sympy:cc2",
+      "source_file": "self-authored/caller-callee",
+      "source_index": null,
+      "role": "task",
+      "scenario": "anchor",
+      "category": "where",
+      "provenance": "self-authored",
+      "repository": "sympy/sympy",
+      "repository_commit": "3c817ed8ab551d71e36907ce869afe5e4ca789ff",
+      "question_hash": "58526aa4d5df364b851fce9f0ca01c5391dfe7db224a91ed8706c160b7e4f205",
+      "question": "Which functions does _get_func_order in sympy/solvers/ode/systems.py call directly? Distinguish the project function from Python built-ins, and give call-site line numbers and how the returned values are combined.",
+      "relationship_direction": "outgoing",
+      "reference_answer": "_get_func_order is defined at sympy/solvers/ode/systems.py:28-29. Its line 29 contains two direct call expressions: ode_order(eq, func), imported from sympy.solvers.deutils on line 20, and the Python built-in max(...). The outer dictionary comprehension iterates over funcs. For each func, a generator calls ode_order for every eq in eqs, and max reduces those integer orders to the value stored under that func key. ode_order is the project function; max is a built-in. Recursive calls inside ode_order are not further direct calls made by _get_func_order."
+    }
+  ]
+}
