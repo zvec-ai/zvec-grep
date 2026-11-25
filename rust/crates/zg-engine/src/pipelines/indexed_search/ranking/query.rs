@@ -59,11 +59,6 @@ impl QueryFeatures {
         ]
         .into_iter()
         .find_map(|(word, kind)| has(word).then_some(kind));
-        let literal = query.trim();
-        let literal = literal
-            .strip_prefix('`')
-            .and_then(|quoted| quoted.strip_suffix('`'))
-            .unwrap_or(literal);
         Self {
             implementations: has("implementations")
                 || lower.contains("实现类")
@@ -74,10 +69,7 @@ impl QueryFeatures {
                         || name.contains(['_', ':', '.'])
                         || name.chars().any(char::is_uppercase)
                 }),
-            literal_symbol: identifiers
-                .iter()
-                .find(|name| name.as_str() == literal)
-                .cloned(),
+            literal_symbol: literal_symbol(query, &identifiers),
             query_tokens: identifiers
                 .iter()
                 .flat_map(|s| tokens(s))
@@ -350,6 +342,18 @@ fn related(a: &str, b: &str) -> bool {
     short.chars().count() >= 4
         && long.starts_with(short)
         && long.chars().count() - short.chars().count() <= 3
+}
+
+fn literal_symbol(query: &str, identifiers: &[String]) -> Option<String> {
+    let [identifier] = identifiers else {
+        return None;
+    };
+    let literal = query.trim();
+    let unquoted = literal
+        .strip_prefix('`')
+        .and_then(|quoted| quoted.strip_suffix('`'))
+        .unwrap_or(literal);
+    (identifier == unquoted).then(|| identifier.clone())
 }
 
 fn identifiers(query: &str) -> Vec<String> {
