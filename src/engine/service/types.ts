@@ -13,6 +13,8 @@ import type {
   SearchPlanRoute,
   SearchHitTrace,
   SearchMatchedBy,
+  SemanticFeatures,
+  SemanticSearchTrace,
   TimingEntry,
 } from "../types.js";
 
@@ -95,6 +97,7 @@ export type ZvecGrepContextOptions = {
   autoUpdate?: boolean;
   onAutoUpdateProgress?: (progress: IndexProgress) => void;
   trace?: boolean;
+  semanticFeatures?: SemanticFeatures;
   preferSymbol?: boolean;
   symbolTypes?: readonly CodeSymbolType[];
   includePaths?: readonly string[];
@@ -241,6 +244,7 @@ export type ZvecGrepContextResult = {
   items: ZvecGrepContextItem[];
   /** Per-query-group recall lists before cross-group deduplication and reranking. */
   groupResults?: ZvecGrepContextGroupResult[];
+  trace?: SemanticSearchTrace;
   diagnostics: ZvecGrepContextDiagnostics;
 };
 

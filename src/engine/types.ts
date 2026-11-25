@@ -297,6 +297,103 @@ export type WorkspaceIndexStatus = {
 
 export type SearchMatchedBy = "fts" | "vector" | "fts+vector";
 
+export const SEMANTIC_FEATURES_VERSION = 1 as const;
+
+export type SemanticRepresentation = "all";
+export type SemanticTraceMode = "off" | "summary" | "full";
+
+export type SemanticFeatures = {
+  semantic_features_version: typeof SEMANTIC_FEATURES_VERSION;
+  trace: SemanticTraceMode;
+};
+
+export const DEFAULT_SEMANTIC_FEATURES: SemanticFeatures = {
+  semantic_features_version: SEMANTIC_FEATURES_VERSION,
+  trace: "off",
+};
+
+export type SearchTraceFeatures = {
+  nameOverlap: number;
+  tokenSketch: number;
+  graph: number;
+};
+
+export type SearchTraceContributions = {
+  baseHybrid: number;
+  nameOverlap: number;
+  tokenSketch: number;
+  graph: number;
+};
+
+export type SearchTraceGraphEvidence = {
+  edge: string;
+  source: string;
+  target: string;
+  resolution: string;
+  producer: string;
+  producer_context_sha256: string;
+  confidence: "definite" | "syntax";
+};
+
+export type SemanticSearchTraceCandidate = {
+  entity_id: string;
+  fts_rank?: number;
+  vector_rank?: number;
+  representation: SemanticRepresentation;
+  features: {
+    name_overlap: number;
+    token_sketch: number;
+    graph: number;
+  };
+  contributions: {
+    base_hybrid: number;
+    name_overlap: number;
+    token_sketch: number;
+    graph: number;
+  };
+  final_score: number;
+  graph_evidence: SearchTraceGraphEvidence[];
+};
+
+export type SemanticSearchTrace = {
+  schema_version: 1;
+  generation_id: string;
+  source_digest: string;
+  source_selection_digest: string;
+  source_files: number;
+  source_bytes: number;
+  feature_config: SemanticFeatures;
+  artifacts: {
+    index_sha256: string;
+    graph_generation_id: string | null;
+    graph_artifact_sha256: string | null;
+    graph_publication_sha256: string | null;
+    embedding_model: string;
+    embedding_schema: string;
+  };
+  candidates: SemanticSearchTraceCandidate[];
+  candidate_count: number;
+  candidates_truncated: boolean;
+  graph: {
+    binding: "bound" | "unbound";
+    generation_id: string | null;
+    artifact_sha256: string | null;
+    publication_sha256: string | null;
+    seed_ids: string[];
+    eligible_edges: number;
+    excluded_edges: {
+      unresolved: number;
+      ambiguous: number;
+      stale: number;
+    };
+  };
+  expansion: {
+    enabled: boolean;
+    related_count: number;
+    items: [];
+  };
+};
+
 export type SearchRecallTrace = {
   path: "fts" | "vector";
   routeId?: string;
@@ -324,6 +421,10 @@ export type SearchHitTrace = {
   fusion?: SearchStageTrace;
   ranking?: SearchStageTrace;
   final: SearchFinalTrace;
+  representation?: SemanticRepresentation;
+  features?: SearchTraceFeatures;
+  contributions?: SearchTraceContributions;
+  finalScore?: number;
 };
 
 export type SearchHitEvidence = {
@@ -366,6 +467,7 @@ export type SearchPlan = {
   routes: readonly SearchPlanRoute[];
   limit?: number;
   trace?: boolean;
+  semanticFeatures?: SemanticFeatures;
   trackEntityId?: string;
   preferSymbol?: boolean;
   symbolTypes?: readonly CodeSymbolType[];
@@ -387,6 +489,7 @@ export type SearchPlanResult = {
   plan: ResolvedSearchPlan;
   hits: SearchHit[];
   trackedHit?: SearchHit;
+  trace?: SemanticSearchTrace;
   timings?: readonly TimingEntry[];
 };
 
