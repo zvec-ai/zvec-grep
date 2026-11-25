@@ -1,17 +1,13 @@
 //! R1 empty-reference-name fixtures from `INDEX_FAILURES_DIAGNOSIS.md`.
 //!
 //! Every case below indexes cleanly once the graph walk stops deriving a name
-//! from a zero-width tree-sitter node. The brace-initializer and macro-prefixed
-//! class cases now pass: the walk leaves a zero-width `type_identifier` or
-//! `identifier` unreported instead of queueing a reference spelled `""`. The
-//! empty `require("")` module path still reaches the graph, so that case stays
-//! `#[ignore]`d and removing the attribute is the acceptance gate for it. The
-//! text-only case proves the harness itself is sound: the same constructions
-//! index fine without graph collection, which is why these failures belong to
-//! the graph feature rather than to extraction in general.
-//!
-//! Run the gated cases with:
-//! `cargo test -p zg-engine --test index_empty_names -- --ignored`
+//! from a zero-width tree-sitter node or from an empty module specifier. The
+//! walk leaves a zero-width `type_identifier` or `identifier` unreported, and
+//! the import wrapper drops a specifier that spells nothing, so none of these
+//! queue a reference spelled `""`. The text-only case proves the harness itself
+//! is sound: the same constructions index fine without graph collection, which
+//! is why these failures belong to the graph feature rather than to extraction
+//! in general.
 
 #[allow(dead_code)] // Shared harness; each test binary uses a different subset.
 mod support;
@@ -121,7 +117,6 @@ async fn macro_prefixed_nested_class_forward_keeps_the_file_indexable_under_grap
 }
 
 #[tokio::test]
-#[ignore = "R1-D: `require(\"\")` normalises to an empty module path that becomes an empty Imports ref_name"]
 async fn empty_require_module_keeps_the_file_indexable_under_graph()
 -> Result<(), Box<dyn std::error::Error>> {
     let (result, _server) = index_with_graph("sample.js", "const A = require(\"\");\n").await?;

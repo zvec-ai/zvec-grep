@@ -806,6 +806,13 @@ impl WalkContext {
         line: usize,
         column: usize,
     ) {
+        // A specifier that spells nothing (`require("")`) names no target, and
+        // a reference spelled `""` fails the whole file's graph write with
+        // "ID or reference name is empty". Every import form funnels through
+        // this wrapper, so the guard sits here rather than at each caller.
+        if module_path.trim().is_empty() {
+            return;
+        }
         self.add_name_edge(NameEdge {
             ref_kind: GraphEdgeKind::Imports,
             owner_index: FILE_SCOPE_INDEX,
@@ -941,6 +948,21 @@ mod tests {
         context.add_call_edge(1, "helper", None, None, None, 4, 2);
         context.add_call_edge(0, "other", None, None, None, 5, 3);
         assert_eq!(context.name_edges().len(), 5);
+    }
+
+    #[test]
+    fn an_empty_import_specifier_records_no_reference() {
+        // `require("")` spells no module, and a reference spelled `""` fails
+        // the whole file's graph write with "ID or reference name is empty".
+        // Every import form funnels through the wrapper, so it drops the
+        // reference instead of naming nothing.
+        let mut context = WalkContext::new();
+        context.add_import_edge("", Some("require(\"\")"), 1, 0);
+        context.add_import_edge("   ", Some("require(\"   \")"), 2, 0);
+        assert!(context.name_edges().is_empty());
+        // A specifier that names a module still records its reference.
+        context.add_import_edge("./utils.js", Some("require('./utils.js')"), 3, 0);
+        assert_eq!(context.name_edges().len(), 1);
     }
 
     #[test]
