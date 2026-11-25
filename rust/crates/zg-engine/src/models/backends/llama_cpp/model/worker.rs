@@ -7,7 +7,43 @@ use std::{
 
 use tokio::sync::oneshot;
 
-use super::{LlamaContextWorker, LlamaWorkerMessage, ModelError, Ordering};
+use super::{
+    LlamaContextWorker, LlamaWorkerJob, LlamaWorkerMessage, ModelError, Ordering, StdMutex,
+    lock_llama_mutex,
+};
+
+pub(super) enum Submission {
+    Accepted,
+    Retired(LlamaWorkerJob),
+    Disconnected,
+}
+
+impl LlamaContextWorker {
+    pub(super) fn submit(&self, job: LlamaWorkerJob) -> Submission {
+        let sent = {
+            let retiring = lock_llama_mutex(&self.retiring);
+            if *retiring {
+                return Submission::Retired(job);
+            }
+            self.sender.send(LlamaWorkerMessage::Embed(job))
+        };
+        // A rejected job can release its last pool lease. Never drop it while
+        // holding the submission lock: pool retirement takes the same lock.
+        match sent {
+            Ok(()) => Submission::Accepted,
+            Err(_) => Submission::Disconnected,
+        }
+    }
+
+    pub(super) fn retire(&self) {
+        let mut retiring = lock_llama_mutex(&self.retiring);
+        self.failed.store(true, Ordering::Release);
+        if !*retiring {
+            *retiring = true;
+            let _ = self.sender.send(LlamaWorkerMessage::Shutdown);
+        }
+    }
+}
 
 pub(super) fn spawn(
     run: impl FnOnce(&mpsc::Receiver<LlamaWorkerMessage>) + Send + 'static,
@@ -20,6 +56,7 @@ pub(super) fn spawn(
     let worker = Arc::new(LlamaContextWorker {
         busy: AtomicBool::new(false),
         failed: AtomicBool::new(false),
+        retiring: StdMutex::new(false),
         sender,
     });
     let join = thread::Builder::new()
@@ -55,8 +92,7 @@ impl Drop for Shutdown {
     fn drop(&mut self) {
         // An engine may outlive this runtime. Retire its old worker so a later
         // runtime cannot enqueue work behind Shutdown on the closed receiver.
-        self.worker.failed.store(true, Ordering::Release);
-        let _ = self.worker.sender.send(LlamaWorkerMessage::Shutdown);
+        self.worker.retire();
         if let Some(join) = self.join.take() {
             // Normally native cleanup has already finished. Runtime teardown
             // also waits here, before CUDA's process-wide exit handlers run.

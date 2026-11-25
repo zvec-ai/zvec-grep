@@ -3,12 +3,14 @@ use std::collections::{BTreeMap, VecDeque};
 
 use tokio::sync::{oneshot, watch};
 
+use super::worker::Submission;
+
 use super::{
     Arc, CancellationToken, EmbeddingResult, LlamaContextPool, LlamaContextProfile,
     LlamaContextWorker, LlamaExecutionBackend, LlamaExecutionBudget, LlamaModel, LlamaResources,
-    LlamaWorkerJob, LlamaWorkerLease, LlamaWorkerMessage, LlamaWorkerResponse, ModelError,
-    Ordering, PreparedLlamaBatch, PreparedLlamaInput, StdMutex, check_cancelled,
-    llama_batch_capacity, llama_context_worker, llama_micro_batch_capacity, lock_llama_mutex,
+    LlamaWorkerJob, LlamaWorkerLease, LlamaWorkerResponse, ModelError, Ordering,
+    PreparedLlamaBatch, PreparedLlamaInput, StdMutex, check_cancelled, llama_batch_capacity,
+    llama_context_worker, llama_micro_batch_capacity, lock_llama_mutex,
 };
 
 #[derive(Default)]
@@ -175,6 +177,11 @@ impl Drop for LlamaResponseSender {
 
 struct PendingJob {
     receiver: oneshot::Receiver<LlamaWorkerResponse>,
+}
+
+enum Dispatch {
+    Submitted(PendingJob),
+    Retired(PreparedLlamaInput),
 }
 
 impl PendingJob {
@@ -382,7 +389,7 @@ async fn run_prepared(
         .into_iter()
         .map(|input| {
             let profile = execution.context_profile(&input)?;
-            Ok((input, profile))
+            Ok((input, profile, false))
         })
         .collect::<Result<VecDeque<_>, ModelError>>()?;
     let completion = Arc::clone(&operation.completion);
@@ -406,7 +413,7 @@ async fn run_prepared(
                     break;
                 }
             };
-            let (input, profile) = inputs.pop_front().expect("prepared input");
+            let (input, profile, retried_retirement) = inputs.pop_front().expect("prepared input");
             match dispatch_input(
                 lease,
                 input,
@@ -415,7 +422,19 @@ async fn run_prepared(
                 signal,
                 execution_lease.clone(),
             ) {
-                Ok(job) => pending.push(job),
+                Ok(Dispatch::Submitted(job)) => pending.push(job),
+                Ok(Dispatch::Retired(input)) if !retried_retirement => {
+                    // Retirement won before enqueue, so this input has never
+                    // run. Retry once on the caller's runtime, without replaying
+                    // accepted jobs or turning native failures into retries.
+                    inputs.push_front((input, profile, true));
+                }
+                Ok(Dispatch::Retired(_)) => {
+                    failure = Some(ModelError::internal(
+                        "llama.cpp context worker retired before submission",
+                    ));
+                    break;
+                }
                 Err(error) => {
                     failure = Some(error);
                     break;
@@ -459,7 +478,7 @@ fn dispatch_input(
     execution: &LlamaBatchExecution,
     signal: Option<&CancellationToken>,
     execution_lease: Option<Arc<dyn Send + Sync>>,
-) -> Result<PendingJob, ModelError> {
+) -> Result<Dispatch, ModelError> {
     check_cancelled(signal)?;
     tracing::debug!(
         architecture = execution.architecture,
@@ -487,12 +506,13 @@ fn dispatch_input(
             completion,
         },
     };
-    if worker.sender.send(LlamaWorkerMessage::Embed(job)).is_err() {
-        return Err(ModelError::internal(
+    match worker.submit(job) {
+        Submission::Accepted => Ok(Dispatch::Submitted(PendingJob { receiver })),
+        Submission::Retired(job) => Ok(Dispatch::Retired(job.input)),
+        Submission::Disconnected => Err(ModelError::internal(
             "llama.cpp context worker stopped unexpectedly",
-        ));
+        )),
     }
-    Ok(PendingJob { receiver })
 }
 
 impl LlamaOperationLease {
@@ -579,7 +599,7 @@ fn shutdown_workers(workers: Vec<Arc<LlamaContextWorker>>) {
     // The runtime-owned shutdown guard joins after native cleanup, or during
     // runtime shutdown. This path can run on the worker itself and must not join.
     for worker in workers {
-        let _ = worker.sender.send(LlamaWorkerMessage::Shutdown);
+        worker.retire();
     }
 }
 

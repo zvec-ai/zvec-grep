@@ -1,5 +1,5 @@
 use super::super::tests::test_resources;
-use super::super::{LlamaToken, should_fallback_to_cpu};
+use super::super::{LlamaToken, LlamaWorkerMessage, should_fallback_to_cpu};
 use super::*;
 use std::sync::{atomic::AtomicBool, mpsc};
 
@@ -94,6 +94,7 @@ fn idle_worker() -> Arc<LlamaContextWorker> {
     Arc::new(LlamaContextWorker {
         busy: AtomicBool::new(false),
         failed: AtomicBool::new(false),
+        retiring: StdMutex::new(false),
         sender,
     })
 }
@@ -358,6 +359,7 @@ fn worker_channel() -> (Arc<LlamaContextWorker>, mpsc::Receiver<LlamaWorkerMessa
         Arc::new(LlamaContextWorker {
             busy: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            retiring: StdMutex::new(false),
             sender,
         }),
         receiver,
@@ -374,6 +376,160 @@ fn received_job(receiver: &mpsc::Receiver<LlamaWorkerMessage>) -> LlamaWorkerJob
 fn finish(job: LlamaWorkerJob) {
     let index = job.input.index;
     job.response.send(Ok((index, vec![1.0])));
+}
+
+fn execution_fixture(pool: &TestPool) -> LlamaBatchExecution {
+    LlamaBatchExecution {
+        backend: LlamaExecutionBackend::Cpu,
+        architecture: "qwen3".to_owned(),
+        context_size: 256,
+        budget: LlamaExecutionBudget::resolve(LlamaExecutionBackend::Cpu, 1, &pool.resources),
+        concurrency: 1,
+    }
+}
+
+#[test]
+fn another_runtime_can_retire_a_leased_worker_before_submission() {
+    let owner = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("owner runtime");
+    let caller = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("caller runtime");
+    let worker = owner.block_on(async {
+        super::super::worker::spawn(|receiver| {
+            assert!(matches!(receiver.recv(), Ok(LlamaWorkerMessage::Shutdown)));
+        })
+        .expect("worker")
+    });
+    let pool = TestPool::new(1);
+    let operation = LlamaOperationLease::register(&pool.state, &pool.completion, 1, None);
+    let lease = caller.block_on(async {
+        operation
+            .try_lease_worker(|| Ok(Arc::clone(&worker)))
+            .expect("lease")
+            .expect("capacity")
+    });
+    assert_eq!(pool.in_flight(), 1);
+    drop(owner);
+    caller.block_on(async {
+        let execution = execution_fixture(&pool);
+        let input = PreparedLlamaInput {
+            index: 0,
+            tokens: vec![LlamaToken::new(7); 32],
+        };
+        let profile = execution.context_profile(&input).expect("profile");
+        let Dispatch::Retired(input) =
+            dispatch_input(lease, input, profile, &execution, None, None)
+                .expect("unsubmitted input")
+        else {
+            panic!("retired worker must return the input without starting it");
+        };
+        assert_eq!(pool.in_flight(), 0);
+        let result = run_prepared(
+            PreparedLlamaBatch {
+                inputs: vec![input],
+                truncated: vec![],
+            },
+            execution,
+            operation,
+            None,
+            None,
+            || {
+                super::super::worker::spawn(|receiver| {
+                    while let Ok(LlamaWorkerMessage::Embed(job)) = receiver.recv() {
+                        finish(job);
+                    }
+                })
+            },
+        )
+        .await
+        .expect("another runtime completes the same input");
+        assert_eq!(result.vectors, vec![vec![1.0]]);
+    });
+    pool.assert_released();
+    drop(caller);
+}
+
+#[tokio::test]
+async fn retirement_before_enqueue_retries_only_unsubmitted_work_once() {
+    for retire_replacement in [false, true] {
+        let pool = TestPool::new(1);
+        let (worker, receiver) = worker_channel();
+        let mut creates = 0;
+        let mut request = Box::pin(pool.run(1, 1, None, None, || {
+            creates += 1;
+            if creates == 1 || retire_replacement {
+                let retired = idle_worker();
+                retired.retire();
+                Ok(retired)
+            } else {
+                Ok(Arc::clone(&worker))
+            }
+        }));
+        if retire_replacement {
+            let error = request.await.expect_err("bounded retirement retry");
+            assert!(!should_fallback_to_cpu(true, &error));
+            assert!(receiver.try_recv().is_err());
+        } else {
+            assert!(futures_util::poll!(&mut request).is_pending());
+            assert_eq!(pool.in_flight(), 1);
+            finish(received_job(&receiver));
+            assert_eq!(
+                request.await.expect("retry success").vectors,
+                vec![vec![1.0]]
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "accepted work must not be replayed"
+            );
+        }
+        assert_eq!(creates, 2);
+        pool.assert_released();
+    }
+}
+
+#[test]
+fn another_runtime_shutdown_drains_an_already_submitted_job() {
+    let owner = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("owner runtime");
+    let caller = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("caller runtime");
+    let (release, held) = mpsc::channel();
+    let worker = owner.block_on(async {
+        super::super::worker::spawn(move |receiver| {
+            let job = match receiver.recv().expect("first message") {
+                LlamaWorkerMessage::Embed(job) => job,
+                LlamaWorkerMessage::Shutdown => panic!("submission must precede shutdown"),
+            };
+            // Observing Shutdown proves retirement has run. Accepted work still
+            // owns its lease and must return a result before this thread exits.
+            assert!(matches!(receiver.recv(), Ok(LlamaWorkerMessage::Shutdown)));
+            release.send(()).expect("retirement observed");
+            finish(job);
+        })
+        .expect("worker")
+    });
+    let pool = TestPool::new(1);
+    let mut request = Box::pin(pool.run(1, 1, None, None, || Ok(Arc::clone(&worker))));
+    caller.block_on(async {
+        assert!(futures_util::poll!(&mut request).is_pending());
+    });
+    drop(owner);
+    held.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("shutdown delivered after job");
+    assert_eq!(
+        caller.block_on(request).expect("accepted result").vectors,
+        vec![vec![1.0]]
+    );
+    pool.assert_released();
+    drop(caller);
 }
 
 #[test]

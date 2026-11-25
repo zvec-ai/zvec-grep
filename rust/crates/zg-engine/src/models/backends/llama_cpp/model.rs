@@ -110,6 +110,7 @@ struct LlamaContextPool {
 struct LlamaContextWorker {
     busy: AtomicBool,
     failed: AtomicBool,
+    retiring: StdMutex<bool>,
     sender: mpsc::Sender<LlamaWorkerMessage>,
 }
 
@@ -274,7 +275,7 @@ impl LlamaCppEmbeddingModel {
         let reporter_for_load = reporter.clone();
         let model = self
             .compute_runtime
-            .run(move || {
+            .run_native(move || {
                 let _lease = execution_lease;
                 load_model_with_fallback(&path, device, &reporter_for_load, resources)
             })
@@ -306,7 +307,7 @@ impl LlamaCppEmbeddingModel {
         drop(failed);
         let loaded = Arc::new(
             self.compute_runtime
-                .run(move || {
+                .run_native(move || {
                     let _lease = execution_lease;
                     let registry = lock_backend_registry();
                     let backend = initialize_llama_backend(false, &registry)?;
@@ -595,7 +596,7 @@ impl LlamaCppEmbeddingModel {
         let entry = self.entry;
         let (prepared, context_size) = self
             .compute_runtime
-            .run(move || {
+            .run_native(move || {
                 let _lease = execution_lease;
                 prepare_texts(&model, &texts, entry, signal.as_ref())
             })

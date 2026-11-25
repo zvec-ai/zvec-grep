@@ -10,6 +10,8 @@ use tokio::sync::oneshot;
 
 use crate::models::spi::ModelError;
 
+mod native;
+
 #[derive(Clone)]
 pub(crate) struct ModelComputeRuntime {
     inner: Arc<ComputeInner>,
@@ -55,6 +57,15 @@ impl ModelComputeRuntime {
         receiver
             .await
             .map_err(|error| ModelError::internal("Model compute worker failed").with_cause(error))
+    }
+
+    /// Keep finite native work and abandoned-result cleanup within Tokio shutdown.
+    pub(crate) async fn run_native<F, T>(&self, task: F) -> Result<T, ModelError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        native::run(self.inner.pool()?, task).await
     }
 }
 
