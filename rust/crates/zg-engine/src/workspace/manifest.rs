@@ -1226,6 +1226,7 @@ mod tests {
                 endpoint: Some("https://example.test/embeddings".into()),
                 device: Some(crate::domain::model::Device::Cpu),
                 cache_dir: Some(directory.path().join("models")),
+                http: None,
             })
             .expect("saved settings");
         for field in ["recordedPath", "recordedUsername"] {

@@ -27,7 +27,7 @@ use crate::{
     },
     domain::{
         IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
-        model::{Device, EncryptedApiKey, ModelConfig},
+        model::{Device, EncryptedApiKey, HttpAuth, HttpEmbeddingConfig, ModelConfig},
     },
     models::{
         ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest,
@@ -706,10 +706,24 @@ fn acquire_index_models(
     graph_indexing: bool,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
+    let configs = model
+        .configured_http()
+        .map(|http| {
+            (
+                model.info().model().reference(),
+                ModelConfig {
+                    http: Some(http.clone()),
+                    endpoint: model.configured_endpoint().map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+        })
+        .into_iter()
+        .collect();
     let descriptor = IndexDescriptor::new(
         model.info().clone(),
         std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
+        configs,
         graph_indexing,
         crate::domain::FTS_CONFIG,
     )?;
@@ -728,6 +742,10 @@ fn acquire_index_models(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep model resolution, saved configuration, and consent in execution order"
+)]
 fn acquire_model(
     models: &ModelRuntimeManager,
     existing: Option<&Workspace>,
@@ -752,41 +770,21 @@ fn acquire_model(
     let existing_index = existing.and_then(|workspace| workspace.index().descriptor());
     let existing_runtime =
         existing_index.and_then(|index| index.embedding_configs().get(&reference));
-    let requested_key = options
-        .runtime_api_key
-        .as_ref()
-        .or(options.api_key.as_ref());
-    let saved_key = if local || requested_key.is_some() {
-        None
-    } else if let (Some(workspace), Some(runtime)) = (existing, existing_runtime) {
-        runtime
-            .api_key
-            .as_ref()
-            .map(|key| decrypt_api_key(key, workspace.layout(), &reference))
-            .transpose()?
-    } else {
-        None
-    };
-    let api_key = if local {
-        None
-    } else {
-        requested_key
-            .cloned()
-            .or(saved_key)
-            .or_else(|| crate::config::string(&config, &["providers", provider, "apiKey"]))
-            .or_else(environment_api_key)
-    };
-    let endpoint = options.endpoint.clone().or_else(|| {
+    let explicit_endpoint = options.endpoint.as_deref().or_else(|| {
         options
             .embedding
             .as_ref()
-            .and_then(|embedding| embedding.endpoint.clone())
-            .or_else(|| existing_runtime.and_then(|runtime| runtime.endpoint.clone()))
+            .and_then(|embedding| embedding.endpoint.as_deref())
     });
-    let endpoint = if local {
-        endpoint
-    } else {
-        let endpoint = crate::authorization::remote_endpoint(&reference, endpoint.as_deref())?;
+    let http = crate::config::resolve_http_model(
+        &config,
+        &reference,
+        existing_runtime,
+        explicit_endpoint,
+        options.rebuild,
+    )?;
+    let (http_descriptor, endpoint) = if let Some(http) = http {
+        let endpoint = http.endpoint.expect("resolved HTTP endpoint");
         let root = resolve_directory(options.root.as_deref())?;
         crate::authorization::require_with_targets(
             &root,
@@ -795,8 +793,43 @@ fn acquire_model(
             options.allow_remote,
             &options.authorized_remote,
         )?;
-        Some(endpoint)
+        (http.http, Some(endpoint))
+    } else {
+        let endpoint = options.endpoint.clone().or_else(|| {
+            options
+                .embedding
+                .as_ref()
+                .and_then(|embedding| embedding.endpoint.clone())
+                .or_else(|| existing_runtime.and_then(|runtime| runtime.endpoint.clone()))
+        });
+        let endpoint = if local {
+            endpoint
+        } else {
+            let endpoint = crate::authorization::remote_endpoint(&reference, endpoint.as_deref())?;
+            let root = resolve_directory(options.root.as_deref())?;
+            crate::authorization::require_with_targets(
+                &root,
+                &reference,
+                &endpoint,
+                options.allow_remote,
+                &options.authorized_remote,
+            )?;
+            Some(endpoint)
+        };
+        (None, endpoint)
     };
+    let requested_key = options
+        .runtime_api_key
+        .as_deref()
+        .or(options.api_key.as_deref());
+    let api_key = resolve_remote_api_key(
+        &config,
+        &reference,
+        http_descriptor.as_ref(),
+        existing,
+        existing_runtime,
+        requested_key,
+    )?;
     let device = if local {
         crate::config::runtime_device(
             &config,
@@ -813,21 +846,27 @@ fn acquire_model(
     } else {
         None
     };
+    let cache_dir = if http_descriptor.is_some() {
+        None
+    } else {
+        crate::config::model_cache(
+            &config,
+            options
+                .runtime_model_cache
+                .clone()
+                .or_else(|| options.model_cache.clone())
+                .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
+            existing_runtime.and_then(|runtime| runtime.cache_dir.clone()),
+        )
+    };
     models
         .acquire(ModelRuntimeRequest::new(
-            reference.clone(),
+            reference,
             ModelConfig {
+                http: http_descriptor,
                 api_key,
                 endpoint,
-                cache_dir: crate::config::model_cache(
-                    &config,
-                    options
-                        .runtime_model_cache
-                        .clone()
-                        .or_else(|| options.model_cache.clone())
-                        .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
-                    existing_runtime.and_then(|runtime| runtime.cache_dir.clone()),
-                ),
+                cache_dir,
                 device,
             },
             options.embedding_concurrency,
@@ -846,15 +885,62 @@ fn embedding_reference(
         })
 }
 
+pub(in crate::pipelines) fn resolve_remote_api_key(
+    config: &serde_json::Value,
+    reference: &str,
+    http: Option<&HttpEmbeddingConfig>,
+    workspace: Option<&Workspace>,
+    saved_runtime: Option<&ModelConfig<EncryptedApiKey>>,
+    explicit_key: Option<&str>,
+) -> Result<Option<String>, EngineError> {
+    let provider = reference.split('/').next().unwrap_or_default();
+    if provider == "local" {
+        return Ok(None);
+    }
+    if let Some(http) = http {
+        return match http.auth {
+            HttpAuth::None => Ok(None),
+            HttpAuth::Bearer => {
+                if let Some(key) = explicit_key {
+                    return Ok(Some(key.to_owned()));
+                }
+                if let (Some(workspace), Some(runtime)) = (workspace, saved_runtime)
+                    && let Some(encrypted) = runtime.api_key.as_ref()
+                {
+                    return decrypt_api_key(encrypted, workspace.layout(), reference).map(Some);
+                }
+                Ok(http.api_key_env.as_deref().and_then(non_empty_env_var))
+            }
+        };
+    }
+    if let Some(key) = explicit_key {
+        return Ok(Some(key.to_owned()));
+    }
+    let saved_key = if let (Some(workspace), Some(runtime)) = (workspace, saved_runtime) {
+        runtime
+            .api_key
+            .as_ref()
+            .map(|key| decrypt_api_key(key, workspace.layout(), reference))
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(saved_key
+        .or_else(|| crate::config::string(config, &["providers", provider, "apiKey"]))
+        .or_else(environment_api_key))
+}
+
+fn non_empty_env_var(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 pub(in crate::pipelines) fn environment_api_key() -> Option<String> {
     ["ZVEC_GREP_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_KEY"]
         .into_iter()
-        .find_map(|name| {
-            env::var(name)
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-        })
+        .find_map(non_empty_env_var)
 }
 
 pub(in crate::pipelines) fn assert_embedding_compatible(
@@ -906,6 +992,22 @@ fn saved_embedding_config(
                 .cloned()
         })
         .unwrap_or_default();
+    if let Some(http) = model.configured_http() {
+        let mut config = ModelConfig {
+            http: Some(http.clone()),
+            endpoint: model.configured_endpoint().map(str::to_owned),
+            api_key: (http.auth == HttpAuth::Bearer)
+                .then_some(stored.api_key)
+                .flatten(),
+            ..Default::default()
+        };
+        if http.auth == HttpAuth::Bearer
+            && let Some(key) = options.api_key.as_deref()
+        {
+            config.api_key = Some(encrypt_api_key(layout, &reference, key)?);
+        }
+        return Ok(config);
+    }
     if model.info().model().provider() == "local" {
         stored.device = options
             .device
@@ -1216,6 +1318,109 @@ mod tests {
             bytes
         );
         assert!(!layout.credentials_key_path().exists());
+        models.close();
+    }
+
+    #[test]
+    fn http_bearer_key_precedence_and_workspace_persistence_follow_qwen_policy() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        std::fs::create_dir(layout.storage_dir()).expect("storage directory");
+        let http: super::HttpEmbeddingConfig = serde_json::from_value(serde_json::json!({
+            "model": "served-model", "dimension": 4, "maxInputTokens": 128,
+            "auth": "bearer", "apiKeyEnv": "ZG_TEST_UNUSED_ENV"
+        }))
+        .expect("HTTP descriptor");
+        let model_info = http.model_info("http/private").expect("model info");
+        let encrypted =
+            super::encrypt_api_key(&layout, "http/private", "saved-http-token").expect("encrypt");
+        let saved_config = super::ModelConfig {
+            api_key: Some(encrypted.clone()),
+            endpoint: Some("https://example.test/v1/embeddings".into()),
+            http: Some(http.clone()),
+            ..Default::default()
+        };
+        let descriptor = IndexDescriptor::new(
+            model_info.clone(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([("http/private".into(), saved_config.clone())]),
+            false,
+            crate::domain::FTS_CONFIG,
+        )
+        .expect("bearer HTTP index may store encrypted API key");
+        let workspace = Workspace::new(
+            directory.path(),
+            layout.clone(),
+            crate::domain::ScanRules::default(),
+            crate::workspace::CURRENT_INDEX_VERSION,
+            Some(uuid::Uuid::new_v4().to_string()),
+            1,
+            1,
+            IndexState::Enabled(Box::new(descriptor)),
+        )
+        .expect("workspace");
+
+        // Global provider keys must never be applied to http/ models.
+        let global = serde_json::json!({"providers": {"http": {"apiKey": "provider-key"}}});
+        let resolve = |ws, saved, explicit| {
+            super::resolve_remote_api_key(&global, "http/private", Some(&http), ws, saved, explicit)
+                .expect("resolve bearer key")
+        };
+        assert_eq!(
+            resolve(Some(&workspace), Some(&saved_config), Some("override")),
+            Some("override".into())
+        );
+        assert_eq!(
+            resolve(Some(&workspace), Some(&saved_config), None),
+            Some("saved-http-token".into())
+        );
+        assert_eq!(resolve(None, None, None), None);
+
+        // runtime_api_key overrides without altering the saved encrypted key.
+        let models = ModelRuntimeManager::new();
+        let mut request = IndexOptions {
+            root: Some(directory.path().to_path_buf()),
+            runtime_api_key: Some("temporary-runtime-key".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        };
+        let lease = super::acquire_model(&models, Some(&workspace), &request).expect("lease");
+        let preserved = super::saved_embedding_config(&layout, Some(&workspace), &request, &lease)
+            .expect("runtime key preserves saved key");
+        assert_eq!(preserved.api_key, Some(encrypted.clone()));
+        request.api_key = Some("rotated-saved-key".into());
+        let rotated = super::saved_embedding_config(&layout, Some(&workspace), &request, &lease)
+            .expect("explicit index api_key rotates saved key");
+        assert_eq!(
+            super::decrypt_api_key(
+                rotated.api_key.as_ref().expect("rotated"),
+                &layout,
+                "http/private"
+            )
+            .expect("decrypt"),
+            "rotated-saved-key"
+        );
+
+        // auth: none rejects persisted API keys in index metadata.
+        let mut none_http = http;
+        none_http.auth = super::HttpAuth::None;
+        none_http.api_key_env = None;
+        let none_config = super::ModelConfig {
+            api_key: Some(encrypted),
+            endpoint: Some("https://example.test/v1/embeddings".into()),
+            http: Some(none_http),
+            ..Default::default()
+        };
+        assert!(
+            IndexDescriptor::new(
+                model_info,
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::from([("http/private".into(), none_config)]),
+                false,
+                crate::domain::FTS_CONFIG,
+            )
+            .is_err()
+        );
         models.close();
     }
 
