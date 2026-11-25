@@ -13,9 +13,7 @@ from typing import Any
 from . import SweQaError
 
 FULL_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
-EXPECTED_TASK_COUNT = 20
 EXPECTED_CATEGORIES = ("what", "where", "how", "why")
-EXPECTED_TASKS_PER_CATEGORY = 5
 EXPECTED_AUTO_TASK_COUNT = 1 + len(EXPECTED_CATEGORIES)
 
 
@@ -62,7 +60,7 @@ def _instruction_matches(raw: str, question: str) -> bool:
 def validate_assets(
     *, selection_path: Path, references_path: Path, dataset_path: Path
 ) -> dict[str, Any]:
-    """Validate the twenty-task lock, judge references, and Harbor dataset."""
+    """Validate the locked selection, judge references, and Harbor dataset."""
     selection = _object(selection_path, label="selection")
     references = _object(references_path, label="references")
     tasks = _records(selection, "tasks", label="selection")
@@ -75,15 +73,16 @@ def validate_assets(
         raise SweQaError("selection index_base must be 0")
     if references.get("visibility") != "judge-only":
         raise SweQaError("references visibility must be judge-only")
-    if len(tasks) != EXPECTED_TASK_COUNT:
+    gate = selection.get("gate")
+    if not isinstance(gate, dict):
+        raise SweQaError("selection gate must be an object")
+    required_tasks = gate.get("required_tasks")
+    if type(required_tasks) is not int or required_tasks < 1:
+        raise SweQaError("selection gate.required_tasks must be a positive integer")
+    if len(tasks) != required_tasks:
         raise SweQaError(
             "selection must contain exactly "
-            f"{EXPECTED_TASK_COUNT} tasks, found {len(tasks)}"
-        )
-    gate = selection.get("gate")
-    if not isinstance(gate, dict) or gate.get("required_tasks") != EXPECTED_TASK_COUNT:
-        raise SweQaError(
-            f"selection gate.required_tasks must equal {EXPECTED_TASK_COUNT}"
+            f"{required_tasks} tasks, found {len(tasks)}"
         )
 
     ids: set[str] = set()
@@ -122,8 +121,8 @@ def validate_assets(
 
     smoke = [task for task in tasks if task.get("role") == "smoke"]
     categories = [task for task in tasks if task.get("role") == "category"]
-    if len(smoke) != 1 or len(categories) != EXPECTED_TASK_COUNT - 1:
-        raise SweQaError("selection must contain 1 smoke and 19 category tasks")
+    if len(smoke) != 1 or len(categories) != len(tasks) - 1:
+        raise SweQaError("selection must contain 1 smoke and otherwise category tasks")
 
     category_counts: Counter[str] = Counter()
     for task in tasks:
@@ -135,12 +134,6 @@ def validate_assets(
                 f"question_type does not match category for {task.get('task_id')}"
             )
         category_counts[str(category)] += 1
-    expected_counts = {
-        category: EXPECTED_TASKS_PER_CATEGORY for category in EXPECTED_CATEGORIES
-    }
-    if dict(category_counts) != expected_counts:
-        raise SweQaError("selection must contain 5 tasks in each question category")
-
     smoke_task_id = str(smoke[0]["task_id"])
     if gate.get("smoke_task") != smoke_task_id:
         raise SweQaError("selection gate.smoke_task does not match the smoke task")
@@ -281,6 +274,7 @@ def validate_assets(
         "schema_version": 1,
         "valid": True,
         "task_count": len(tasks),
+        "category_counts": dict(category_counts),
         "task_ids": [str(task["task_id"]) for task in tasks],
         "auto_task_count": len(auto_tasks),
         "auto_task_ids": auto_tasks,

@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "requests:45"
+source_index = 45
+index_base = 0
+role = "category"
+category = "where"
+question_type = "where"
+question_hash = "21f5cb775c83641fbf4ac202c52600e6842be3c91f1dc21c493477fd7dbe97b6"
+repository = "psf/requests"
+repository_commit = "46e939b5525d9c72b677340985582b04b128478a"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

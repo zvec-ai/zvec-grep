@@ -32,7 +32,7 @@ on:
         default: main
         type: string
       scope:
-        description: Run the low/medium/high variability trio, all 20 tasks, or smoke
+        description: Run the variability trio, full selection, or smoke
         required: true
         default: repro-3
         type: choice
