@@ -2,6 +2,7 @@
 
 mod bekko;
 mod factory;
+mod http;
 mod llama_cpp;
 mod model2vec;
 mod qwen;

@@ -621,6 +621,21 @@ fn visit_for_bindings(
         // function the body calls by that name.
         context.register_shadowed_name(owner_index, &name);
     }
+    if format == FileFormat::Rust && node.kind() == "use_declaration" {
+        // `use crate::other::save;` binds `save` in this body alone, so the
+        // body's `save()` reaches that import rather than the module's own
+        // function of the name. Where the import points is the resolver's
+        // question, so the call stays pending here.
+        for name in rust_use_bindings(node, source) {
+            context.register_import_binding(owner_index, &name);
+        }
+        // A glob binds no spelling the walk can list, but it does put the
+        // source module's names in view, which partition needs in order not to
+        // rule the file's own namesakes out.
+        if rust_use_is_glob(node) {
+            context.register_import_glob(owner_index);
+        }
+    }
     let line = node.start_position().row + 1;
     let column = node.start_position().column;
     if let Some((name, target)) = alias {
@@ -685,43 +700,7 @@ fn visit_for_bindings(
         }
         return;
     }
-    if format == FileFormat::Python
-        && node.kind() == "assignment"
-        && let Some(left) = node
-            .child_by_field_name("left")
-            .filter(|left| left.kind() == "identifier")
-    {
-        let name = node_text(left, source);
-        // `client: Left = …` states the type beside the name, whatever value
-        // the body stores in it.
-        if let Some(bound) = node
-            .child_by_field_name("type")
-            .and_then(|ty| python_annotation_name(ty, source))
-        {
-            context.add_declare_binding(owner_index, name, &bound, line, column, None);
-            return;
-        }
-        // `client = clients[0]` states that the name no longer holds what the
-        // parameter declared. The index cannot place the value, so the name
-        // holds no type from this line on rather than keeping the annotation
-        // the parameter stated for the whole body.
-        //
-        // `client = other` is a copy of a name the body already types, and the
-        // copy holds that type: a receiver reads `other`'s type from this line
-        // on. A copy of a name the body states no type for leaves the name as
-        // undecided as any other value the index cannot place — the annotation
-        // described what the name held before the assignment, not after it.
-        let copied = node
-            .child_by_field_name("right")
-            .filter(|right| right.kind() == "identifier")
-            .and_then(|right| {
-                context
-                    .declared_type_at(owner_index, node_text(right, source), line, column)
-                    .map(str::to_owned)
-            })
-            .filter(|bound| !matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE));
-        let bound = copied.as_deref().unwrap_or(PYTHON_UNBOUND_TYPE);
-        context.add_declare_binding(owner_index, name, bound, line, column, None);
+    if collect_python_assignment(node, owner_index, source, format, context, line, column) {
         return;
     }
     for child in named_children(node) {
@@ -730,6 +709,60 @@ fn visit_for_bindings(
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
     }
+}
+
+/// Records what a Python assignment states about the name it writes, if the
+/// node is one.
+fn collect_python_assignment(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    format: FileFormat,
+    context: &mut WalkContext,
+    line: usize,
+    column: usize,
+) -> bool {
+    if format != FileFormat::Python || node.kind() != "assignment" {
+        return false;
+    }
+    let Some(left) = node
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "identifier")
+    else {
+        return false;
+    };
+    let name = node_text(left, source);
+    // `client: Left = …` states the type beside the name, whatever value
+    // the body stores in it.
+    if let Some(bound) = node
+        .child_by_field_name("type")
+        .and_then(|ty| python_annotation_name(ty, source))
+    {
+        context.add_declare_binding(owner_index, name, &bound, line, column, None);
+        return true;
+    }
+    // `client = clients[0]` states that the name no longer holds what the
+    // parameter declared. The index cannot place the value, so the name
+    // holds no type from this line on rather than keeping the annotation
+    // the parameter stated for the whole body.
+    //
+    // `client = other` is a copy of a name the body already types, and the
+    // copy holds that type: a receiver reads `other`'s type from this line
+    // on. A copy of a name the body states no type for leaves the name as
+    // undecided as any other value the index cannot place — the annotation
+    // described what the name held before the assignment, not after it.
+    let copied = node
+        .child_by_field_name("right")
+        .filter(|right| right.kind() == "identifier")
+        .and_then(|right| {
+            context
+                .declared_type_at(owner_index, node_text(right, source), line, column)
+                .map(str::to_owned)
+        })
+        .filter(|bound| !matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE));
+    let bound = copied.as_deref().unwrap_or(PYTHON_UNBOUND_TYPE);
+    context.add_declare_binding(owner_index, name, bound, line, column, None);
+    true
 }
 
 /// Records what a Python class's `self.<member> = <value>` assignments state
@@ -3466,6 +3499,94 @@ fn descendants_within(node: Node<'_>, max_depth: usize) -> Vec<Node<'_>> {
     found
 }
 
+/// The spellings a Rust `use` declaration binds in the body that writes it:
+/// `use crate::other::save;` binds `save`, `use crate::other::save as write;`
+/// binds `write`, and a brace group binds one name per clause. A glob
+/// (`use super::*;`) states no spelling this reader can place.
+///
+/// The clauses are read by their tree shape rather than by cutting the
+/// declaration's text: `use_as_clause` states the alias, a `scoped_use_list`
+/// states the module its `self` entries name, and a `use_wildcard` names
+/// nothing. Comments and line breaks inside the declaration therefore cannot
+/// shift which name a clause binds.
+fn rust_use_bindings(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(argument) = node.child_by_field_name("argument") {
+        collect_rust_use_bindings(argument, "", source, &mut names);
+    }
+    names
+}
+
+/// Collects the names one clause of a `use` declaration binds.
+///
+/// `module` is the spelling a `self` entry names: the brace group of
+/// `use a::b::{self, c};` is written on `a::b`, so its `self` binds `b` — the
+/// module itself, never the keyword.
+fn collect_rust_use_bindings(node: Node<'_>, module: &str, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        // `use a::b as c;` binds the alias; `as _` binds nothing.
+        "use_as_clause" => {
+            if let Some(alias) = node.child_by_field_name("alias") {
+                push_rust_use_name(node_text(alias, source), names);
+            }
+        }
+        "scoped_use_list" => {
+            let module = node
+                .child_by_field_name("path")
+                .map(|path| rust_use_last_segment(path, source))
+                .unwrap_or_default();
+            if let Some(list) = node.child_by_field_name("list") {
+                for clause in named_children(list) {
+                    collect_rust_use_bindings(clause, &module, source, names);
+                }
+            }
+        }
+        "use_list" => {
+            for clause in named_children(node) {
+                collect_rust_use_bindings(clause, module, source, names);
+            }
+        }
+        // A glob brings names into view without spelling any of them.
+        "use_wildcard" => {}
+        "self" => push_rust_use_name(module, names),
+        _ => push_rust_use_name(&rust_use_last_segment(node, source), names),
+    }
+}
+
+/// The name a `use` path refers to: the segment after the last `::`, which is
+/// what the declaration binds (`use crate::other::save;` binds `save`).
+fn rust_use_last_segment(node: Node<'_>, source: &[u8]) -> String {
+    node.child_by_field_name("name").map_or_else(
+        || node_text(node, source).to_owned(),
+        |name| node_text(name, source).to_owned(),
+    )
+}
+
+/// Records one spelling a `use` clause binds.
+///
+/// A clause binds nothing when it names no identifier: `as _` discards the
+/// import, and a path segment that is empty (a trailing `::`) or spelled with
+/// punctuation names nothing this reader can place.
+fn push_rust_use_name(name: &str, names: &mut Vec<String>) {
+    let name = name.strip_prefix("r#").unwrap_or(name);
+    if name.is_empty() || name == "_" {
+        return;
+    }
+    if name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+        names.push(name.to_owned());
+    }
+}
+
+/// Whether a `use` declaration writes a glob (`use super::*;`,
+/// `use a::{self, *};`), which binds no name the walk can list.
+fn rust_use_is_glob(node: Node<'_>) -> bool {
+    if node.kind() == "use_wildcard" {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(rust_use_is_glob)
+}
+
 /// Reduces a normalized `use` declaration to its module path: drops a leading
 /// `use`, a trailing `as <ident>` alias, brace groups, and all whitespace.
 fn strip_rust_use_path(normalized: &str) -> Option<String> {
@@ -3735,6 +3856,41 @@ mod tests {
                     .all(|edge| !matches!(edge.ref_name.as_str(), "hidden" | "local")),
                 "{format:?}"
             );
+        }
+    }
+
+    #[test]
+    fn rust_use_bindings_read_the_clause_shape() {
+        for (source, expected) in [
+            ("use crate::other::save;", vec!["save"]),
+            ("use crate::other::save as write;", vec!["write"]),
+            (
+                "use crate::other::{save, write as store};",
+                vec!["save", "store"],
+            ),
+            // A `self` entry names the module the group is written on.
+            ("use crate::other::{self, save};", vec!["other", "save"]),
+            ("use super::{self};", vec!["super"]),
+            // A glob and a discarded alias bind nothing.
+            ("use crate::other::*;", vec![]),
+            ("use crate::other::{self, *};", vec!["other"]),
+            ("use crate::other::save as _;", vec![]),
+            // Comments and line breaks inside the declaration are not clauses.
+            (
+                "pub(crate) use crate::other::{\n    // the writer\n    save /* the writer */,\n};",
+                vec!["save"],
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_rust::LANGUAGE.into())
+                .expect("fixture grammar");
+            let tree = parser.parse(source, None).expect("fixture syntax tree");
+            let declaration = tree.root_node().named_child(0).expect("use declaration");
+            assert_eq!(declaration.kind(), "use_declaration", "{source}");
+            let bound = rust_use_bindings(declaration, source.as_bytes());
+            let bound: Vec<&str> = bound.iter().map(String::as_str).collect();
+            assert_eq!(bound, expected, "{source}");
         }
     }
 

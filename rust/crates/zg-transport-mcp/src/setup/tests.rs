@@ -724,3 +724,103 @@ async fn legacy_forms_can_select_models_and_unsupported_clients_receive_instruct
     .await
     .expect("setup test terminates");
 }
+
+#[tokio::test]
+async fn http_setup_selects_and_authorizes_without_generic_credentials() {
+    const CHILD: &str = "ZG_HTTP_MCP_SETUP_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let state = tempfile::tempdir().expect("isolated home");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("valid test fixture"))
+                .args([
+                    "--exact",
+                    "setup::tests::http_setup_selects_and_authorizes_without_generic_credentials",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("HOME", state.path())
+                .env("USERPROFILE", state.path())
+                .env_remove("ZVEC_GREP_EMBEDDING")
+                .env_remove("ZVEC_GREP_ENDPOINT")
+                .env_remove("ZG_HTTP_MCP_MISSING_KEY")
+                .env("ZVEC_GREP_API_KEY", "generic-must-not-count")
+                .output()
+                .expect("valid test fixture");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let path = zg_engine::config::global_config_path().expect("valid test fixture");
+    std::fs::create_dir_all(path.parent().expect("valid test fixture"))
+        .expect("valid test fixture");
+    std::fs::write(&path, json!({"version": 1, "defaults": {"embedding": "http/anonymous"},
+        "models": {
+            "http/anonymous": {"endpoint": "http://127.0.0.1:8080/v1",
+                "model": "served", "dimension": 3, "maxInputTokens": 128, "auth": "none"},
+            "http/private": {"endpoint": "http://127.0.0.1:8080/v1",
+                "model": "served", "dimension": 3, "maxInputTokens": 128, "auth": "bearer", "apiKeyEnv": "ZG_HTTP_MCP_MISSING_KEY"}
+        }}).to_string()).expect("valid test fixture");
+    let engine = ZvecGrep::new();
+    let setup = engine
+        .index_setup(IndexSetupOptions::default())
+        .await
+        .expect("valid test fixture");
+    let root = tempfile::tempdir().expect("valid test fixture");
+    let (_, schema) = form(
+        &Phase::Model {
+            root: root.path().into(),
+            setup,
+        },
+        Some(&ProtocolVersion::V_2026_07_28),
+    );
+    assert_eq!(schema["properties"]["model"]["default"], "http/anonymous");
+    let choices = schema["properties"]["model"]["oneOf"]
+        .as_array()
+        .expect("valid test fixture");
+    assert!(choices.iter().any(|c| c["const"] == "http/anonymous"));
+    assert!(!choices.iter().any(|c| c["const"] == "http/private"));
+    let with_key = engine
+        .index_setup(IndexSetupOptions {
+            credential_available: true,
+            ..Default::default()
+        })
+        .await
+        .expect("valid test fixture");
+    assert!(
+        with_key
+            .models
+            .iter()
+            .any(|c| c.reference == "http/private" && c.available())
+    );
+    let options = IndexOptions {
+        root: Some(root.path().into()),
+        embedding: Some(EmbeddingModelSpec {
+            reference: "http/anonymous".into(),
+            revision: None,
+            cache_dir: None,
+            endpoint: None,
+            device: zg_engine::api::index::options::Device::Auto,
+        }),
+        ..Default::default()
+    };
+    let target = authorization::index_authorization(&options)
+        .expect("valid test fixture")
+        .expect("valid test fixture");
+    assert_eq!(target.endpoint, "http://127.0.0.1:8080/v1/embeddings");
+    let approved =
+        SetupState::approve(&engine, options, target, &json!({"decision": "allow_once"}))
+            .await
+            .expect("valid test fixture");
+    assert_eq!(approved.authorized_remote.len(), 1);
+    assert!(approved.api_key.is_none());
+    assert!(
+        authorization::index_authorization(&approved)
+            .expect("preflight")
+            .is_none()
+    );
+    engine.close();
+}

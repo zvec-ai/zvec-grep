@@ -835,6 +835,7 @@ Supported text embedding models (one per workspace):
   local/qwen3-embedding-0.6b          local    text        1024    8192  llama-cpp
   qwen/qwen3-vl-embedding             remote   text        2560   32000  qwen
   qwen/qwen3.7-text-embedding         remote   text        1024  128000  qwen
+  qwen/qwen3.7-text-embedding-flash   remote   text        1024  128000  qwen
   qwen/text-embedding-v4              remote   text        1024    8192  qwen
 
 Local models are downloaded to the model cache on first use. Remote models

@@ -222,7 +222,7 @@ const NOMIC_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
-const CATALOG: [EmbeddingCatalogEntry; 15] = [
+const CATALOG: [EmbeddingCatalogEntry; 16] = [
     EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
         reference: "local/embeddinggemma-300m",
         provider: "local",
@@ -286,6 +286,18 @@ const CATALOG: [EmbeddingCatalogEntry; 15] = [
         reference: "qwen/qwen3.7-text-embedding",
         provider: "qwen",
         model: "qwen3.7-text-embedding",
+        dimension: 1_024,
+        metric: EmbeddingMetric::Cosine,
+        default_endpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
+        max_batch_size: 20,
+        max_input_tokens: 128_000,
+        max_image_bytes: None,
+    }),
+    EmbeddingCatalogEntry::Qwen(QwenConfig {
+        kind: "text",
+        reference: "qwen/qwen3.7-text-embedding-flash",
+        provider: "qwen",
+        model: "qwen3.7-text-embedding-flash",
         dimension: 1_024,
         metric: EmbeddingMetric::Cosine,
         default_endpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
@@ -614,6 +626,7 @@ mod tests {
                 "local/qwen3-embedding-0.6b",
                 "qwen/text-embedding-v4",
                 "qwen/qwen3.7-text-embedding",
+                "qwen/qwen3.7-text-embedding-flash",
                 "qwen/qwen3-vl-embedding",
                 "local/bge-small-en-v1.5",
                 "local/all-minilm-l6-v2",
@@ -642,5 +655,10 @@ mod tests {
             .expect("Transformers entry must exist");
         assert_eq!(minilm.backend(), "transformers");
         assert!(minilm.transformers_config().is_some());
+
+        let flash = get_embedding_model_catalog_entry("qwen/qwen3.7-text-embedding-flash")
+            .expect("Qwen3.7 flash embedding entry must exist");
+        assert_eq!(flash.backend(), "qwen");
+        assert_eq!(flash.dimension(), 1_024);
     }
 }

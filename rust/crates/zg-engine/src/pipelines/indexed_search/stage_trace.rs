@@ -157,6 +157,8 @@ impl StageTraceCollector {
         for (position, hit) in hits.iter().enumerate() {
             if let Some(stages) = self.stages(hit.file.id(), hit.entity.id()) {
                 stages.loaded_rrf_rank = Some(position + 1);
+                // Static ranking preserves these positions except where code hits are reordered.
+                stages.static_rank = Some(position + 1);
                 stages.loaded_range = Some(hit.entity.source_range().into());
             }
         }

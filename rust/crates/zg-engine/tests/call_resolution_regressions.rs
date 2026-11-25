@@ -1282,6 +1282,26 @@ async fn python_bare_parameter_does_not_read_the_class_member() {
     .await;
 }
 
+#[tokio::test]
+async fn review_type_namespace_item_must_not_steal_function_call() {
+    // `pub trait save` shares `save`'s spelling but not its namespace: a bare
+    // call names a value, so only the function may answer it.
+    check_case(Case {
+        name: "review_type_namespace_item_must_not_steal_function_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() {}\n    pub trait save {}\n    pub fn flush() { save(); }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
 // A member a body writes with a value the index cannot place no longer holds
 // what an earlier write stated, so the call through it stays undecided instead
 // of answering with the type the constructor's first line named.
@@ -1511,6 +1531,257 @@ async fn review435_rebound_self_stays_undecided() {
             operation: "callees",
             symbol: "Runner::run",
             expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn review_nested_block_item_must_not_leak_into_sibling_item() {
+    // The `save` inside the block ends with that block; the sibling `inner`
+    // written after it reaches the module's own `save`, not that one.
+    check_case(Case {
+        name: "review_nested_block_item_must_not_leak_into_sibling_item",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub fn outer() -> i32 {\n        { fn save() -> i32 { 2 } }\n        fn inner() -> i32 { save() }\n        inner()\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_named_field_struct_must_not_steal_value_call() {
+    // A struct with named fields declares no constructor value, so `struct
+    // save` beside `fn save` leaves the call to the function. A tuple struct
+    // or a unit struct does declare one, and those stay value candidates.
+    check_case(Case {
+        name: "followup_named_field_struct_must_not_steal_value_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub struct save { pub value: i32 }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_innermost_block_must_win_over_later_outer_item() {
+    // Both the inner block and `outer`'s body hold a `save` in view at the
+    // call site. The block that lies inside the other is the nearer one, so
+    // the call leaves `outer` to the inner definition even though `outer`'s
+    // own `save` is written later in the text.
+    check_case(Case {
+        name: "followup_innermost_block_must_win_over_later_outer_item",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 0 }\n    pub fn outer() -> i32 {\n        let result = {\n            fn save() -> i32 { 1 }\n            fn inner() -> i32 { save() }\n            inner()\n        };\n        fn save() -> i32 { 2 }\n        result\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::outer::save","startLine":5}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_block_end_position_is_exclusive() {
+    // Tree-sitter's `end_position` points one past the block's last byte, so
+    // a call written directly after the closing brace is outside that block
+    // and reaches the module's own `save`.
+    check_case(Case {
+        name: "followup_block_end_position_is_exclusive",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub fn outer() -> i32 {\n        {fn save() -> i32 {2}}save()\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::outer",
+            expected: json!([{"name":"m::outer","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_innermost_block_wins_regardless_of_declaration_order() {
+    // The same call with `outer`'s own `save` written before the inner block:
+    // the nearer block still answers it, so the innermost block decides the
+    // target and the two declarations keep their relative text order.
+    check_case(Case {
+        name: "followup_innermost_block_wins_regardless_of_declaration_order",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 0 }\n    pub fn outer() -> i32 {\n        fn save() -> i32 { 2 }\n        let result = {\n            fn save() -> i32 { 1 }\n            fn inner() -> i32 { save() }\n            inner()\n        };\n        result\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::outer::save","startLine":6}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn impl_block_does_not_take_a_bare_call_from_a_function() {
+    // `impl save` names the type it implements and is a scope, not a value, so
+    // the bare `save()` reaches the function declared beside it.
+    check_case(Case {
+        name: "impl_block_does_not_take_a_bare_call_from_a_function",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub struct save { pub value: i32 }\n    impl save {\n        pub fn value(&self) -> i32 { self.value }\n    }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn union_item_does_not_take_a_bare_call_from_a_function() {
+    // A union declares a type and no constructor, so its spelling lives in the
+    // type namespace and never answers a bare call.
+    check_case(Case {
+        name: "union_item_does_not_take_a_bare_call_from_a_function",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub union save { pub value: i32 }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn inner_module_does_not_reach_the_file_scope() {
+    // A module's items need `super::` from inside it, so the file-level `save`
+    // is not the target of the `save()` the module writes.
+    check_case(Case {
+        name: "inner_module_does_not_reach_the_file_scope",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn glob_import_keeps_the_file_scope_in_view() {
+    // `use super::*;` puts the file's own names in the module's view without
+    // spelling any of them, so the file-level `save` answers the call.
+    check_case(Case {
+        name: "glob_import_keeps_the_file_scope_in_view",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::*;\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn grouped_import_with_a_comment_still_binds_the_name() {
+    // The brace group is read by its tree shape, so a comment beside the
+    // clause cannot hide the spelling: `use super::{save /* … */};` still
+    // binds `save` in `m`, and the call written there reaches the import.
+    // Without the binding nothing in `m` spells the name, so the call would
+    // leave no edge at all.
+    check_case(Case {
+        name: "grouped_import_with_a_comment_still_binds_the_name",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::{save /* the outer one */};\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn grouped_import_keeps_the_module_entry_beside_a_name() {
+    // `use super::{self, save};` binds two spellings: `self` names the module
+    // the group is written on, and `save` keeps its own segment. Reading the
+    // group by shape tells them apart, so the call still reaches the file's
+    // `save` instead of a module spelled `self`.
+    check_case(Case {
+        name: "grouped_import_keeps_the_module_entry_beside_a_name",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::{self, save};\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn single_import_binds_the_name_in_the_module() {
+    // `use super::save;` binds the spelling in this module, so the call reaches
+    // whatever that import names: the file's own table stays out of it and the
+    // cross-file resolver reads the import.
+    check_case(Case {
+        name: "single_import_binds_the_name_in_the_module",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::save;\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
             ..Query::default()
         }],
     })

@@ -317,6 +317,24 @@ struct CodeEntity<'tree> {
     exported_as: Vec<String>,
 }
 
+/// Whether a Rust item spells a name the value namespace does not hold, so a
+/// bare call never reaches it.
+///
+/// `impl save` names the type it implements, which is a scope rather than a
+/// value, and a trait, type alias, enum, union and a named-field struct each
+/// declare a type without a constructible value. A tuple struct and a unit
+/// struct do declare a constructor, so they stay candidates: `struct save(i32)`
+/// beside `fn save` is a conflict rustc rejects.
+fn rust_type_namespace_only(node: Node<'_>) -> bool {
+    match node.kind() {
+        "impl_item" | "trait_item" | "type_item" | "enum_item" | "union_item" => true,
+        "struct_item" => node
+            .child_by_field_name("body")
+            .is_some_and(|body| body.kind() == "field_declaration_list"),
+        _ => false,
+    }
+}
+
 // A node's entities and their scans share one index sequence and one
 // boundary; splitting the entity branch from the scope descent keeps both in
 // one place for the walk and for the types a body declares.
@@ -348,6 +366,7 @@ fn walk_entity_node<'tree>(
         scope_entity_index = Some(entity_index);
         let name = adapter.extract_name(entity, source);
         let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
+        let symbol_type = adapter.classify(entity);
         // Declarations stay out of the in-file symbol table: an in-file call
         // must not bind to a bodyless prototype when a definition exists
         // anywhere in the workspace, and the resolver's name index applies that
@@ -355,6 +374,39 @@ fn walk_entity_node<'tree>(
         if !adapter.is_declaration(entity) {
             graph_context.register_symbol(name.as_deref(), entity_index);
             graph_context.register_scoped_symbol(name.as_deref(), entity_index);
+            // A module puts the items it declares in bare scope for every body
+            // inside it, and a function does the same for the bodies nested in
+            // it (`fn outer() { fn save() {} }` answers `inner`'s `save()`),
+            // unlike a class, whose members need a receiver. Other languages
+            // reach a namespace through the resolver's scope rules, where a
+            // type's members are searched before the namespace.
+            if format == FileFormat::Rust {
+                match symbol_type {
+                    Some(SymbolType::Module) => graph_context.register_module_scope(entity_index),
+                    Some(SymbolType::Function) => {
+                        graph_context.register_function_scope(entity_index);
+                    }
+                    // Only a value answers a bare call. Every other item that
+                    // spells a name in this position keeps it in the type
+                    // namespace; the helper lists them by AST shape.
+                    _ if rust_type_namespace_only(entity) => {
+                        graph_context.register_type_namespace_item(entity_index);
+                    }
+                    _ => {}
+                }
+                // The item's bare scope ends with the block that declares it:
+                // `{ fn save() {} } save()` written after that block reaches
+                // the enclosing spelling, not the one the closed block declared.
+                if let Some(block) = entity.parent() {
+                    let start = block.start_position();
+                    let end = block.end_position();
+                    graph_context.register_item_extent(
+                        entity_index,
+                        (start.row + 1, start.column),
+                        (end.row + 1, end.column),
+                    );
+                }
+            }
         }
         graph_context.add_contains_edge(
             entity_index,
@@ -386,7 +438,7 @@ fn walk_entity_node<'tree>(
             node: entity,
             language: adapter.language(),
             name,
-            symbol_type: adapter.classify(entity),
+            symbol_type,
             breadcrumb: entity_breadcrumb,
             signature: adapter.extract_signature(entity, source),
             documentation: adapter.extract_doc(entity, source),
@@ -3748,6 +3800,181 @@ public class Service {
         assert_eq!(
             (pending[3].owner_index, pending[3].ref_name.as_str()),
             (2, "helper")
+        );
+    }
+
+    #[test]
+    fn module_local_definition_shadows_the_file_scope_for_bare_calls() {
+        use crate::domain::GraphEdgeKind;
+
+        // A `mod storage` declaring its own `save` beside a top-level `save`:
+        // `storage::flush`'s bare `save()` reaches the module's definition, and
+        // the top-level one keeps only the callers that name it from file scope.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "/// Normalize a value before storing it.\n",
+                "pub fn normalize(value: i32) -> i32 { value.max(0) }\n",
+                "\n",
+                "pub fn save(value: i32) -> i32 { normalize(value) }\n",
+                "\n",
+                "pub fn import_record(value: i32) -> i32 { save(value) }\n",
+                "\n",
+                "pub fn export_record(value: i32) -> i32 { save(value) }\n",
+                "\n",
+                "pub mod storage {\n",
+                "    pub fn save(value: i32) -> i32 { super::normalize(value) }\n",
+                "\n",
+                "    pub fn flush(value: i32) -> i32 { save(value) }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: normalize 0, save 1, import_record 2, export_record 3,
+        // storage 4, storage::save 5, storage::flush 6.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(1, 0), (2, 1), (3, 1), (6, 5)],
+            "`flush` reaches the module's own `save`, not the file-level namesake"
+        );
+    }
+
+    #[test]
+    fn nested_function_items_answer_the_bare_calls_of_their_bodies() {
+        use crate::domain::GraphEdgeKind;
+
+        // A function's items are in bare scope for the bodies nested in it:
+        // `inner`'s `save()` reaches `outer::save`. The module around them
+        // declares a `save` of its own, and the nearer function item wins
+        // before the walk accepts that module's answer.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value * 2 }\n",
+                "\n",
+                "    pub fn outer(value: i32) -> i32 {\n",
+                "        fn save(value: i32) -> i32 { value + 1 }\n",
+                "\n",
+                "        fn inner() -> i32 { save(1) }\n",
+                "\n",
+                "        inner() + save(value)\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: save 0, m 1, m::save 2, m::outer 3, outer::save 4,
+        // outer::inner 5.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(3, 5), (3, 4), (5, 4)],
+            "`inner` reaches the item its enclosing function declares"
+        );
+    }
+
+    #[test]
+    fn a_module_beside_a_function_of_the_same_name_keeps_the_call_on_the_function() {
+        use crate::domain::GraphEdgeKind;
+
+        // Rust keeps the type and value namespaces apart, so `mod save` may sit
+        // beside `fn save`. A bare `save()` is a call, and only the function
+        // answers it whatever order the two are declared in.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value * 2 }\n",
+                "\n",
+                "    pub mod save {}\n",
+                "\n",
+                "    pub fn flush() -> i32 { save(1) }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: save 0, m 1, m::save 2, m::save (module) 3, m::flush 4.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(4, 2)],
+            "`flush` calls the module's function, not the same-named module"
+        );
+    }
+
+    #[test]
+    fn a_local_use_declaration_keeps_its_call_pending() {
+        use crate::domain::GraphEdgeKind;
+
+        // `use crate::other::save;` inside `flush` binds the spelling nearer
+        // than the module's own `save`: which function the import names is the
+        // resolver's question, so the call must not bind the module's namesake.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "    pub fn flush(value: i32) -> i32 {\n",
+                "        use crate::other::save;\n",
+                "\n",
+                "        save(value)\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: m 0, m::save 1, m::flush 2.
+        assert!(
+            graph
+                .resolved
+                .iter()
+                .all(|edge| edge.ref_kind != GraphEdgeKind::Calls),
+            "the imported name must not bind the module's own `save`"
+        );
+        let pending: Vec<(usize, &str)> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.owner_index, edge.ref_name.as_str()))
+            .collect();
+        assert_eq!(
+            pending,
+            vec![(2, "save")],
+            "the call waits for the resolver's reading of the import"
         );
     }
 
