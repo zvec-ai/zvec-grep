@@ -56,7 +56,7 @@ zg --index /path/to/russian-docs --fts-tokenizer standard \
   --fts-filter lowercase,stemmer --fts-extra-params '{"stemmer_lang":"russian"}'
 ```
 
-Global FTS defaults are stored separately in `~/.zvec-grep/fts-defaults.json`:
+Global FTS defaults are stored separately in `~/.zvec-grep/fts.json`:
 
 ```json
 {

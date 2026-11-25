@@ -705,7 +705,7 @@ At least one FTS option is required. Supplied lists and parameter objects replac
 the previous value; omitted fields are preserved. FTS defaults apply only to new
 workspace indexes. Existing indexes retain their analysis, including during an
 ordinary rebuild. Use zg --index --rebuild with FTS options to change it.
-These defaults are saved in ~/.zvec-grep/fts-defaults.json (tokenizer, filters, extraParams).
+These defaults are saved in ~/.zvec-grep/fts.json (tokenizer, filters, extraParams).
 The initial defaults are standard + lowercase. Updating only filters or extra
 parameters preserves the configured tokenizer.
 

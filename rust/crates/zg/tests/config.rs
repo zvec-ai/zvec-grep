@@ -110,7 +110,7 @@ fn fts_language_configuration_lists_sources_and_saves_only_expanded_values() {
     fixture.write_config(&original);
     let shared_path = fixture.user.path().join(".zvec-grep/config.json");
     let shared_bytes = fs::read(&shared_path).expect("shared config");
-    let path = fixture.user.path().join(".zvec-grep/fts-defaults.json");
+    let path = fixture.user.path().join(".zvec-grep/fts.json");
     let defaults = || -> serde_json::Value {
         serde_json::from_slice(&fs::read(&path).expect("config")).expect("JSON")
     };
@@ -212,7 +212,7 @@ fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
         fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
         fixture.write_languages(&json!({"ru-docs": whitespace}));
         let global: serde_json::Value = serde_json::from_slice(
-            &fs::read(fixture.user.path().join(".zvec-grep/fts-defaults.json")).expect("defaults"),
+            &fs::read(fixture.user.path().join(".zvec-grep/fts.json")).expect("defaults"),
         )
         .expect("JSON");
         assert_eq!(
@@ -235,7 +235,7 @@ fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
         assert_eq!(analysis(), whitespace);
         fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
         let global: serde_json::Value = serde_json::from_slice(
-            &fs::read(fixture.user.path().join(".zvec-grep/fts-defaults.json")).expect("defaults"),
+            &fs::read(fixture.user.path().join(".zvec-grep/fts.json")).expect("defaults"),
         )
         .expect("JSON");
         assert_eq!(global, whitespace);
@@ -385,7 +385,7 @@ fn fts_global_configuration_replaces_lists_and_parameter_objects() {
         "--fts-extra-params",
         r#"{"stemmer_lang":"russian","max_token_length":100}"#,
     ]);
-    let path = fixture.user.path().join(".zvec-grep/fts-defaults.json");
+    let path = fixture.user.path().join(".zvec-grep/fts.json");
     let read = || -> serde_json::Value {
         serde_json::from_slice(&fs::read(&path).expect("config")).expect("JSON")
     };

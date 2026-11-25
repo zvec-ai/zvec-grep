@@ -34,7 +34,7 @@ pub(crate) fn read() -> Result<Value, EngineError> {
 /// # Errors
 /// Returns configuration I/O or validation errors.
 pub fn fts_defaults() -> Result<FtsConfig, EngineError> {
-    read_fts_at(&global_config_path()?.with_file_name("fts-defaults.json"))
+    read_fts_at(&global_config_path()?.with_file_name("fts.json"))
 }
 
 fn read_fts_at(path: &Path) -> Result<FtsConfig, EngineError> {
@@ -68,7 +68,7 @@ pub fn set_fts(update: &FtsConfigUpdate) -> Result<PathBuf, EngineError> {
             "at least one FTS option is required",
         ));
     }
-    let path = global_config_path()?.with_file_name("fts-defaults.json");
+    let path = global_config_path()?.with_file_name("fts.json");
     update_config_file(&path, || {
         let config = update.apply(&read_fts_at(&path)?)?;
         crate::storage::validate_fts(&config)?;
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn fts_defaults_file_inherits_omitted_fields_and_preserves_empty_filters() {
         let home = tempfile::tempdir().expect("home");
-        let file = home.path().join("fts-defaults.json");
+        let file = home.path().join("fts.json");
         assert_eq!(
             read_fts_at(&file).expect("missing defaults"),
             FtsConfig::default()
