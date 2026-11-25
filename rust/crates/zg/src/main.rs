@@ -816,7 +816,7 @@ async fn query_index_setup(
         signal: request.signal.clone(),
         ..Default::default()
     };
-    // Analyze in the calling process; the v2 daemon request stays catalog-only.
+    // Analyze in the calling process; the daemon request stays catalog-only.
     let local_setup = engine.index_setup(options.clone()).await?;
     let Some(home) = server_home else {
         return Ok(local_setup);

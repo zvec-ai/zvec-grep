@@ -106,13 +106,16 @@ fn fts_language_configuration_lists_sources_and_saves_only_expanded_values() {
             .any(|line| line.starts_with("ru-docs  ") && line.contains("512")),
         "{listing}"
     );
-    let path = fixture.user.path().join(".zvec-grep/config.json");
+    let original = json!({"version": 1, "client": {"mode": "direct"}});
+    fixture.write_config(&original);
+    let shared_path = fixture.user.path().join(".zvec-grep/config.json");
+    let shared_bytes = fs::read(&shared_path).expect("shared config");
+    let path = fixture.user.path().join(".zvec-grep/fts-defaults.json");
     let defaults = || -> serde_json::Value {
-        let value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("config")).expect("JSON");
-        value["defaults"]["fts"].clone()
+        serde_json::from_slice(&fs::read(&path).expect("config")).expect("JSON")
     };
     fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
+    assert_eq!(fs::read(shared_path).expect("shared config"), shared_bytes);
     assert_eq!(defaults(), custom);
     fixture.success(&["--config", "fts", "set", "--fts-lang", "zh"]);
     assert_eq!(
@@ -209,11 +212,11 @@ fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
         fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
         fixture.write_languages(&json!({"ru-docs": whitespace}));
         let global: serde_json::Value = serde_json::from_slice(
-            &fs::read(fixture.user.path().join(".zvec-grep/config.json")).expect("defaults"),
+            &fs::read(fixture.user.path().join(".zvec-grep/fts-defaults.json")).expect("defaults"),
         )
         .expect("JSON");
         assert_eq!(
-            global["defaults"]["fts"], russian,
+            global, russian,
             "mapping edits do not rewrite global snapshots"
         );
         fixture.success(&["--index", "--mode", mode]);
@@ -232,10 +235,10 @@ fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
         assert_eq!(analysis(), whitespace);
         fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
         let global: serde_json::Value = serde_json::from_slice(
-            &fs::read(fixture.user.path().join(".zvec-grep/config.json")).expect("defaults"),
+            &fs::read(fixture.user.path().join(".zvec-grep/fts-defaults.json")).expect("defaults"),
         )
         .expect("JSON");
-        assert_eq!(global["defaults"]["fts"], whitespace);
+        assert_eq!(global, whitespace);
         fs::write(
             fixture.user.path().join(".zvec-grep/fts-languages.json"),
             "invalid JSON",
@@ -382,7 +385,7 @@ fn fts_global_configuration_replaces_lists_and_parameter_objects() {
         "--fts-extra-params",
         r#"{"stemmer_lang":"russian","max_token_length":100}"#,
     ]);
-    let path = fixture.user.path().join(".zvec-grep/config.json");
+    let path = fixture.user.path().join(".zvec-grep/fts-defaults.json");
     let read = || -> serde_json::Value {
         serde_json::from_slice(&fs::read(&path).expect("config")).expect("JSON")
     };
@@ -394,7 +397,7 @@ fn fts_global_configuration_replaces_lists_and_parameter_objects() {
         r#"{"stemmer_lang":"en","extension":{"values":[1,2]}}"#,
     ]);
     assert_eq!(
-        read()["defaults"]["fts"]["extraParams"],
+        read()["extraParams"],
         json!({"stemmer_lang": "en", "extension": {"values": [1, 2]}})
     );
     fixture.success(&[
@@ -407,7 +410,7 @@ fn fts_global_configuration_replaces_lists_and_parameter_objects() {
         "{}",
     ]);
     let expected = json!({"tokenizer": "standard", "filters": [], "extraParams": {}});
-    assert_eq!(read()["defaults"]["fts"], expected);
+    assert_eq!(read(), expected);
     for args in [
         vec!["--config", "fts", "set"],
         vec!["--config", "fts", "set", "--fts-filter", "unknown"],
@@ -422,7 +425,7 @@ fn fts_global_configuration_replaces_lists_and_parameter_objects() {
     ] {
         assert!(!fixture.run(&args).status.success(), "{args:?}");
         assert_eq!(
-            read()["defaults"]["fts"],
+            read(),
             expected,
             "invalid update must not overwrite defaults"
         );

@@ -30,7 +30,7 @@ const STARTUP_FILE: &str = "startup.lock";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
-const DAEMON_PROTOCOL_VERSION: u32 = 2;
+const DAEMON_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StopMode {
@@ -591,7 +591,7 @@ fn retryable_replace_error(error: &std::io::Error) -> bool {
 }
 
 /// Starts the configured daemon process or returns the existing ready process.
-/// A legacy daemon without a protocol version is stopped before replacement.
+/// Daemons with a known older protocol (or no version) are stopped before replacement.
 ///
 /// # Errors
 ///
@@ -644,7 +644,7 @@ async fn start_server_with_lock(
 ) -> Result<DaemonStatus, DaemonError> {
     let token = crate::resolve_token(config.token_file.as_deref())?;
     if let Some(record) = read_running_instance(&config.home).await?
-        && matches!(record.daemon_protocol_version, None | Some(1))
+        && matches!(record.daemon_protocol_version, None | Some(1 | 2))
     {
         // A different target can be checked while the legacy service is still
         // available. Its own listening address must be released before binding.
@@ -798,7 +798,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
     };
     match record.daemon_protocol_version {
         Some(DAEMON_PROTOCOL_VERSION) => {}
-        None | Some(1) => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
+        None | Some(1 | 2) => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
         Some(actual) => {
             return Err(DaemonError::ProtocolMismatch {
                 pid: record.pid,

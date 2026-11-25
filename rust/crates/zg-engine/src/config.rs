@@ -34,19 +34,29 @@ pub(crate) fn read() -> Result<Value, EngineError> {
 /// # Errors
 /// Returns configuration I/O or validation errors.
 pub fn fts_defaults() -> Result<FtsConfig, EngineError> {
-    Ok(configured_fts(read()?.pointer("/defaults/fts"))?.unwrap_or_default())
+    read_fts_at(&global_config_path()?.with_file_name("fts-defaults.json"))
 }
 
-fn configured_fts(value: Option<&Value>) -> Result<Option<FtsConfig>, EngineError> {
-    let Some(value) = value else {
-        return Ok(None);
+fn read_fts_at(path: &Path) -> Result<FtsConfig, EngineError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FtsConfig::default());
+        }
+        Err(error) => {
+            return Err(EngineError::from_io(
+                format!("read '{}'", path.display()),
+                &error,
+            ));
+        }
     };
-    let update: FtsConfigUpdate = serde_json::from_value(value.clone())
-        .map_err(|error| EngineError::invalid_argument(format!("invalid defaults.fts: {error}")))?;
-    if update.is_empty() {
-        return Ok(None);
-    }
-    update.apply(&FtsConfig::default()).map(Some)
+    let update: FtsConfigUpdate = serde_json::from_slice(&bytes).map_err(|error| {
+        EngineError::invalid_argument(format!(
+            "invalid FTS defaults in '{}': {error}",
+            path.display()
+        ))
+    })?;
+    update.apply(&FtsConfig::default())
 }
 
 /// Updates defaults for new indexes, retaining fields omitted by the caller.
@@ -58,8 +68,12 @@ pub fn set_fts(update: &FtsConfigUpdate) -> Result<PathBuf, EngineError> {
             "at least one FTS option is required",
         ));
     }
-    let path = global_config_path()?;
-    update_at(&path, json!({"defaults": {"fts": update}}))?;
+    let path = global_config_path()?.with_file_name("fts-defaults.json");
+    update_config_file(&path, || {
+        let config = update.apply(&read_fts_at(&path)?)?;
+        crate::storage::validate_fts(&config)?;
+        Ok(config)
+    })?;
     Ok(path)
 }
 
@@ -178,19 +192,12 @@ fn parse_global_config(value: &Value) -> Result<Value, EngineError> {
 }
 
 fn parse_defaults(fields: &Map<String, Value>) -> Result<Option<Value>, EngineError> {
-    check_known_fields(fields, &["embedding", "modelCacheDir", "fts"], "defaults")?;
+    check_known_fields(fields, &["embedding", "modelCacheDir"], "defaults")?;
     let mut parsed = Map::new();
     for name in ["embedding", "modelCacheDir"] {
         if let Some(value) = non_empty_string(fields, name, &format!("defaults.{name}"))? {
             parsed.insert(name.to_owned(), json!(value));
         }
-    }
-    if let Some(config) = configured_fts(fields.get("fts"))? {
-        parsed.insert(
-            "fts".to_owned(),
-            serde_json::to_value(config)
-                .map_err(|error| EngineError::internal(error.to_string()))?,
-        );
     }
     Ok(non_empty_object(parsed))
 }
@@ -517,6 +524,17 @@ fn update(changes: Value) -> Result<PathBuf, EngineError> {
 }
 
 fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
+    update_config_file(path, || {
+        let mut value = read_at(path)?;
+        merge(&mut value, changes);
+        parse_global_config(&value)
+    })
+}
+
+fn update_config_file<T: serde::Serialize>(
+    path: &Path,
+    update: impl FnOnce() -> Result<T, EngineError>,
+) -> Result<(), EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| EngineError::invalid_argument("Invalid config path"))?;
@@ -548,22 +566,8 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
         crate::workspace::lock::LockMode::Exclusive,
         "global-config.update",
     )?;
-    let mut value = read_at(path)?;
-    // Analysis parameter objects replace the previous object, including {}.
-    // Other global configuration objects retain their existing merge semantics.
-    if changes.pointer("/defaults/fts/extraParams").is_some()
-        && let Some(fts) = value
-            .pointer_mut("/defaults/fts")
-            .and_then(Value::as_object_mut)
-    {
-        fts.remove("extraParams");
-    }
-    let sets_fts = changes.pointer("/defaults/fts").is_some();
-    merge(&mut value, changes);
-    let value = parse_global_config(&value)?;
-    if sets_fts && let Some(config) = configured_fts(value.pointer("/defaults/fts"))? {
-        crate::storage::validate_fts(&config)?;
-    }
+    // Each file is read, updated, and atomically replaced under the configuration lock.
+    let value = update()?;
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| EngineError::internal(error.to_string()))?;
     atomic_write(path, &bytes)?;
@@ -592,20 +596,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fts_global_settings_distinguish_omitted_and_explicit_empty_fields() {
-        let parse = |fts| {
-            parse_global_config(&json!({"version": 1, "defaults": {"fts": fts}}))
-                .expect("valid config")
-        };
-        assert!(parse(json!({})).pointer("/defaults/fts").is_none());
+    fn fts_defaults_file_inherits_omitted_fields_and_preserves_empty_filters() {
+        let home = tempfile::tempdir().expect("home");
+        let file = home.path().join("fts-defaults.json");
         assert_eq!(
-            parse(json!({"filters": []}))["defaults"]["fts"],
-            json!({"tokenizer": "standard", "filters": [], "extraParams": {}})
+            read_fts_at(&file).expect("missing defaults"),
+            FtsConfig::default()
         );
-        assert_eq!(
-            parse(json!({"extraParams": {}}))["defaults"]["fts"],
-            json!({"tokenizer": "standard", "filters": ["lowercase"], "extraParams": {}})
-        );
+        fs::write(&file, r#"{"filters":[]}"#).expect("write defaults");
+        let fts = read_fts_at(&file).expect("partial defaults");
+        assert_eq!(fts.tokenizer, "standard");
+        assert!(fts.filters.is_empty());
     }
 
     #[test]

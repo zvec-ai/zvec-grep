@@ -10,6 +10,8 @@ Compare FTS, Vector and Hybrid search on four frozen suites. Each request uses t
 | [Manual single-version run](../../.github/workflows/retrieval-only.yml) | **Retrieval-only → Run workflow**. The workflow ref selects the harness; `candidate_ref` selects the Rust candidate and defaults to `main`. Enable `gold_stages` for traces. |
 | [Manual paired comparison](../../.github/workflows/retrieval-pr.yml) | **Retrieval-only PR → Run workflow**. Supply full `baseline_sha` / `candidate_sha` and `baseline_repository` / `candidate_repository` (`owner/name`). This does not post a PR comment. |
 
+All four suites build their indexes with `--fts-lang zh` (Jieba with lowercase). For older candidates whose index help predates language presets, the harness uses their built-in Jieba default. The index evidence records the FTS arguments used for each candidate.
+
 All runs include all three modes. Paired runs use the same harness and configured local models, build separate fresh indexes, and enable stage capture on both versions. They do not run answering-agent E2E tests or receive remote model credentials.
 
 Manual and comment runs require maintain/admin access for both the original actor and the re-run actor. See [benchmark setup](../README.md) for repository configuration. The [PR result publisher](../../.github/workflows/retrieval-pr-comment.yml) must be merged into the default branch before it can update comments; it ignores cancelled or outdated runs.

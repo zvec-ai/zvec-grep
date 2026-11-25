@@ -56,18 +56,13 @@ zg --index /path/to/russian-docs --fts-tokenizer standard \
   --fts-filter lowercase,stemmer --fts-extra-params '{"stemmer_lang":"russian"}'
 ```
 
-Global defaults are stored under `defaults.fts` in `~/.zvec-grep/config.json`:
+Global FTS defaults are stored separately in `~/.zvec-grep/fts-defaults.json`:
 
 ```json
 {
-  "version": 1,
-  "defaults": {
-    "fts": {
-      "tokenizer": "standard",
-      "filters": ["lowercase", "stemmer"],
-      "extraParams": {"stemmer_lang": "russian"}
-    }
-  }
+  "tokenizer": "standard",
+  "filters": ["lowercase", "stemmer"],
+  "extraParams": {"stemmer_lang": "russian"}
 }
 ```
 
@@ -534,14 +529,16 @@ It rotates at 10 MiB and keeps five numbered backups by default. The global
 are written to `<home>/daemon/bootstrap.log`.
 
 The instance record at `<home>/daemon/instance.lock` carries
-`daemonProtocolVersion: 2`. Existing v2 requests remain compatible. Setup replies
+`daemonProtocolVersion: 3`. Version 3 adds FTS index options and uses
+`standard + lowercase` by default when creating a workspace. Version 2 daemons
+use the previous default and cannot apply these options. Setup replies
 advertise `supports_embedding_defaults`; clients check it before sending the optional
 `embedding_default` indexing/authorization field. A daemon without this capability
 receives only the original read-only setup request, and the client asks for a restart
 before submitting indexing. Explicit model requests and requests without a caller
 default retain their original shape. Update the daemon to enable the new policy for
 MCP and caller defaults. Status checks and daemon-backed
-CLI requests reject live legacy daemons without this field or with version 1,
+CLI requests reject live legacy daemons without this field or with version 1 or 2,
 including Node.js daemons; `auto` mode
 does not silently fall back to direct execution. Run `zg --server on` with the
 same home and any required token file to stop the legacy daemon and start Rust.
@@ -837,7 +834,7 @@ The required field changes the internal daemon reply contract. Native ripgrep
 type filters apply to queries; persisted scan rules support path globs and file
 formats using the same filename rules as indexed queries. The daemon wire
 distinguishes complete ordered glob replacement from case-category updates.
-The instance record uses `daemonProtocolVersion: 2`; see the daemon migration
+The instance record uses `daemonProtocolVersion: 3`; see the daemon migration
 notes above when replacing older resident processes. Replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.

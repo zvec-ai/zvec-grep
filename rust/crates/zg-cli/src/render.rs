@@ -705,7 +705,7 @@ At least one FTS option is required. Supplied lists and parameter objects replac
 the previous value; omitted fields are preserved. FTS defaults apply only to new
 workspace indexes. Existing indexes retain their analysis, including during an
 ordinary rebuild. Use zg --index --rebuild with FTS options to change it.
-These defaults are saved under defaults.fts (tokenizer, filters, extraParams).
+These defaults are saved in ~/.zvec-grep/fts-defaults.json (tokenizer, filters, extraParams).
 The initial defaults are standard + lowercase. Updating only filters or extra
 parameters preserves the configured tokenizer.
 
@@ -716,7 +716,7 @@ standard + lowercase and a language-specific stemmer.
 zg --config fts langs lists effective settings and sources. Mapping edits take
 effect on the next explicit --fts-lang selection; saved defaults stay unchanged.
 
-Global configuration is stored in ~/.zvec-grep/config.json.";
+Other global settings are stored in ~/.zvec-grep/config.json.";
 
 const AUTH_HELP: &str = r"Usage:
   zg --auth grant [root] --capability embedding --scope workspace [--embedding <model>]
