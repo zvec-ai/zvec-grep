@@ -110,7 +110,7 @@ impl<'de> Deserialize<'de> for EmbeddingModelInfo {
 }
 
 /// Distance or similarity measure for embedding vectors.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum EmbeddingMetric {
     Cosine,

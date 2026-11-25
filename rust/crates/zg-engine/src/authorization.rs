@@ -94,26 +94,31 @@ fn authorization_for_manifest(
         return Ok(None);
     };
     let model = selection.model;
+    let saved = existing
+        .and_then(|m| m.index().descriptor())
+        .and_then(|index| index.embedding_configs().get(&model));
+    let explicit_endpoint = options.endpoint.as_deref().or_else(|| {
+        options
+            .embedding
+            .as_ref()
+            .and_then(|embedding| embedding.endpoint.as_deref())
+    });
+    let http = crate::config::resolve_http_model(
+        &crate::config::read()?,
+        &model,
+        saved,
+        explicit_endpoint,
+        options.rebuild,
+    )?;
     if options.allow_remote || model.starts_with("local/") {
         return Ok(None);
     }
     let endpoint = remote_endpoint(
         &model,
-        options
-            .endpoint
-            .as_deref()
-            .or_else(|| {
-                options
-                    .embedding
-                    .as_ref()
-                    .and_then(|e| e.endpoint.as_deref())
-            })
-            .or_else(|| {
-                existing
-                    .and_then(|m| m.index().descriptor())
-                    .and_then(|index| index.embedding_configs().get(&model))
-                    .and_then(|runtime| runtime.endpoint.as_deref())
-            }),
+        http.as_ref()
+            .and_then(|config| config.endpoint.as_deref())
+            .or(explicit_endpoint)
+            .or_else(|| saved.and_then(|runtime| runtime.endpoint.as_deref())),
     )?;
     let root = fs::canonicalize(workspace_root).map_err(io)?;
     if approved_destination(&root, &model, &endpoint, &options.authorized_remote)
@@ -301,22 +306,54 @@ fn root_path(root: &Path) -> Result<PathBuf, EngineError> {
     }
 }
 
+fn remote_model_is_text(reference: &str) -> Result<bool, EngineError> {
+    let http = reference.strip_prefix("http/").is_some_and(|alias| {
+        !alias.is_empty()
+            && alias
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    });
+    if http {
+        Ok(true)
+    } else if let Some(EmbeddingCatalogEntry::Qwen(entry)) =
+        get_embedding_model_catalog_entry(reference)
+    {
+        Ok(entry.kind == "text")
+    } else {
+        Err(EngineError::invalid_argument(
+            "Authorization requires a supported remote embedding model",
+        ))
+    }
+}
+
 pub(crate) fn remote_endpoint(
     reference: &str,
     endpoint: Option<&str>,
 ) -> Result<String, EngineError> {
-    let Some(EmbeddingCatalogEntry::Qwen(entry)) = get_embedding_model_catalog_entry(reference)
-    else {
-        return Err(EngineError::invalid_argument(
-            "Authorization requires a supported remote embedding model",
-        ));
+    remote_model_is_text(reference)?;
+    // An already-resolved saved destination must not depend on global config.
+    let endpoint = if let Some(endpoint) = endpoint {
+        endpoint.to_owned()
+    } else {
+        let config = crate::config::read()?;
+        crate::config::string(&config, &["models", reference, "endpoint"])
+            .or_else(|| env::var("ZVEC_GREP_ENDPOINT").ok())
+            .or_else(|| match get_embedding_model_catalog_entry(reference) {
+                Some(EmbeddingCatalogEntry::Qwen(entry)) => Some(entry.default_endpoint.to_owned()),
+                _ => None,
+            })
+            .ok_or_else(|| EngineError::invalid_argument("Remote embedding endpoint is missing"))?
     };
-    let config = crate::config::read()?;
-    let endpoint = endpoint
-        .map(str::to_owned)
-        .or_else(|| crate::config::string(&config, &["models", reference, "endpoint"]))
-        .or_else(|| env::var("ZVEC_GREP_ENDPOINT").ok())
-        .unwrap_or_else(|| entry.default_endpoint.to_string());
+    canonical_remote_endpoint(reference, &endpoint)
+}
+
+/// Canonicalization shared by config validation, consent and backend requests.
+pub(crate) fn canonical_remote_endpoint(
+    reference: &str,
+    endpoint: &str,
+) -> Result<String, EngineError> {
+    let text = remote_model_is_text(reference)?;
+    let http = reference.starts_with("http/");
     let mut url = reqwest::Url::parse(endpoint.trim())
         .map_err(|_| EngineError::invalid_argument("Invalid remote embedding endpoint"))?;
     if !matches!(url.scheme(), "http" | "https")
@@ -324,6 +361,7 @@ pub(crate) fn remote_endpoint(
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
+        || (http && url.query().is_some())
     {
         return Err(EngineError::invalid_argument(
             "Embedding endpoint must be an HTTP(S) URL without credentials or fragment",
@@ -332,7 +370,7 @@ pub(crate) fn remote_endpoint(
     // SDK examples provide an API base URL. Resolve it before consent is
     // checked so the approved destination and the actual request URL agree.
     let path = url.path().trim_end_matches('/');
-    if entry.kind == "text" && path.ends_with("/v1") {
+    if text && path.ends_with("/v1") {
         url.set_path(&format!("{path}/embeddings"));
     }
     Ok(url.to_string())
@@ -792,6 +830,12 @@ mod tests {
         ) else {
             return;
         };
+        assert!(
+            remote_endpoint("local/potion-code-16m-v2", None)
+                .expect_err("local model cannot authorize remote access")
+                .to_string()
+                .contains("supported remote embedding model")
+        );
         for model in ["qwen/text-embedding-v4", "qwen/qwen3.7-text-embedding"] {
             for (input, expected) in [
                 ("/v1", "/v1/embeddings"),

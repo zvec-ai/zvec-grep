@@ -1,4 +1,4 @@
-//! Deterministic rule ranking over the complete recalled entity pool.
+//! Rerank recalled code within the positions assigned to code by fusion.
 mod paths;
 mod query;
 mod support;
@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     api::context::{options::QueryFilter, result::SearchRankingTrace},
-    domain::{EntityMetadata, FileId},
+    domain::{ContentKind, EntityMetadata, FileId},
 };
 use paths::Roles;
 use query::QueryFeatures;
@@ -85,7 +85,7 @@ pub(super) fn rank(
 }
 
 fn rank_with_policy(
-    hits: Vec<SearchHit>,
+    mut hits: Vec<SearchHit>,
     routes: &[ResolvedSearchRoute],
     filter: &QueryFilter,
     maximum_rrf: f64,
@@ -93,9 +93,61 @@ fn rank_with_policy(
     policy: Policy,
     observation: Option<&mut StageTraceCollector>,
 ) -> Vec<SearchHit> {
-    if hits.is_empty() || limit == 0 {
-        return Vec::new();
+    let result_count = limit.min(hits.len());
+    let is_code = |hit: &SearchHit| hit.entity.content().kind() == ContentKind::Code;
+    // Stage diagnostics also report static ranks below the result cutoff.
+    let slot_count = if observation.is_some() {
+        hits.len()
+    } else {
+        result_count
+    };
+    let code_ranks: Vec<_> = hits
+        .iter()
+        .take(slot_count)
+        .enumerate()
+        .filter_map(|(index, hit)| is_code(hit).then_some(index + 1))
+        .collect();
+
+    // Only the visible positions are fixed. Any recalled code hit can fill them.
+    let mut ranked_code = Vec::new();
+    let visible = code_ranks.partition_point(|rank| *rank <= result_count);
+    if visible > 0 {
+        let code = hits.extract_if(.., |hit| is_code(hit)).collect();
+        let (query, scored) = score_code(code, routes, filter, maximum_rrf, policy);
+        if let Some(observation) = observation {
+            let mut order = scored.iter().collect::<Vec<_>>();
+            order.sort_by(|a, b| compare(a, b, a.static_score, b.static_score));
+            for (item, &rank) in order.into_iter().zip(&code_ranks) {
+                observation.static_rank(&item.hit, rank);
+            }
+        }
+        ranked_code = select(scored, &query, &code_ranks[..visible], policy);
     }
+    let mut ranked_code = ranked_code.into_iter().peekable();
+    let mut documents = hits.into_iter();
+    (1..=result_count)
+        .map(|rank| {
+            let mut hit = ranked_code
+                .next_if(|hit| hit.rank == rank)
+                .or_else(|| documents.next())
+                .expect("each result position has a loaded hit");
+            hit.rank = rank;
+            if let Some(trace) = &mut hit.trace {
+                trace.final_selection.returned_by_limit = true;
+                trace.final_selection.cutoff_rank = limit;
+            }
+            hit
+        })
+        .collect()
+}
+
+fn score_code(
+    hits: Vec<SearchHit>,
+    routes: &[ResolvedSearchRoute],
+    filter: &QueryFilter,
+    maximum_rrf: f64,
+    policy: Policy,
+) -> (QueryFeatures, Vec<Scored>) {
     let mut queries = routes.iter().map(|r| r.query.as_str()).collect::<Vec<_>>();
     queries.sort_unstable();
     queries.dedup();
@@ -143,14 +195,7 @@ fn rank_with_policy(
     if policy.support_weight > 0.0 {
         support::apply(&mut scored, policy.support_weight);
     }
-    if let Some(observation) = observation {
-        let mut order = scored.iter().collect::<Vec<_>>();
-        order.sort_by(|a, b| compare(a, b, a.static_score, b.static_score));
-        for (index, item) in order.into_iter().enumerate() {
-            observation.static_rank(&item.hit, index + 1);
-        }
-    }
-    select(scored, &query, limit, policy)
+    (query, scored)
 }
 
 fn compare(a: &Scored, b: &Scored, a_score: f64, b_score: f64) -> Ordering {
@@ -163,15 +208,15 @@ fn compare(a: &Scored, b: &Scored, a_score: f64, b_score: f64) -> Ordering {
 fn select(
     mut scored: Vec<Scored>,
     query: &QueryFeatures,
-    limit: usize,
+    code_ranks: &[usize],
     policy: Policy,
 ) -> Vec<SearchHit> {
     let single_file = scored
         .iter()
         .all(|s| s.hit.file.id() == scored[0].hit.file.id());
     let mut selected_per_file = HashMap::<FileId, u32>::new();
-    let mut output = Vec::with_capacity(limit.min(scored.len()));
-    while output.len() < limit && !scored.is_empty() {
+    let mut output = Vec::with_capacity(code_ranks.len());
+    for &rank in code_ranks {
         let effective = |item: &Scored| {
             let count = if single_file {
                 0
@@ -196,7 +241,7 @@ fn select(
             1.0 / (1.0 + FILE_DECAY * f64::from(*count))
         };
         item.hit.score = item.static_score * factor;
-        item.hit.rank = output.len() + 1;
+        item.hit.rank = rank;
         if let Some(trace) = item.hit.trace.as_mut() {
             trace.ranking = Some(SearchRankingTrace {
                 policy: policy.name.to_owned(),
@@ -217,8 +262,6 @@ fn select(
                 score: item.hit.score,
                 rank: item.hit.rank,
             });
-            trace.final_selection.returned_by_limit = true;
-            trace.final_selection.cutoff_rank = limit;
         }
         *count = count.saturating_add(1);
         output.push(item.hit);

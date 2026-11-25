@@ -490,6 +490,7 @@ pub mod result {
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextItem {
         pub kind: ContextItemKind,
+        /// One-based position in the final result order.
         pub rank: usize,
         pub absolute_path: PathBuf,
         pub relative_path: PathBuf,
@@ -508,6 +509,8 @@ pub mod result {
         pub outline: Option<String>,
         pub content_role: Option<ContextContentRole>,
         pub status: ContextItemStatus,
+        /// Indexed code hits carry their rule-ranking score. Other indexed hits carry their
+        /// raw reciprocal rank fusion (RRF) score. Use `rank` to order mixed results.
         pub score: Option<f64>,
         pub matched_by: MatchedBy,
         pub metadata: Option<EntityMetadata>,
