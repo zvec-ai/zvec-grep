@@ -8,7 +8,7 @@ use std::{
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
-use zg_host_native::NativeScanner;
+use zg_host_native::{NativeScanner, WorkspaceScannerPort};
 
 use crate::{
     EngineError,
@@ -66,7 +66,7 @@ use super::{
 #[derive(Clone)]
 pub(crate) struct WorkspaceIndexService {
     pub(crate) writers: crate::pipelines::indexed_search::writer::WriterContexts,
-    scanner: NativeScanner,
+    scanner: Arc<dyn WorkspaceScannerPort>,
     #[cfg(test)]
     fail_index_completion: bool,
     #[cfg(test)]
@@ -79,7 +79,7 @@ impl WorkspaceIndexService {
     pub(crate) fn new() -> Self {
         Self {
             writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
-            scanner: NativeScanner::default(),
+            scanner: Arc::new(NativeScanner::default()),
             #[cfg(test)]
             fail_index_completion: false,
             #[cfg(test)]
@@ -307,7 +307,7 @@ impl WorkspaceIndexService {
         let result = index_workspace(&IndexingContext {
             workspace,
             storage: &writer.session.storage,
-            scanner: &self.scanner,
+            scanner: self.scanner.as_ref(),
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
             on_progress: pipeline_progress,
@@ -420,7 +420,8 @@ impl WorkspaceIndexService {
             storage_path: workspace.layout().index_dir().to_path_buf(),
         })?;
         let status =
-            get_workspace_index_status(&workspace, &storage, &self.scanner, signal, false).await;
+            get_workspace_index_status(&workspace, &storage, self.scanner.as_ref(), signal, false)
+                .await;
         let close = storage.close();
         let status = status?;
         close?;
@@ -439,9 +440,14 @@ impl WorkspaceIndexService {
     ) -> Result<IndexStats, EngineError> {
         let started = std::time::Instant::now();
         tracing::debug!("starting workspace index status scan");
-        let stats =
-            workspace_index_status_from_files(workspace, stored_files, &self.scanner, signal, true)
-                .await?;
+        let stats = workspace_index_status_from_files(
+            workspace,
+            stored_files,
+            self.scanner.as_ref(),
+            signal,
+            true,
+        )
+        .await?;
         tracing::debug!(
             elapsed_us = started.elapsed().as_micros(),
             "checked workspace index status"
@@ -667,7 +673,6 @@ impl fmt::Debug for WorkspaceIndexService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WorkspaceIndexService")
-            .field("scanner", &self.scanner)
             .finish_non_exhaustive()
     }
 }
@@ -2210,6 +2215,109 @@ mod tests {
             }),
             ..IndexOptions::default()
         }
+    }
+
+    #[tokio::test]
+    async fn direct_query_opens_and_releases_index_during_status_discovery() {
+        use std::{fs::File, sync::Arc, time::Duration};
+        use tokio::sync::Notify;
+        use zg_host_native::{
+            HostError, NativeScanner, ReadBatchRequest, ScanRequest, ScanSnapshot, SourceFile,
+            TaskControl, WorkspaceScannerPort,
+        };
+
+        use crate::api::context::{
+            ContextOptions,
+            options::{ContextRoute, ContextRouteMode},
+        };
+
+        struct GatedScanner {
+            storage_lock: File,
+            entered: Notify,
+            release: Notify,
+        }
+
+        #[async_trait::async_trait]
+        impl WorkspaceScannerPort for GatedScanner {
+            async fn discover(
+                &self,
+                request: &ScanRequest,
+                control: &TaskControl,
+            ) -> Result<ScanSnapshot, HostError> {
+                let scanner = NativeScanner::new();
+                // Dispatch the real walk before allowing index open. Keep discovery
+                // pending until the queued writer obtains the workspace lock.
+                let (snapshot, ()) = tokio::join!(biased; scanner.discover(request, control), async {
+                    self.storage_lock.unlock().expect("allow index open");
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                });
+                snapshot
+            }
+
+            async fn read_batch(
+                &self,
+                request: &ReadBatchRequest,
+                control: &TaskControl,
+            ) -> Result<Vec<SourceFile>, HostError> {
+                NativeScanner::new().read_batch(request, control).await
+            }
+        }
+
+        let directory = tempdir().expect("workspace");
+        let root = directory.path();
+        let mut service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        service
+            .index(&models, empty_index_options(root))
+            .await
+            .expect("initial index");
+        std::fs::write(root.join("added.txt"), "new file").expect("workspace drift");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let storage_lock = File::options()
+            .read(true)
+            .write(true)
+            .open(layout.index_dir().join("storage.lock"))
+            .expect("index lock");
+        storage_lock.try_lock().expect("prevent early index open");
+        let scanner = Arc::new(GatedScanner {
+            storage_lock,
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        service.scanner = scanner.clone();
+        let options = ContextOptions {
+            root: Some(root.to_path_buf()),
+            auto_update: false,
+            inspect_index_status: true,
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Fts,
+                query: "needle".into(),
+            }],
+            ..ContextOptions::default()
+        };
+        let query = crate::pipelines::indexed_search::service::context(
+            &service, &models, &options, None, false,
+        );
+        let writer = async {
+            scanner.entered.notified().await;
+            let _writer = super::LockWait::new(None, None)?
+                .acquire(root, &layout, super::LockMode::Exclusive, "queued writer")
+                .await?;
+            scanner.release.notify_one();
+            Ok(())
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::try_join!(biased; query, writer)
+        })
+        .await
+        .expect("writer admitted while discovery is paused")
+        .expect("query and writer");
+        let status = result.indexing.expect("observed drift");
+        assert_eq!(
+            (status.state.as_str(), status.completed, status.total),
+            ("idle", Some(0), Some(1))
+        );
     }
 
     /// Reads the saved graph switch the way production does: from the published

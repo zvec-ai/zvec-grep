@@ -450,13 +450,21 @@ pub mod result {
         /// Returns a status only when an inspection found unfinished or changed files.
         #[must_use]
         pub fn from_stats(stats: &crate::api::info::result::IndexStats) -> Option<Self> {
-            (stats.files_added > 0
+            Self::from_inspection(stats, false)
+        }
+
+        pub(crate) fn from_inspection(
+            stats: &crate::api::info::result::IndexStats,
+            writer_active: bool,
+        ) -> Option<Self> {
+            (writer_active
+                || stats.files_added > 0
                 || stats.files_modified > 0
                 || stats.files_deleted > 0
                 || stats.files_pending > 0
                 || stats.files_failed > 0)
                 .then(|| Self {
-                    state: "idle".to_owned(),
+                    state: if writer_active { "running" } else { "idle" }.to_owned(),
                     completed: Some(stats.files_unchanged),
                     total: Some(stats.files_scanned),
                 })

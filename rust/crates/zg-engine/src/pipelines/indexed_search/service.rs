@@ -73,7 +73,7 @@ pub(crate) async fn context(
     let allows_writer = options.refresh.map_or(!options.auto_update, |policy| {
         policy != crate::api::context::options::RefreshPolicy::Wait
     });
-    let _lock = match acquire_read_source(
+    let lock = match acquire_read_source(
         &source_root,
         &layout,
         &wait,
@@ -86,7 +86,7 @@ pub(crate) async fn context(
         ReadSource::Writer { lease, context } => {
             let workspace = &lease.session.workspace;
             let storage = &lease.session.storage;
-            return with_index_status(indexing, workspace, options, async |files| {
+            return with_index_status(indexing, workspace, options, true, async |files| {
                 query_storage(&context, workspace, storage, options, &request, files).await
             })
             .await;
@@ -114,7 +114,9 @@ pub(crate) async fn context(
             "index storage is missing",
         ));
     }
-    with_index_status(indexing, &workspace, options, async |files| {
+    with_index_status(indexing, &workspace, options, false, async |files| {
+        // The status scan owns its file records and can outlive this read session.
+        let _lock = lock;
         let acquired = query_models(models, &workspace, options, &request)?;
         let storage = ReadSessionLease::for_workspace(&workspace, read_sessions)?;
         let result = query_storage(
@@ -138,6 +140,7 @@ async fn with_index_status(
     indexing: &WorkspaceIndexService,
     workspace: &Workspace,
     options: &ContextOptions,
+    writer_active: bool,
     query: impl AsyncFnOnce(
         Option<oneshot::Sender<Vec<FileRecord>>>,
     ) -> Result<ContextResult, EngineError>,
@@ -170,7 +173,7 @@ async fn with_index_status(
         result
     });
     let mut result = result?;
-    result.indexing = ContextIndexingStatus::from_stats(&stats?);
+    result.indexing = ContextIndexingStatus::from_inspection(&stats?, writer_active);
     Ok(result)
 }
 

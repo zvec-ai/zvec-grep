@@ -250,7 +250,14 @@ async fn fts_queries_borrow_writer_without_credentials_but_wait_does_not() -> Te
         let result =
             tokio::time::timeout(Duration::from_secs(2), fixture.engine.context(query)).await??;
         assert_eq!(result.items[0].relative_path, PathBuf::from("anchor.txt"));
-        assert_eq!(result.indexing.is_some(), policy == RefreshPolicy::Off);
+        assert_eq!(
+            result.indexing.as_ref().map(|status| (
+                status.state.as_str(),
+                status.completed,
+                status.total,
+            )),
+            (policy == RefreshPolicy::Off).then_some(("running", Some(1), Some(2)))
+        );
         assert!(!update.is_finished());
     }
     let mut query = fixture.query(RefreshPolicy::Wait);

@@ -707,10 +707,7 @@ fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
     let clean = success(
         fixture
             .command(&["--mode", "direct", "--fts", "needle", "--color", "never"])
-            .env(
-                "RUST_LOG",
-                "zg_engine::storage::store=debug,zg_engine::pipelines::indexing::service=debug",
-            )
+            .env("RUST_LOG", "zg_engine::storage::store=debug")
             .output()
             .expect("run direct query"),
     );
@@ -721,14 +718,6 @@ fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
         1,
         "{stderr}"
     );
-    let scanning = stderr
-        .find("starting workspace index status scan")
-        .expect("workspace scan");
-    let opened = stderr.find("opened index storage").expect("opened store");
-    let checked = stderr
-        .find("checked workspace index status")
-        .expect("completed status");
-    assert!(scanning < opened && opened < checked, "{stderr}");
     fs::write(
         fixture.root.path().join("unmatched.txt"),
         "unrelated contents",
