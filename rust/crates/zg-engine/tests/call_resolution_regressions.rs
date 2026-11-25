@@ -2076,3 +2076,217 @@ async fn review450_declaration_only_overloads_stay_in_the_result() {
     })
     .await;
 }
+
+// PR 450 review follow-up: `Mid::f` writes no `virtual` and no `override`, but
+// a member stays virtual once a base declares it so. A call through `Mid&`
+// therefore dispatches into `Leaf::f` like the one through `Base&`.
+#[tokio::test]
+async fn review450_virtual_status_crosses_the_intermediate_override() {
+    check_case(Case {
+        name: "review450_virtual_status_crosses_the_intermediate_override",
+        files: vec![SourceFile {
+            path: "chain.cc",
+            source: "struct Base {\n  virtual void f() {}\n};\nstruct Mid : Base {\n  void f() {}\n};\nstruct Leaf : Mid {\n  void f() override {}\n};\nvoid call(Mid& m) { m.f(); }\n",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Leaf::f",
+            expected: json!([{
+                "name": "Leaf::f", "filePath": "chain.cc", "startLine": 8,
+                "edges": [{"symbol": {"name": "call", "startLine": 10}, "line": 10}],
+            }]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review follow-up: `using Base::cb;` brings the member into the class,
+// but the parameter of `run` owns `cb` at the call site, so `cb()` reaches the
+// function value the caller passed and not the imported member.
+#[tokio::test]
+async fn review450_parameter_binding_outranks_a_using_declaration() {
+    check_case(Case {
+        name: "review450_parameter_binding_outranks_a_using_declaration",
+        files: vec![SourceFile {
+            path: "using.cc",
+            source: "struct Base { void cb() {} };\nstruct Derived : Base {\n  using Base::cb;\n  void run(std::function<void()> cb) { cb(); }\n};\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Derived::run",
+            expected: json!([{"name": "Derived::run", "filePath": "using.cc", "startLine": 4, "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review follow-up: a qualified base call binds statically wherever it
+// is written. The helper beside the override spells it the same way, so it is
+// no more a caller of the override than the override's own body is.
+#[tokio::test]
+async fn review450_qualified_base_call_in_a_helper_is_not_an_inherited_caller() {
+    check_case(Case {
+        name: "review450_qualified_base_call_in_a_helper_is_not_an_inherited_caller",
+        files: vec![SourceFile {
+            path: "helper.cc",
+            source: "struct Base { virtual void f() {} };\nstruct Derived : Base {\n  void helper() { Base::f(); }\n  void f() override { Base::f(); }\n};\n",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Derived::f",
+            expected: json!([{"name": "Derived::f", "filePath": "helper.cc", "startLine": 4, "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review follow-up: a call through a base reference states no scope and
+// does dispatch, so the override's own body is one of its callers when it
+// reaches the base that way.
+#[tokio::test]
+async fn review450_base_reference_call_from_the_override_is_a_caller() {
+    check_case(Case {
+        name: "review450_base_reference_call_from_the_override_is_a_caller",
+        files: vec![SourceFile {
+            path: "dispatch.cc",
+            source: "struct Base { virtual void f() {} };\nstruct Derived : Base {\n  void f() override {\n    Base& b = *this;\n    b.f();\n  }\n};\n",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Derived::f",
+            expected: json!([{
+                "name": "Derived::f", "filePath": "dispatch.cc", "startLine": 3,
+                "edges": [{"symbol": {"name": "Derived::f", "startLine": 3}, "line": 5}],
+            }]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review follow-up: two targets declare their own `S`, and the only
+// indexed body belongs to the second. A caller that includes the first's
+// header names that declaration; the namesake's implementation is not its body.
+#[tokio::test]
+async fn review450_namesake_body_outside_the_unit_does_not_pair() {
+    check_case(Case {
+        name: "review450_namesake_body_outside_the_unit_does_not_pair",
+        files: vec![
+            SourceFile {
+                path: "a/s.h",
+                source: "struct S {\n  void f();\n};\n",
+            },
+            SourceFile {
+                path: "b/s.h",
+                source: "struct S {\n  void f();\n};\n",
+            },
+            SourceFile {
+                path: "b/s.cc",
+                source: "#include \"b/s.h\"\nvoid S::f() {}\n",
+            },
+            SourceFile {
+                path: "caller.cc",
+                source: "#include \"a/s.h\"\nvoid run(S& s) { s.f(); }\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{
+                "name": "run", "filePath": "caller.cc", "startLine": 2,
+                "edges": [{"symbol": {"name": "S::f", "filePath": "a/s.h"}, "line": 2}],
+            }]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review follow-up: both spellings of `S::f` are visible to `s.cc` and
+// take no parameters. The declaration/definition pair is one member, settled
+// before the overload count, so `s.f()` binds instead of staying ambiguous.
+#[tokio::test]
+async fn review450_visible_pair_precedes_the_overload_count() {
+    check_case(Case {
+        name: "review450_visible_pair_precedes_the_overload_count",
+        files: vec![
+            SourceFile {
+                path: "s.h",
+                source: "struct S {\n  void f();\n};\n",
+            },
+            SourceFile {
+                path: "s.cc",
+                source: "#include \"s.h\"\nvoid S::f() {}\nvoid run(S& s) { s.f(); }\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{
+                "name": "run", "filePath": "s.cc", "startLine": 3,
+                "edges": [{"symbol": {"name": "S::f", "filePath": "s.cc"}, "line": 3}],
+            }]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review follow-up: an override repeats the parameters of the virtual
+// member it replaces. `f(double)` of the derived class does not override
+// `f(int)`, so the call through `Base&` reaches the base body alone.
+#[tokio::test]
+async fn review450_parameter_types_separate_the_override() {
+    check_case(Case {
+        name: "review450_parameter_types_separate_the_override",
+        files: vec![SourceFile {
+            path: "types.cc",
+            source: "struct Base { virtual void f(int) {} };\nstruct Derived : Base { void f(double) {} };\nvoid run(Base& b) { b.f(1); }\n",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Derived::f",
+            expected: json!([{"name": "Derived::f", "filePath": "types.cc", "startLine": 2, "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review follow-up: two targets declare `api::Base` and only the first
+// one's target defines `Derived`. The call in the second target reaches that
+// target's member, which is not the base member the override replaced.
+#[tokio::test]
+async fn review450_namesake_base_of_another_target_is_not_overridden() {
+    check_case(Case {
+        name: "review450_namesake_base_of_another_target_is_not_overridden",
+        files: vec![
+            SourceFile {
+                path: "a.h",
+                source: "namespace api { struct Base { virtual void f() {} }; }\n",
+            },
+            SourceFile {
+                path: "b.h",
+                source: "namespace api { struct Base { virtual void f() {} }; }\n",
+            },
+            SourceFile {
+                path: "a_derived.h",
+                source: "#include \"a.h\"\nstruct Derived : api::Base { void f() override {} };\n",
+            },
+            SourceFile {
+                path: "b_caller.cc",
+                source: "#include \"b.h\"\nvoid run(api::Base& base) { base.f(); }\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Derived::f",
+            expected: json!([{"name": "Derived::f", "filePath": "a_derived.h", "startLine": 2, "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
