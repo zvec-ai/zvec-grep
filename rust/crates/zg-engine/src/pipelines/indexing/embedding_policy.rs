@@ -148,11 +148,13 @@ async fn analyze(
                 other_files += 1;
                 continue;
             };
-            if !matches!(source_kind(&formats), Some(SourceKind::Text))
-                || file.size_bytes
-                    > scan
-                        .max_file_size_bytes()
-                        .unwrap_or_else(|| default_file_size_limit(&formats))
+            if !matches!(
+                source_kind(&formats),
+                Some(SourceKind::Text | SourceKind::Pdf)
+            ) || file.size_bytes
+                > scan
+                    .max_file_size_bytes()
+                    .unwrap_or_else(|| default_file_size_limit(&formats))
                 || file.size_bytes == 0
             {
                 continue;

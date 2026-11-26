@@ -43,6 +43,7 @@ async fn model2vec_matches_the_main_typescript_vector_bit_for_bit() {
         }),
         crate::models::runtime::ModelComputeRuntime::shared(),
         1,
+        None,
     )
     .expect("pinned Model2Vec model must be available");
     let inputs = oracle

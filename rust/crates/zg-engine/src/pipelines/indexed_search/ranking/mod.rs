@@ -177,7 +177,7 @@ fn score_code(
                     let anchored = policy.anchored_functions
                         && code.symbol_type == Some(SymbolType::Function)
                         && code.symbol_name.as_ref().is_some_and(|s| !s.is_empty())
-                        && support::interval(hit.entity.source_range()).is_some()
+                        && support::interval(&hit.entity.source_range()).is_some()
                         && query
                             .names_function_file_or_scope(&path, code.qualified_scope().as_deref());
                     (kind, symbol, definition, anchored)
@@ -288,8 +288,8 @@ fn select(
                         if a.scope == b.scope && a.symbol_name == b.symbol_name);
                     other.independent_anchor = !same_symbol
                         && !support::overlaps(
-                            other.hit.entity.source_range(),
-                            item.hit.entity.source_range(),
+                            &other.hit.entity.source_range(),
+                            &item.hit.entity.source_range(),
                         );
                 }
                 if !other.independent_anchor {

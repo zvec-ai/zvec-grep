@@ -1,6 +1,6 @@
 use crate::{EngineError, EngineResult};
 
-use super::{Content, EntityMetadata, FileId, Range};
+use super::{Content, EntityMetadata, FileId, PdfSourceMap, Range};
 
 /// A logical search unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10,6 +10,8 @@ pub(crate) struct Entity {
     /// Range within the original source.
     source_range: Range,
     content: Content,
+    /// Provenance belongs to the extracted text, not to its physical location.
+    source_map: Option<std::sync::Arc<PdfSourceMap>>,
     metadata: Option<EntityMetadata>,
     fragments: Vec<EntityFragment>,
 }
@@ -29,16 +31,65 @@ impl Entity {
             ));
         }
         for fragment in &fragments {
-            validate_fragment_range(&content, fragment.range)?;
+            validate_fragment_range(&content, fragment.range.clone())?;
+        }
+        if let Range::Pdf(location) = &source_range {
+            location.validate()?;
         }
         Ok(Self {
             id,
             file_id,
             source_range,
             content,
+            source_map: None,
             metadata,
             fragments,
         })
+    }
+
+    pub(crate) fn with_source_map(
+        mut self,
+        map: Option<std::sync::Arc<PdfSourceMap>>,
+    ) -> EngineResult<Self> {
+        if let Some(map) = &map {
+            let Content::Text(text) = &self.content else {
+                return Err(EngineError::invalid_argument(
+                    "PDF source maps require text content",
+                ));
+            };
+            map.validate(text)?;
+            if self.source_range != Range::Pdf(map.locate(0..text.len())?.into()) {
+                return Err(EngineError::invalid_argument(
+                    "PDF source map disagrees with entity location",
+                ));
+            }
+        } else if matches!(
+            (&self.source_range, &self.content),
+            (Range::Pdf(_), Content::Text(_) | Content::Code(_))
+        ) {
+            return Err(EngineError::invalid_argument(
+                "PDF text requires a source map",
+            ));
+        }
+        self.source_map = map;
+        Ok(self)
+    }
+
+    pub(crate) fn source_map(&self) -> Option<&std::sync::Arc<PdfSourceMap>> {
+        self.source_map.as_ref()
+    }
+
+    /// Offsets in extracted document text, when present, otherwise source bytes.
+    pub(crate) fn source_byte_offsets(&self) -> Option<(u64, u64)> {
+        self.source_map().map_or_else(
+            || self.source_range.byte_offsets(),
+            |map| {
+                Some((
+                    u64::try_from(map.markdown_start).ok()?,
+                    u64::try_from(map.markdown_start.checked_add(map.text_len)?).ok()?,
+                ))
+            },
+        )
     }
 
     pub(crate) fn id(&self) -> &EntityId {
@@ -50,7 +101,7 @@ impl Entity {
     }
 
     pub(crate) fn source_range(&self) -> Range {
-        self.source_range
+        self.source_range.clone()
     }
 
     pub(crate) fn content(&self) -> &Content {
@@ -74,7 +125,8 @@ pub(crate) struct EntityFragment {
     pub range: Range,
 }
 
-/// `hex8(file_id) + hex(SHA256(content.fingerprint() + JSON(source_range)))[..24]`.
+/// Content and physical location identify an entity within its file.
+/// Converted text also includes its document offset to distinguish repeated text.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct EntityId(String);
 
@@ -82,13 +134,32 @@ impl EntityId {
     pub(crate) fn new(
         file_id: FileId,
         content: &Content,
-        source_range: Range,
+        source_range: &Range,
     ) -> EngineResult<Self> {
-        let fingerprint = content.fingerprint();
-        let range = serde_json::to_vec(&source_range).map_err(|error| {
+        let range = serde_json::to_vec(source_range).map_err(|error| {
             EngineError::internal(format!("serialize entity source range: {error}"))
         })?;
+        let fingerprint = content.fingerprint();
         let hash = crate::utils::sha256_hex_parts([fingerprint.as_slice(), range.as_slice()]);
+        Ok(Self(format!("{:08x}{}", file_id.get(), &hash[..24])))
+    }
+
+    pub(crate) fn new_with_source_map(
+        file_id: FileId,
+        content: &Content,
+        source_range: &Range,
+        source_map: Option<&PdfSourceMap>,
+    ) -> EngineResult<Self> {
+        let base = Self::new(file_id, content, source_range)?;
+        let Some(map) = source_map else {
+            return Ok(base);
+        };
+        // Repeated text can share a page/block rectangle. Its extracted-document
+        // offset distinguishes those entities without putting offsets in PdfRange.
+        let origin = u64::try_from(map.markdown_start)
+            .map_err(|_| EngineError::invalid_argument("PDF text origin exceeds u64"))?
+            .to_le_bytes();
+        let hash = crate::utils::sha256_hex_parts([base.as_str().as_bytes(), origin.as_slice()]);
         Ok(Self(format!("{:08x}{}", file_id.get(), &hash[..24])))
     }
 

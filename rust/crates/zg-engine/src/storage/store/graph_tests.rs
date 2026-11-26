@@ -79,7 +79,7 @@ fn snapshot(store: &IndexStore, path: impl Into<PathBuf>, symbols: &[&str]) -> S
         .iter()
         .map(|symbol| {
             let content = Content::Text((*symbol).into());
-            let entity_id = EntityId::new(id, &content, Range::Full).expect("entity identity");
+            let entity_id = EntityId::new(id, &content, &Range::Full).expect("entity identity");
             Entity::new(
                 entity_id.clone(),
                 id,

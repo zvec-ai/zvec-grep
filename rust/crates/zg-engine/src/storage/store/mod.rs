@@ -73,7 +73,15 @@ pub(crate) struct IndexStore {
 pub(crate) struct IndexedSourceFile {
     pub(crate) id: FileId,
     pub(crate) path: PathBuf,
-    pub(crate) entities: Vec<(EntityId, Range, bool)>,
+    pub(crate) entities: Vec<IndexedSourceEntity>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct IndexedSourceEntity {
+    pub(crate) id: EntityId,
+    pub(crate) range: Range,
+    pub(crate) source_bytes: Option<(u64, u64)>,
+    pub(crate) searchable: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -349,7 +357,12 @@ impl IndexStore {
                             .fragments()
                             .iter()
                             .any(|fragment| projected.contains(fragment.id.as_str()));
-                        (entity.id().clone(), entity.source_range(), searchable)
+                        IndexedSourceEntity {
+                            id: entity.id().clone(),
+                            range: entity.source_range(),
+                            source_bytes: entity.source_byte_offsets(),
+                            searchable,
+                        }
                     })
                     .collect();
                 watched.push(IndexedSourceFile { id, path, entities });

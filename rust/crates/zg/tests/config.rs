@@ -343,7 +343,8 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     );
     let runtime = &manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"];
     assert!(runtime.get("device").is_none());
-    assert_eq!(runtime["cacheDir"], json!(cache));
+    assert!(runtime.get("cacheDir").is_none());
+    assert_eq!(manifest["modelCacheDir"], json!(cache));
     assert!(
         !fixture
             .root
@@ -612,6 +613,7 @@ fn local_model_preferences_save_only_explicit_index_options() {
     };
     fixture.success(&["--index", "--mode", "direct"]);
     let original = manifest();
+    assert!(original.get("modelCacheDir").is_none());
     assert_eq!(
         original["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
         json!({})
@@ -629,10 +631,9 @@ fn local_model_preferences_save_only_explicit_index_options() {
     let saved = manifest();
     assert_eq!(
         saved["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
-        json!({
-            "device": "cpu", "cacheDir": saved_cache
-        })
+        json!({"device": "cpu"})
     );
+    assert_eq!(saved["modelCacheDir"], json!(saved_cache));
     let inherited = fixture
         .command(&["--index", "--mode", "direct"])
         .env("ZVEC_GREP_DEVICE", "auto")
@@ -647,18 +648,20 @@ fn local_model_preferences_save_only_explicit_index_options() {
         "{}",
         String::from_utf8_lossy(&inherited.stderr)
     );
+    let inherited = manifest();
     assert_eq!(
-        manifest()["index"]["descriptor"]["embeddingConfigs"],
+        inherited["index"]["descriptor"]["embeddingConfigs"],
         saved["index"]["descriptor"]["embeddingConfigs"]
     );
+    assert_eq!(inherited["modelCacheDir"], saved["modelCacheDir"]);
 
     fixture.success(&["--index", "--mode", "direct", "--device", "auto"]);
+    let omitted = manifest();
     assert_eq!(
-        manifest()["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
-        json!({
-            "device": "auto", "cacheDir": saved_cache
-        })
+        omitted["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
+        json!({"device": "auto"})
     );
+    assert_eq!(omitted["modelCacheDir"], saved["modelCacheDir"]);
     let replacement_cache = fixture.user.path().join("replacement-models");
     fixture.success(&[
         "--index",
@@ -670,9 +673,8 @@ fn local_model_preferences_save_only_explicit_index_options() {
     let updated = manifest();
     assert_eq!(
         updated["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
-        json!({
-            "device": "auto", "cacheDir": replacement_cache
-        })
+        json!({"device": "auto"})
     );
+    assert_eq!(updated["modelCacheDir"], json!(replacement_cache));
     assert_eq!(updated["storageGeneration"], original["storageGeneration"]);
 }

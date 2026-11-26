@@ -5,11 +5,17 @@ mod code;
 mod graph;
 mod image;
 mod markdown;
+pub(crate) mod pdf;
+mod preparation;
 mod sectioning;
 mod service;
 mod source_map;
 mod spi;
 mod text;
+
+pub(crate) use preparation::{
+    ExtractionOperation, ExtractionPort, ExtractionRequest, ExtractionService,
+};
 
 pub(crate) use code::code_outline;
 
