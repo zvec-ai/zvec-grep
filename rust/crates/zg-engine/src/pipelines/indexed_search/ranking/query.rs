@@ -50,9 +50,7 @@ impl QueryFeatures {
         );
         explicit_names.sort();
         explicit_names.dedup();
-        let mut generic_names = HashSet::new();
-        let anchor_query = without_type_arguments(query, Some(&mut generic_names));
-        let (scope_names, file_stems) = function_anchor_names(&anchor_query, &generic_names);
+        let (scope_names, file_stems) = function_anchor_names(query);
         let requested_kind = [
             ("class", SymbolType::Class),
             ("function", SymbolType::Function),
@@ -80,7 +78,7 @@ impl QueryFeatures {
                 .flat_map(|s| tokens(s))
                 .filter(|s| informative(s))
                 .collect(),
-            paths: anchor_query
+            paths: query
                 .split_whitespace()
                 .map(|s| s.trim_matches(['`', '\'', '"', ',', ';']))
                 .filter(|s| s.contains(['/', '\\', '.']))
@@ -334,10 +332,9 @@ impl QueryFeatures {
     }
 }
 
-fn function_anchor_names(
-    query: &str,
-    generic_names: &HashSet<&str>,
-) -> (HashSet<String>, HashSet<String>) {
+fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
+    let mut generic_names = HashSet::new();
+    let query = without_type_arguments(query, Some(&mut generic_names));
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut scope_names = HashSet::new();
     let mut standalone_names: HashSet<&str> = query
@@ -346,12 +343,17 @@ fn function_anchor_names(
         .step_by(2)
         .filter(|word| !word.is_empty() && word.chars().all(is_word))
         .collect();
-    let terms = query.split(|c: char| c.is_whitespace() || "`'\"(),;[]{}".contains(c));
-    for (i, term) in terms.filter(|term| !term.is_empty()).enumerate() {
+    let delimiter = |c: char| c.is_whitespace() || "`'\"(),;[]{}".contains(c);
+    let terms = query.split_inclusive(delimiter).filter_map(|part| {
+        let term = part.trim_end_matches(delimiter);
+        (!term.is_empty()).then_some((term, part.ends_with('(')))
+    });
+    for (i, (term, is_call)) in terms.enumerate() {
         // Paths and recognized source filenames are matched literally, as a whole.
         let literal = term.trim_end_matches(['.', '?', '!', ':']);
         if term.contains(['/', '\\'])
-            || (literal.contains('.')
+            || (!is_call
+                && literal.contains('.')
                 && FileFormat::from_file_name(literal.as_ref())
                     .iter()
                     .any(|format| format.categories().contains(&FileCategory::Code)))

@@ -612,6 +612,16 @@ fn explicit_paths_do_not_contribute_standalone_names() {
 }
 
 #[test]
+fn comparisons_preserve_both_literal_paths() {
+    let query = QueryFeatures::new("Compare x<limit in src/lower.rs with x>limit in src/upper.rs");
+    for path in ["src/lower.rs", "src/upper.rs"] {
+        assert!(query.names_function_file_or_scope(path, None));
+        assert_eq!(query.path_affinity(path), 1.0);
+    }
+    assert!(!query.names_function_file_or_scope("other/lower.rs", None));
+}
+
+#[test]
 fn source_filenames_anchor_only_the_named_file() {
     for name in ["Router.cpp", "Router.test.cpp", "User-Router.cpp"] {
         let query = QueryFeatures::new(&format!("list methods in {name}"));
@@ -623,6 +633,12 @@ fn source_filenames_anchor_only_the_named_file() {
         QueryFeatures::new("Router.Dial")
             .names_function_file_or_scope("dispatch.go", Some("net::Router"))
     );
+    let call = QueryFeatures::new("Router.patch()");
+    assert!(call.names_function_file_or_scope("dispatch.rs", Some("net::Router")));
+    assert!(!call.names_function_file_or_scope("dispatch.rs", Some("OtherRouter")));
+    let file = QueryFeatures::new("Router.patch");
+    assert!(file.names_function_file_or_scope("changes/Router.patch", None));
+    assert!(!file.names_function_file_or_scope("dispatch.rs", Some("net::Router")));
 }
 
 #[test]
