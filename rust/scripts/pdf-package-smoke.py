@@ -53,12 +53,13 @@ def fixture(path, pages):
     path.write_bytes(data)
 
 
-def http_layout_cache_smoke(execute, workspace, home, env, cache):
-    """HTTP embeddings must not hide the independently cached layout model."""
-    root = workspace / "http-cache"
+def remote_layout_cache_smoke(execute, workspace, home, env, cache, provider):
+    """Every remote provider must preserve the independently cached layout model."""
+    reference = "http/fixture" if provider == "http" else "qwen/text-embedding-v4"
+    root = workspace / f"{provider}-cache"
     root.mkdir()
     fixture(root / "native.pdf", [["Orchid recovery requires five minutes."]])
-    isolated_home = home / "http-cache"
+    isolated_home = home / f"{provider}-cache"
     config_dir = isolated_home / ".zvec-grep"
     config_dir.mkdir(parents=True, exist_ok=True)
     unavailable_cache = isolated_home / "not-a-directory"
@@ -70,7 +71,8 @@ def http_layout_cache_smoke(execute, workspace, home, env, cache):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
             inputs = request["input"]
-            body = json.dumps({"data": [{"index": i, "embedding": [1.0, 0.0, 0.0, 0.0]}
+            dimension = request.get("dimensions", 4)
+            body = json.dumps({"data": [{"index": i, "embedding": [1.0] + [0.0] * (dimension - 1)}
                                         for i in range(len(inputs))]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -85,16 +87,21 @@ def http_layout_cache_smoke(execute, workspace, home, env, cache):
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            config = {"version": 1, "models": {"http/fixture": {
-                "endpoint": f"http://127.0.0.1:{server.server_port}/v1", "model": "fixture",
-                "dimension": 4, "maxInputTokens": 512, "maxBatchSize": 16, "auth": "none"}}}
+            endpoint = f"http://127.0.0.1:{server.server_port}/v1/embeddings"
+            config = {"version": 1}
+            if provider == "http":
+                config["models"] = {reference: {
+                    "endpoint": endpoint, "model": "fixture", "dimension": 4,
+                    "maxInputTokens": 512, "maxBatchSize": 16, "auth": "none"}}
             config_path = config_dir / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
             isolated_env = dict(env, HOME=str(isolated_home), USERPROFILE=str(isolated_home),
                                 XDG_CONFIG_HOME=str(isolated_home / "config"),
                                 ZVEC_GREP_MODEL_CACHE=str(unavailable_cache))
             isolated_env.pop("ZVEC_GREP_DEVICE", None)
-            arguments = ["--index", "--embedding", "http/fixture", "--allow-remote"]
+            arguments = ["--index", "--embedding", reference, "--allow-remote"]
+            if provider == "qwen":
+                arguments += ["--endpoint", endpoint, "--api-key", "fixture-token"]
 
             def index(label, args, expected, cwd=root):
                 before = len(requests)
@@ -103,31 +110,31 @@ def http_layout_cache_smoke(execute, workspace, home, env, cache):
                 check("Preparing model: layout/pp-doclayout-s" in err, err)
                 check("using native PDF text without layout filtering" not in err, err)
                 check("Downloading model" not in err, "Expected cached PP-S: " + err)
-                check(len(requests) > before, "HTTP embedding fixture received no request")
+                check(len(requests) > before, f"{provider} embedding fixture received no request")
 
             def saved_config(cwd=root):
                 manifest = json.loads((cwd / ".zvec-grep/manifest.json").read_text(encoding="utf-8"))
-                return manifest["index"]["descriptor"]["embeddingConfigs"]["http/fixture"]
+                return manifest["index"]["descriptor"]["embeddingConfigs"][reference]
 
-            index("http-cache-explicit", arguments + ["--model-cache", str(cache)], ["1 scanned", "1 added"])
+            index(f"{provider}-cache-explicit", arguments + ["--model-cache", str(cache)], ["1 scanned", "1 added"])
             check(saved_config().get("cacheDir") == str(cache), "Explicit model cache was not saved")
             # A fresh process must reuse the workspace preference without any
             # explicit cache, environment fallback, or global configuration.
             isolated_env.pop("ZVEC_GREP_MODEL_CACHE", None)
             config_path.unlink()
             fixture(root / "added.pdf", [["Cobalt verification completes the recovery."]])
-            index("http-cache-incremental", ["--index", "--allow-remote"], ["2 scanned", "1 added", "1 unchanged"])
+            index(f"{provider}-cache-incremental", ["--index", "--allow-remote"], ["2 scanned", "1 added", "1 unchanged"])
             check(saved_config().get("cacheDir") == str(cache), "Incremental index lost the saved model cache")
-            out, _ = execute("http-cache-rg", ["--rg", "-F", "Cobalt verification"], cwd=root, environment=isolated_env)
+            out, _ = execute(f"{provider}-cache-rg", ["--rg", "-F", "Cobalt verification"], cwd=root, environment=isolated_env)
             check("added.pdf" in out and re.search(r"pages:\s*1\s*\n", out), out)
 
             # Exercise the global fallback in a separate workspace with no saved preference.
-            global_root = workspace / "http-global-cache"
+            global_root = workspace / f"{provider}-global-cache"
             global_root.mkdir()
             fixture(global_root / "native.pdf", [["Orchid recovery requires five minutes."]])
             config["defaults"] = {"modelCacheDir": str(cache)}
             config_path.write_text(json.dumps(config), encoding="utf-8")
-            index("http-cache-global", arguments, ["1 scanned", "1 added"], cwd=global_root)
+            index(f"{provider}-cache-global", arguments, ["1 scanned", "1 added"], cwd=global_root)
             check("cacheDir" not in saved_config(global_root), "Global cache must not become a saved override")
         finally:
             server.shutdown()
@@ -257,7 +264,8 @@ def main():
             check("1 deleted" in out, out)
             out, _ = execute("rg-deleted", ["--rg", "-F", "Updated orchid"], (0, 1))
             check("pages.pdf" not in out, out)
-            http_layout_cache_smoke(execute, workspace, home, env, cache)
+            for provider in ["http", "qwen"]:
+                remote_layout_cache_smoke(execute, workspace, home, env, cache, provider)
             report["passed"] = True
         finally:
             (logs / "results.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

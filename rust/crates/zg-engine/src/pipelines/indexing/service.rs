@@ -1016,8 +1016,6 @@ fn saved_embedding_config(
         let mut config = ModelConfig {
             http: Some(http.clone()),
             endpoint: model.configured_endpoint().map(str::to_owned),
-            // HTTP embeddings do not use this cache, but extraction models do.
-            cache_dir,
             api_key: (http.auth == HttpAuth::Bearer)
                 .then_some(stored.api_key)
                 .flatten(),
@@ -1028,9 +1026,8 @@ fn saved_embedding_config(
         {
             config.api_key = Some(encrypt_api_key(layout, &reference, key)?);
         }
-        return Ok(config);
-    }
-    if model.info().model().provider() == "local" {
+        stored = config;
+    } else if model.info().model().provider() == "local" {
         stored.device = options
             .device
             .or_else(|| {
@@ -1041,16 +1038,17 @@ fn saved_embedding_config(
                     .filter(|device| *device != Device::Auto)
             })
             .or(stored.device);
-        stored.cache_dir = cache_dir;
-        return Ok(stored);
+    } else {
+        stored.endpoint = model
+            .configured_endpoint()
+            .map(str::to_owned)
+            .or(stored.endpoint);
+        if let Some(key) = options.api_key.as_deref() {
+            stored.api_key = Some(encrypt_api_key(layout, &reference, key)?);
+        }
     }
-    stored.endpoint = model
-        .configured_endpoint()
-        .map(str::to_owned)
-        .or(stored.endpoint);
-    if let Some(key) = options.api_key.as_deref() {
-        stored.api_key = Some(encrypt_api_key(layout, &reference, key)?);
-    }
+    // Extraction models need the saved cache even when embeddings are remote.
+    stored.cache_dir = cache_dir;
     Ok(stored)
 }
 
@@ -1136,7 +1134,11 @@ mod tests {
         let embedding = directory.path().join("embedding");
         let global = directory.path().join("global");
         let config = serde_json::json!({"defaults": {"modelCacheDir": global}});
-        for reference in ["local/potion-code-16m-v2", "http/fixture"] {
+        for reference in [
+            "local/potion-code-16m-v2",
+            "http/fixture",
+            "qwen/text-embedding-v4",
+        ] {
             let mut options = IndexOptions {
                 runtime_model_cache: Some(runtime.clone()),
                 model_cache: Some(explicit.clone()),
@@ -1375,65 +1377,100 @@ mod tests {
     }
 
     #[test]
-    fn http_model_cache_persists_without_saving_temporary_overrides() {
-        let directory = tempdir().expect("workspace");
-        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+    fn every_embedding_provider_persists_model_cache_without_temporary_overrides() {
         let models = ModelRuntimeManager::new();
-        let http = serde_json::from_value(serde_json::json!({
-            "model": "served-model", "dimension": 4, "maxInputTokens": 128, "auth": "none"
-        }))
-        .expect("HTTP descriptor");
-        let model = models
-            .acquire(super::ModelRuntimeRequest::new(
-                "http/fixture",
+        for entry in crate::models::list_embedding_models() {
+            let config = if matches!(entry, crate::models::EmbeddingCatalogEntry::Qwen(_)) {
                 super::ModelConfig {
-                    http: Some(http),
+                    api_key: Some("fixture-token".into()),
                     endpoint: Some("http://127.0.0.1:9/v1/embeddings".into()),
                     ..Default::default()
-                },
-                None,
-            ))
-            .expect("HTTP metadata without loading models");
+                }
+            } else {
+                super::ModelConfig::default()
+            };
+            let model = models
+                .acquire(super::ModelRuntimeRequest::new(
+                    entry.reference(),
+                    config,
+                    None,
+                ))
+                .expect("catalog metadata without loading models");
+            assert_model_cache_persistence(&model);
+        }
+        for auth in ["none", "bearer"] {
+            let http = serde_json::from_value(serde_json::json!({
+                "model": "served-model", "dimension": 4, "maxInputTokens": 128, "auth": auth
+            }))
+            .expect("HTTP descriptor");
+            let model = models
+                .acquire(super::ModelRuntimeRequest::new(
+                    "http/fixture",
+                    super::ModelConfig {
+                        http: Some(http),
+                        api_key: (auth == "bearer").then(|| "fixture-token".into()),
+                        endpoint: Some("http://127.0.0.1:9/v1/embeddings".into()),
+                        ..Default::default()
+                    },
+                    None,
+                ))
+                .expect("HTTP metadata without loading models");
+            assert_model_cache_persistence(&model);
+        }
+        models.close();
+    }
+
+    fn assert_model_cache_persistence(model: &super::ModelRuntimeLease) {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let reference = model.info().model().reference();
         let cache = directory.path().join("models");
         let replacement = directory.path().join("replacement-models");
         let mut workspace = None;
         for (options, expected) in [
-            (
-                IndexOptions {
-                    model_cache: Some(cache.clone()),
-                    ..Default::default()
-                },
-                &cache,
-            ),
-            (IndexOptions::default(), &cache),
+            (IndexOptions::default(), None),
             (
                 IndexOptions {
                     runtime_model_cache: Some(directory.path().join("temporary-models")),
                     ..Default::default()
                 },
-                &cache,
+                None,
+            ),
+            (
+                IndexOptions {
+                    model_cache: Some(cache.clone()),
+                    ..Default::default()
+                },
+                Some(&cache),
+            ),
+            (IndexOptions::default(), Some(&cache)),
+            (
+                IndexOptions {
+                    runtime_model_cache: Some(directory.path().join("temporary-models")),
+                    ..Default::default()
+                },
+                Some(&cache),
             ),
             (
                 IndexOptions {
                     model_cache: Some(replacement.clone()),
                     ..Default::default()
                 },
-                &replacement,
+                Some(&replacement),
             ),
-            (IndexOptions::default(), &replacement),
+            (IndexOptions::default(), Some(&replacement)),
         ] {
-            let saved =
-                super::saved_embedding_config(&layout, workspace.as_ref(), &options, &model)
-                    .expect("save HTTP settings");
-            assert_eq!(saved.cache_dir.as_ref(), Some(expected));
+            let saved = super::saved_embedding_config(&layout, workspace.as_ref(), &options, model)
+                .expect("save model settings");
+            assert_eq!(saved.cache_dir.as_ref(), expected, "{reference}");
             let descriptor = IndexDescriptor::new(
                 model.info().clone(),
                 std::collections::BTreeMap::new(),
-                std::collections::BTreeMap::from([("http/fixture".into(), saved)]),
+                std::collections::BTreeMap::from([(reference.clone(), saved)]),
                 false,
                 crate::domain::FTS_CONFIG,
             )
-            .expect("HTTP index descriptor");
+            .expect("index descriptor");
             let updated = Workspace::new(
                 directory.path(),
                 layout.clone(),
@@ -1449,7 +1486,6 @@ mod tests {
             workspace = super::read_workspace_manifest(directory.path(), &layout).expect("read");
             assert_eq!(workspace.as_ref(), Some(&updated));
         }
-        models.close();
     }
 
     #[test]
