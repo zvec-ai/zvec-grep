@@ -56,6 +56,20 @@ Saved settings live in the source directory's fixed `.zvec-grep` child, with act
 
 Scanning respects ignore rules, excludes hidden files, does not follow symlinks, and traverses nested Git repositories by default. File formats inferred from names, path patterns, additional ignore files, depth limits, and file size limits let you adjust the scope. These rules are saved with the workspace and reused for future indexing.
 
+### C# extraction
+
+C# files (`.cs` and `.csx`) use the upstream MIT-licensed
+[`tree-sitter-c-sharp` 0.23.5](https://docs.rs/tree-sitter-c-sharp/0.23.5/)
+grammar through its Rust binding, alongside the existing Tree-sitter 0.27 runtime.
+The shared engine extracts namespaces, classes, structs, records, interfaces,
+enums, delegates, methods, constructors, operators, properties, fields and events,
+with signatures, documentation and scopes. File-scoped namespaces, local functions,
+and top-level script content are preserved. Stored entities support structural
+outlines and ordinary call collection in both Direct and Server modes.
+This is syntax-based extraction: C# namespace imports, inheritance resolution and
+Roslyn-style type inference are not implemented. Existing files need reindexing
+to gain structured C# metadata. The legacy TypeScript implementation is unchanged.
+
 ### Index lifecycle
 
 An index is created on the first indexing run and updated as files are added, changed, or removed. It can be rebuilt from scratch when needed, or deleted without removing source files or shared model caches. Indexing can complete with individual file failures, which are reported separately.

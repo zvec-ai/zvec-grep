@@ -220,6 +220,7 @@ fn grammar(format: FileFormat, jsx: bool) -> Option<Language> {
     Some(match format {
         FileFormat::C => tree_sitter_c::LANGUAGE.into(),
         FileFormat::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        FileFormat::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         FileFormat::Go => tree_sitter_go::LANGUAGE.into(),
         FileFormat::Java => tree_sitter_java::LANGUAGE.into(),
         FileFormat::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
@@ -599,6 +600,8 @@ fn walk_code_node<'tree>(
     graph_context: &mut WalkContext,
     format: FileFormat,
 ) {
+    let mut breadcrumb = std::borrow::Cow::Borrowed(breadcrumb);
+    let mut file_namespace_scopes = 0;
     for child in named_children(node) {
         let is_scope = adapter.is_scope(child);
         let is_entity = adapter.is_entity(child);
@@ -608,7 +611,7 @@ fn walk_code_node<'tree>(
                 child,
                 adapter,
                 source,
-                breadcrumb,
+                &breadcrumb,
                 out,
                 graph_context,
                 format,
@@ -657,12 +660,26 @@ fn walk_code_node<'tree>(
                 child,
                 adapter,
                 source,
-                breadcrumb,
+                &breadcrumb,
                 out,
                 graph_context,
                 format,
             );
         }
+        // A file-scoped namespace owns subsequent siblings, not a body node.
+        if format == FileFormat::CSharp
+            && child.kind() == "file_scoped_namespace_declaration"
+            && let Some(name) = adapter.extract_name(child, source)
+        {
+            breadcrumb.to_mut().push(name);
+            if let Some(owner) = scope_entity_index {
+                graph_context.push_scope(owner);
+                file_namespace_scopes += 1;
+            }
+        }
+    }
+    for _ in 0..file_namespace_scopes {
+        graph_context.pop_scope();
     }
 }
 
@@ -701,7 +718,7 @@ fn append_entity(
     });
 }
 
-// PHP retains all code outside declarations. JS/TS also needs the bodies of
+// PHP and C# retain all code outside declarations. JS/TS also needs the bodies of
 // callbacks with no symbol owner: excluding their local variables must not
 // remove their contents from retrieval. C/C++ keeps the text no entity bounded
 // — a file whose only entity owns a call still has to answer for the constants,
@@ -720,6 +737,7 @@ fn append_code_gaps(
             format,
             FileFormat::C
                 | FileFormat::Cpp
+                | FileFormat::CSharp
                 | FileFormat::JavaScript
                 | FileFormat::Php
                 | FileFormat::TypeScript
@@ -764,7 +782,7 @@ fn append_code_gaps(
 
     // A JS/TS gap is a statement of a body no entity owns; only callbacks
     // carry contents worth searching, and indexing the rest would duplicate
-    // the statements between declarations. C/C++ and PHP gaps are the whole
+    // the statements between declarations. C/C++, C# and PHP gaps are the whole
     // uncovered text, so they are taken as they are.
     if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript) {
         let mut callbacks = Vec::new();
@@ -1157,6 +1175,282 @@ mod tests {
             panic!("code metadata expected for {name}");
         };
         metadata.signature.as_deref().expect("signature expected")
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture verifies C# declaration metadata together"
+    )]
+    fn csharp_extracts_declarations_with_scopes_signatures_and_docs() {
+        let source = test_source(
+            FileFormat::CSharp,
+            "src/模型.cs",
+            r#"
+namespace Acme.Models;
+public interface IWorker { void Run(); }
+public delegate int Transform(int value);
+public record Person(string Name);
+public readonly record struct Point(int X, int Y);
+public struct Counter { public int Value; }
+public enum State { Ready, Done }
+/// <summary>A worker.</summary>
+[Obsolete("legacy")]
+public partial class Worker : IWorker {
+    /// <summary>Limits.</summary>
+    public const int Min = 1, Max = 10;
+    public event Action Started, Stopped;
+    public event Action Changed { add { Register(value); } remove { Unregister(value); } }
+    public string Name { get; init; } = "测试";
+    public int Count => Compute();
+    public int this[int index] => index;
+    public Worker(int count) { Init(count); }
+    ~Worker() { Cleanup(); }
+    public static Worker operator +(Worker a, Worker b) => a;
+    public static implicit operator int(Worker value) => value.Count;
+    void IWorker.Run() { Tick(); }
+    /// <summary>Runs work.</summary>
+    [Obsolete("old")]
+    public async Task<T> RunAsync<T>(T value) where T : class {
+        int Local(int n) => n + 1;
+        var ignored = Local(1);
+        return await Send(value);
+    }
+}
+"#,
+        );
+        let mut parser = super::Parser::new();
+        parser
+            .set_language(&super::grammar(FileFormat::CSharp, false).expect("grammar"))
+            .expect("compatible grammar");
+        let tree = parser.parse(&source.text, None).expect("C# parses");
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("C# extraction");
+        for (name, kind) in [
+            ("Acme.Models", SymbolType::Module),
+            ("IWorker", SymbolType::Interface),
+            ("Transform", SymbolType::Alias),
+            ("Person", SymbolType::Class),
+            ("Point", SymbolType::Class),
+            ("Counter", SymbolType::Class),
+            ("State", SymbolType::Enum),
+            ("Ready", SymbolType::Value),
+            ("Worker", SymbolType::Class),
+            ("Min", SymbolType::Value),
+            ("Max", SymbolType::Value),
+            ("Started", SymbolType::Value),
+            ("Stopped", SymbolType::Value),
+            ("Changed", SymbolType::Value),
+            ("Name", SymbolType::Value),
+            ("Count", SymbolType::Value),
+            ("this[]", SymbolType::Value),
+            ("~Worker", SymbolType::Function),
+            ("operator +", SymbolType::Function),
+            ("operator int", SymbolType::Function),
+            ("IWorker.Run", SymbolType::Function),
+            ("RunAsync", SymbolType::Function),
+            ("Local", SymbolType::Function),
+        ] {
+            let entity = named(&fragments, name);
+            let Some(EntityMetadata::Code(metadata)) = test_metadata(entity) else {
+                panic!("metadata")
+            };
+            assert_eq!(metadata.language, Some(CodeLanguage::CSharp), "{name}");
+            assert_eq!(metadata.symbol_type, Some(kind), "{name}");
+            assert_source_backed(&source, entity);
+        }
+        for (name, expected) in [
+            ("Max", "public const int Max = 10"),
+            ("Stopped", "public event Action Stopped"),
+            ("Changed", "public event Action Changed"),
+            ("Name", "public string Name"),
+            ("Count", "public int Count"),
+            ("this[]", "public int this[int index]"),
+            (
+                "RunAsync",
+                "public async Task<T> RunAsync<T>(T value) where T : class",
+            ),
+        ] {
+            assert_eq!(signature(&fragments, name), expected);
+        }
+        for (name, scope, doc) in [
+            ("Worker", "Acme.Models", "<summary>A worker.</summary>"),
+            ("Max", "Acme.Models::Worker", "<summary>Limits.</summary>"),
+            (
+                "RunAsync",
+                "Acme.Models::Worker",
+                "<summary>Runs work.</summary>",
+            ),
+        ] {
+            let Some(EntityMetadata::Code(metadata)) = test_metadata(named(&fragments, name))
+            else {
+                panic!("metadata")
+            };
+            assert_eq!(metadata.scope.as_deref(), Some(scope));
+            assert_eq!(metadata.documentation.as_deref(), Some(doc));
+        }
+        let Some(EntityMetadata::Code(local)) = test_metadata(named(&fragments, "Local")) else {
+            panic!("metadata")
+        };
+        assert_eq!(
+            local.scope.as_deref(),
+            Some("Acme.Models::Worker::RunAsync")
+        );
+        assert_eq!(local.arity, Some(1));
+        assert!(!fragments.iter().any(|entity| matches!(test_metadata(entity),
+            Some(EntityMetadata::Code(metadata)) if metadata.symbol_name.as_deref() == Some("ignored"))));
+        let json = serde_json::to_string(&CodeLanguage::CSharp).expect("serialize language");
+        assert_eq!(json, "\"csharp\"");
+        assert_eq!(
+            serde_json::from_str::<CodeLanguage>(&json).expect("deserialize language"),
+            CodeLanguage::CSharp
+        );
+        assert_eq!(CodeLanguage::CSharp.as_str(), "csharp");
+    }
+
+    #[test]
+    fn csharp_preserves_nested_namespaces_and_script_statements() {
+        for path in ["src/Program.cs", "scripts/run.csx"] {
+            let formats = FileFormat::from_file_name(
+                std::path::Path::new(path).file_name().expect("file name"),
+            );
+            assert!(formats.contains(&FileFormat::CSharp));
+            let source = test_source(
+                FileFormat::CSharp,
+                path,
+                "using System;\nConsole.WriteLine(\"before\");\nint Twice(int n) => n * 2;\nConsole.WriteLine(Twice(2));\nnamespace A { namespace B { class C { public void Run() {} } } }",
+            );
+            let fragments = extract(&source, ChunkOptions::default()).expect("script extraction");
+            for fragment in &fragments {
+                assert_source_backed(&source, fragment);
+            }
+            for statement in [
+                "using System;",
+                "Console.WriteLine(\"before\");",
+                "Console.WriteLine(Twice(2));",
+            ] {
+                assert!(
+                    fragments
+                        .iter()
+                        .any(|fragment| matches!(test_content(fragment), Content::Code(text) if text.contains(statement))),
+                    "{statement}"
+                );
+            }
+            let Some(EntityMetadata::Code(method)) = test_metadata(named(&fragments, "Run")) else {
+                panic!("metadata")
+            };
+            assert_eq!(method.scope.as_deref(), Some("A::B::C"));
+        }
+        let source = test_source(
+            FileFormat::CSharp,
+            "only.csx",
+            "Console.WriteLine(\"only\");",
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("fallback");
+        assert_eq!(test_content(&fragments[0]), Content::Code(source.text));
+    }
+
+    #[test]
+    fn csharp_counts_parameters_and_preserves_chunk_ranges() {
+        let source = test_source(
+            FileFormat::CSharp,
+            "src/Worker.cs",
+            concat!(
+                "namespace App {\r\n",
+                "public class Worker {\r\n",
+                "public Worker(int count) {}\r\n",
+                "public void Run(int first, /* explanation */ params string[] rest) {\r\n",
+                "  Console.WriteLine(\"你好世界\");\r\n",
+                "  Console.WriteLine(\"more searchable content for small chunks\");\r\n",
+                "}\r\n",
+                "public void Empty() {}\r\n",
+                "}\r\n}"
+            ),
+        );
+        let options = ChunkOptions {
+            max_chunk_chars: Some(64),
+            chunk_overlap_chars: Some(8),
+        };
+        let plain = super::extract_for_indexing(&source, options, false).expect("without graph");
+        let graph = super::extract_for_indexing(&source, options, true).expect("with graph");
+        assert!(plain.graph.is_none());
+        assert!(graph.graph.is_some());
+        assert_eq!(plain.fragments.len(), graph.fragments.len());
+        for (left, right) in plain.fragments.iter().zip(&graph.fragments) {
+            assert_source_backed(&source, left);
+            assert_eq!(left.content, right.content);
+            assert_eq!(left.source_range, right.source_range);
+            assert_eq!(left.fragments, right.fragments);
+            assert_eq!(
+                graph_facts_cleared(test_metadata(left)),
+                graph_facts_cleared(test_metadata(right)),
+                "retrieval metadata"
+            );
+        }
+        for (name, arity) in [("Run", 2), ("Empty", 0)] {
+            let Some(EntityMetadata::Code(metadata)) = test_metadata(named(&plain.fragments, name))
+            else {
+                panic!("metadata")
+            };
+            assert_eq!(metadata.arity, Some(arity));
+        }
+        assert!(plain.fragments.iter().any(|entity| matches!(test_metadata(entity),
+            Some(EntityMetadata::Code(metadata)) if metadata.symbol_name.as_deref() == Some("Worker")
+                && metadata.symbol_type == Some(SymbolType::Function) && metadata.arity == Some(1))));
+        assert!(named(&plain.fragments, "Run").fragments.len() > 1);
+    }
+
+    #[test]
+    fn csharp_calls_belong_to_their_members() {
+        use crate::domain::GraphEdgeKind;
+        let source = "namespace App; class Worker { int first = Seed(), second = Other(); public int Value => Compute(); public void Run() { Log.Write(); Tick(); void Local() { Nested(); } } }";
+        let mut parser = super::Parser::new();
+        parser
+            .set_language(&super::grammar(FileFormat::CSharp, false).expect("grammar"))
+            .expect("grammar loads");
+        let tree = parser.parse(source, None).expect("parses");
+        let mut entities = Vec::new();
+        let mut context = super::WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            super::resolve_adapter(FileFormat::CSharp).expect("adapter"),
+            source.as_bytes(),
+            &[],
+            &mut entities,
+            &mut context,
+            FileFormat::CSharp,
+        );
+        let calls: Vec<_> = context
+            .name_edges()
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| {
+                (
+                    entities[edge.owner_index].name.as_deref().expect("owner"),
+                    edge.ref_name.as_str(),
+                    edge.receiver_name.as_deref(),
+                )
+            })
+            .collect();
+        assert!(context.resolved_edges().iter().any(|edge| {
+            entities[edge.source_index].name.as_deref() == Some("App")
+                && entities[edge.target_index].name.as_deref() == Some("Worker")
+        }));
+        assert_eq!(
+            calls,
+            vec![
+                ("first", "Seed", None),
+                ("second", "Other", None),
+                ("Value", "Compute", None),
+                ("Run", "Write", Some("Log")),
+                ("Run", "Tick", None),
+                ("Local", "Nested", None)
+            ]
+        );
     }
 
     fn assert_source_backed(source: &super::TextSource, entity: &super::ExtractedEntity) {
