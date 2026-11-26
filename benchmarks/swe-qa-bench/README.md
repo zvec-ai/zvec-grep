@@ -158,6 +158,11 @@ another model. The independent `embedding` input
 defaults to `local`, using `local/potion-code-16m-v2`; select `remote` to use
 `qwen/qwen3.7-text-embedding`, matching the Retrieval-only workflow.
 
+When rescoring saved answers with `judge`, select their execution model, for
+example `--model glm-5.2` for older GLM runs. The judge checks each recorded
+model before sending requests. For older trials without a model field, use
+the model from the original run configuration.
+
 The `repro-3` scope runs 3 tasks × 2 profiles × 5 trials = 30 trials. Its fixed
 tasks were selected from [run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943)
 for small reproduction and iteration runs. Each range below covers the five

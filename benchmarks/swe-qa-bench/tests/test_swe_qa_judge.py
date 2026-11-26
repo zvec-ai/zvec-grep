@@ -10,7 +10,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from swe_qa_fixtures import (
     JUDGE_GENERATION_METADATA,
@@ -39,7 +39,9 @@ from zg_bench.swe_qa.judge import judge_pairs
 
 
 class JudgeTests(unittest.TestCase):
-    def _write_pair_and_reference(self, root: Path) -> tuple[Path, Path]:
+    def _write_pair_and_reference(
+        self, root: Path, *, model: str | None = None
+    ) -> tuple[Path, Path]:
         pairs_root = root / "pairs"
         baseline_metrics = [
             (100, 20, 10, 10.0, 1.0),
@@ -59,6 +61,7 @@ class JudgeTests(unittest.TestCase):
                 {
                     "trial_index": index,
                     "trial_name": f"reflex-6-{profile}-{index}",
+                    "model": model,
                     "answer": f"{profile} candidate {index}",
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
@@ -409,10 +412,32 @@ class JudgeTests(unittest.TestCase):
     def test_judge_cli_defaults_to_qwen4_max(self) -> None:
         self._check_qwen_cli_report("qwen4-max", [])
 
+    def test_self_judge_checks_recorded_models_before_any_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pairs_root, references = self._write_pair_and_reference(
+                root, model="qwen4-max"
+            )
+            pair_path = pairs_root / "pair-reflex-6.json"
+            pair = json.loads(pair_path.read_text())
+            trial = pair["profiles"]["zvec-grep"]["trials"][-1]
+            trial["model"] = "custom-openai/glm-5.2"
+            _write_json(pair_path, pair)
+            completion = Mock()
+            with self.assertRaisesRegex(SweQaError, "zvec-grep trial 3.*--model glm-5.2"):
+                judge_pairs(
+                    pairs_root=pairs_root,
+                    references_path=references,
+                    output_dir=root / "report",
+                    expected=["reflex-6"],
+                    completion_fn=completion,
+                )
+            completion.assert_not_called()
+
     def _check_qwen_cli_report(self, model: str, model_args: list[str]) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            pairs_root, references = self._write_pair_and_reference(root)
+            pairs_root, references = self._write_pair_and_reference(root, model=model)
             requests: list[dict[str, Any]] = []
 
             def completion(**kwargs: Any) -> dict[str, Any]:

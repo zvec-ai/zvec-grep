@@ -82,6 +82,8 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 
 `workflow_dispatch` 默认选择 `repro-3`（3 题），也可选择 `all-full`（20 题）或 `smoke`（5 题）。`candidate_ref` 默认是 `main`，指定要单独检出并打包的 Rust 源码分支、标签或提交；benchmark harness 与候选源码分开。`model` 默认使用 `qwen4-max` 执行和自评，也可选择 `glm-5.2` 或 `qwen3.8-max`。独立的 `embedding` 输入默认是 `local`，对应 `local/potion-code-16m-v2`；选择 `remote` 时使用与 Retrieval-only 工作流一致的 `qwen/qwen3.7-text-embedding`。
 
+用 `judge` 重评已保存的答案时，选择生成答案的模型，例如旧 GLM 运行使用 `--model glm-5.2`。评分前会核对每条 trial 记录的模型。旧记录缺少模型字段时，请按原运行配置选择。
+
 `repro-3` 固定运行 3 题 × 2 个 profile × 5 次 = 30 个 trial，供小规模复现与迭代。任务按[运行 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943) 中的调查路径和评分波动选取。下表范围均来自该轮最终成功的五次测试：
 
 | 相对波动 | 任务 | Baseline 评分 / 工具次数 | zvec-grep 评分 / 工具次数 |

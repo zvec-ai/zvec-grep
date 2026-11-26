@@ -300,6 +300,11 @@ test("e2e is skipped by default and only explicit manual dispatch can enable it"
   x.context.eventName = "workflow_dispatch";
   await prepare(x);
   assert.equal(x.outputs.run_e2e, "true");
+  const queuedComment = x.calls.find(([name]) => name === "update")[1].body;
+  assert.match(
+    queuedComment,
+    /\| e2e \| Queued \| SWE-QA20 with OpenCode using the workflow default model for execution and self-judging/,
+  );
   const result = resultComment({
     context: x.context,
     request,
