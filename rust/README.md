@@ -118,16 +118,51 @@ The option is rejected outside `--index`. For automatic indexing and
 refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Transformers/ORT clamps
 positive integers to its supported range. Explicit zero is rejected for every
 backend. Explicit CLI/API index settings take precedence over this environment
-variable, followed by the legacy
-`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
+variable, followed by `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` as the llama.cpp
+indexing fallback, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
 do not configure a separate query worker and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
-For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
-indexing and queries for the same model, cache and device:
+For llama.cpp, C is the concurrent context limit on CPU, Metal and CUDA:
+
+- Direct mode sizes the context pool from the operation's C (default 1).
+  Pools are local to that process; independent Direct processes do not share resources.
+- Each operation admits one embedding batch at a time, independently of C. That
+  batch can use up to C contexts internally. Separate operations have independent
+  batch admission and can execute concurrently through the shared context pool;
+  this does not serialize all Server requests.
+- Server startup captures `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (default 1) as a
+  hard limit on executing llama.cpp contexts across all models and devices in
+  that Server. The general index environment and client C cannot enlarge this
+  capacity. Index requests retain the CLI/API > index environment > llama.cpp
+  environment > default precedence above, then are capped to the Server limit.
+  The effective value is reported through progress/logging. Each operation's
+  batches share its own C
+  allowance; different C values reuse the same model/device runtime. Omitted
+  index C uses the general index default when set, otherwise the configured
+  llama.cpp capacity. Query concurrency keeps its own default.
+- `ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT` sets **CPU threads per context** in both
+  Direct and Server mode, for indexing and queries. The default is
+  `max(1, floor(available_logical_cpus / 2 / pool_capacity))`.
+  In Server mode, capacity is the startup limit, not an individual request's C;
+  requests never change thread configuration. GPU contexts always use one native
+  CPU helper thread, including when this CPU override is set. Invalid environment
+  values warn and use defaults. Restart the Server to change either setting.
+- The CPU compute budget is capacity times threads per context. With more contexts
+  than half the available CPUs, the one-thread minimum exceeds that half-CPU target.
+  This is not a limit on all process threads or an ORT-style shared compute pool.
+  Resident weights/KV across models are not bounded by the execution-slot limit.
+- Contexts share model weights, are created on demand, and release native buffers
+  after 30 idle seconds. Qwen KV capacity follows each job's token requirements,
+  preserving the catalog's maximum input length.
+- CPU, Metal and CUDA process one complete input per native job. An embedding
+  batch dispatches its inputs across the available contexts. Cancellation/error
+  paths drain submitted work before returning its slots.
+
+Transformers/ORT shares a bounded runtime between indexing and queries for the
+same model, cache and device:
 
 - C controls the session count on both CPU and CUDA, defaulting to one and
   capped to available hardware concurrency. Direct indexing uses the explicit

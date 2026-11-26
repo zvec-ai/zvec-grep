@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "beir20",
-  "model": "local/potion-multilingual-128m",
+  "model": "local/bekko-256-int8",
   "selection": "Original ten SciFact test claims plus four NFCorpus, three ArguAna and three FiQA original test queries, retaining original qrels and full corpora",
   "datasets": [
     {

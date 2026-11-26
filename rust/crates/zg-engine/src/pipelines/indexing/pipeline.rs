@@ -3218,6 +3218,7 @@ mod tests {
 
     struct ConcurrentModel {
         info: EmbeddingModelInfo,
+        batch_limit: Option<usize>,
         prepare_calls: AtomicUsize,
         prepare_failures: AtomicUsize,
         calls: AtomicUsize,
@@ -3292,6 +3293,7 @@ mod tests {
                     None,
                 )
                 .expect("valid embedding metadata"),
+                batch_limit: None,
                 prepare_calls: AtomicUsize::new(0),
                 prepare_failures: AtomicUsize::new(0),
                 calls: AtomicUsize::new(0),
@@ -3303,6 +3305,42 @@ mod tests {
                 rejected_text: None,
             }
         }
+    }
+
+    #[test]
+    fn index_batch_policy_uses_backend_admission() {
+        let mut model = ConcurrentModel::new();
+        model.batch_limit = Some(2);
+        for requested in [None, Some(1), Some(8), Some(16)] {
+            let policy = resolve_index_batch_policy(requested, &model).expect("batch policy");
+            assert_eq!(policy.initial, 2);
+            assert_eq!(policy.maximum, 2);
+        }
+        assert!(resolve_index_batch_policy(Some(0), &model).is_err());
+
+        model.batch_limit = None;
+        let explicit = resolve_index_batch_policy(Some(8), &model).expect("explicit admission");
+        assert_eq!(explicit.initial, 8);
+        assert_eq!(explicit.maximum, 8);
+        let automatic = resolve_index_batch_policy(None, &model).expect("default admission");
+        assert_eq!(automatic.initial, 2);
+        assert_eq!(automatic.maximum, 2);
+    }
+
+    #[test]
+    fn llama_index_batch_policy_keeps_one_batch_with_multiple_contexts() {
+        let manager = crate::models::ModelRuntimeManager::new();
+        let lease = manager
+            .acquire(crate::models::ModelRuntimeRequest::new(
+                "local/embeddinggemma-300m",
+                crate::domain::model::ModelConfig::default(),
+                Some(8),
+            ))
+            .expect("metadata only");
+        let policy = resolve_index_batch_policy(Some(8), &lease).expect("batch policy");
+        assert_eq!(policy.initial, 1);
+        assert_eq!(policy.maximum, 1);
+        assert_eq!(lease.execution_concurrency(), 8);
     }
 
     impl DrainingFailureModel {
@@ -3374,6 +3412,10 @@ mod tests {
                 initial: 2,
                 maximum: 2,
             }
+        }
+
+        fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+            self.batch_limit.or(requested)
         }
 
         async fn prepare(

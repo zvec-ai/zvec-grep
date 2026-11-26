@@ -8,7 +8,10 @@ use super::{
 use crate::domain::model::ModelConfig;
 use crate::models::{
     catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
-    runtime::ModelComputeRuntime,
+    runtime::{
+        ModelComputeRuntime,
+        llama_config::{LlamaResources, LlamaSettings},
+    },
     spi::{EmbeddingModel, LayoutModel, LayoutModelConfig, ModelError},
 };
 
@@ -42,6 +45,7 @@ pub fn create_embedding_model(
     options: Option<ModelConfig>,
     compute_runtime: ModelComputeRuntime,
     session_count: usize,
+    llama: Option<Arc<LlamaResources>>,
 ) -> Result<Arc<dyn EmbeddingModel>, ModelError> {
     let options = options.unwrap_or_default();
     if reference.starts_with("http/") {
@@ -77,6 +81,7 @@ pub fn create_embedding_model(
             config,
             options,
             compute_runtime,
+            llama.unwrap_or_else(|| LlamaSettings::capture().resources(1)),
         ))),
     }
 }
@@ -100,6 +105,7 @@ mod tests {
                 options,
                 crate::models::runtime::ModelComputeRuntime::shared(),
                 1,
+                None,
             )
             .expect("catalog backend should construct without loading model assets");
             assert_eq!(model.info().model().reference(), entry.reference());
@@ -111,6 +117,7 @@ mod tests {
             None,
             crate::models::runtime::ModelComputeRuntime::shared(),
             1,
+            None,
         )
         .err()
         .expect("unknown model should fail catalog lookup");
