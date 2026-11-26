@@ -509,8 +509,9 @@ pub mod result {
         pub outline: Option<String>,
         pub content_role: Option<ContextContentRole>,
         pub status: ContextItemStatus,
-        /// Indexed code hits carry their rule-ranking score. Other indexed hits carry their
-        /// raw reciprocal rank fusion (RRF) score. Use `rank` to order mixed results.
+        /// Indexed hits carry their raw reciprocal rank fusion (RRF) score by default.
+        /// With rule ranking enabled, code hits carry their rule-ranking score.
+        /// Use `rank` to order mixed results.
         pub score: Option<f64>,
         pub matched_by: MatchedBy,
         pub metadata: Option<EntityMetadata>,

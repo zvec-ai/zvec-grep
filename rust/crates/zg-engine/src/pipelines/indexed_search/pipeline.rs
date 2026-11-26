@@ -46,6 +46,7 @@ pub(crate) struct SearchPlan {
     pub limit: Option<usize>,
     pub trace: bool,
     pub prefer_symbol: bool,
+    pub rule_ranking: bool,
     pub filter: QueryFilter,
 }
 
@@ -258,25 +259,23 @@ async fn search_with_stage_trace(
     }
 
     let load_started = Instant::now();
-    // Load past the cutoff so any recalled code definition can fill a visible code position.
-    let hits = load_candidates(fused, limit, plan.trace, storage)?;
+    let mut hits = load_candidates(fused, limit, &plan, storage)?;
     let load_duration = load_started.elapsed();
     if let Some(observation) = observation.as_mut() {
         observation.loaded(&hits);
     }
     let ranking_started = Instant::now();
-    let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
-        .iter()
-        .map(|_| 1.0 / (RRF_K + 1.0))
-        .sum();
-    let hits = super::ranking::rank(
-        hits,
-        &routes,
-        &plan.filter,
-        maximum_rrf,
-        limit,
-        observation.as_mut(),
-    );
+    if plan.rule_ranking {
+        let maximum_rrf = maximum_rrf_score(&routes, filter.as_ref(), plan.prefer_symbol);
+        hits = super::ranking::rank(
+            hits,
+            &routes,
+            &plan.filter,
+            maximum_rrf,
+            limit,
+            observation.as_mut(),
+        );
+    }
     let ranking_duration = ranking_started.elapsed();
     let stage_trace = observation.map(|observation| observation.finish(&hits));
 
@@ -563,6 +562,17 @@ fn add_or_update_recall(recall: &mut Vec<SearchRecallTrace>, next: SearchRecallT
     }
 }
 
+fn maximum_rrf_score(
+    routes: &[ResolvedSearchRoute],
+    filter: Option<&StorageSearchFilter>,
+    prefer_symbol: bool,
+) -> f64 {
+    build_recall_routes(routes, filter, prefer_symbol)
+        .iter()
+        .map(|_| 1.0 / (RRF_K + 1.0))
+        .sum()
+}
+
 fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
     let mut fused = candidates
         .into_values()
@@ -592,24 +602,33 @@ fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
 fn load_candidates(
     candidates: Vec<Candidate>,
     limit: usize,
-    trace: bool,
+    plan: &SearchPlan,
     storage: &dyn SearchStorage,
 ) -> Result<Vec<SearchHit>, EngineError> {
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut seen = HashSet::new();
-    let hits = candidates
-        .iter()
-        .flat_map(|candidate| &candidate.evidence)
-        .filter(|evidence| seen.insert(evidence.hit.document_id.clone()))
-        .map(|evidence| evidence.hit.clone())
-        .collect::<Vec<_>>();
-    let mut data = storage.load_search_hits(&hits)?;
-    let mut loaded = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if let Some(hit) = candidate_to_hit(candidate, limit, trace, &mut data)? {
-            loaded.push(hit);
+    let target = if plan.rule_ranking {
+        // Load past the cutoff so any recalled code hit can fill a visible code position.
+        candidates.len()
+    } else {
+        limit.min(candidates.len())
+    };
+    let mut loaded = Vec::with_capacity(target);
+    let mut candidates = candidates.into_iter();
+    // Load another batch only if an index update removed hits after recall.
+    while loaded.len() < target && !candidates.as_slice().is_empty() {
+        let count = (target - loaded.len()).min(candidates.len());
+        let mut seen = HashSet::new();
+        let hits = candidates.as_slice()[..count]
+            .iter()
+            .flat_map(|candidate| &candidate.evidence)
+            .filter(|evidence| seen.insert(evidence.hit.document_id.clone()))
+            .map(|evidence| evidence.hit.clone())
+            .collect::<Vec<_>>();
+        let mut data = storage.load_search_hits(&hits)?;
+        for candidate in candidates.by_ref().take(count) {
+            let rank = loaded.len() + 1;
+            if let Some(hit) = candidate_to_hit(candidate, rank, limit, plan.trace, &mut data)? {
+                loaded.push(hit);
+            }
         }
     }
     Ok(loaded)
@@ -617,6 +636,7 @@ fn load_candidates(
 
 fn candidate_to_hit(
     candidate: Candidate,
+    rank: usize,
     limit: usize,
     trace: bool,
     data: &mut StoredSearchData,
@@ -669,7 +689,7 @@ fn candidate_to_hit(
         entity: stored.entity,
         file: stored.file,
         evidence: loaded_evidence,
-        rank: candidate.rank,
+        rank,
         score: candidate.score,
         matched_by,
         trace: trace.then_some(SearchHitTrace {
@@ -681,7 +701,7 @@ fn candidate_to_hit(
                 forced: false,
             },
             final_selection: SearchFinalTrace {
-                returned_by_limit: candidate.rank <= limit,
+                returned_by_limit: rank <= limit,
                 cutoff_rank: limit,
             },
         }),
@@ -1196,6 +1216,7 @@ mod tests {
             query: "Vitest".to_owned(),
         }]);
         request.limit = Some(1);
+        request.rule_ranking = true;
         let root = tempfile::tempdir().expect("workspace");
         let result = search_workspace_index(root.path(), request, &storage, &[])
             .await
@@ -1422,6 +1443,7 @@ mod tests {
                 );
                 request.limit = Some(limit);
                 request.prefer_symbol = prefer_symbol;
+                request.rule_ranking = true;
                 let off = super::search_with_stage_trace(
                     Path::new("/workspace"),
                     request.clone(),
@@ -1576,6 +1598,7 @@ mod tests {
             },
         ]);
         plan.limit = Some(1);
+        plan.rule_ranking = true;
         plan.filter.excluded_formats = vec![FileFormat::Jpeg];
 
         let result = search_workspace_index(
@@ -1636,34 +1659,50 @@ mod tests {
         let file = file(1, "tests/guide.md", 100);
         let removed = entity(&file, "removed section", Content::Text);
         let guide = entity(&file, "guide section", Content::Text);
+        let last = entity(&file, "last section", Content::Text);
+        let guide_id = guide.entity.id().clone();
         let mut storage = pushdown_storage();
         storage.fts.insert(
             "guide".into(),
             vec![
-                hit(&removed, 0, StorageSearchPath::Fts, 2.0),
-                hit(&guide, 0, StorageSearchPath::Fts, 1.0),
+                hit(&removed, 0, StorageSearchPath::Fts, 3.0),
+                hit(&guide, 0, StorageSearchPath::Fts, 2.0),
+                hit(&last, 0, StorageSearchPath::Fts, 1.0),
             ],
         );
-        storage
-            .entities
-            .insert(guide.entity.id().as_str().into(), guide);
+        for entry in [guide, last] {
+            storage
+                .entities
+                .insert(entry.entity.id().as_str().into(), entry);
+        }
         let mut request = plan(vec![SearchRoute {
             mode: SearchRouteMode::Fts,
             query: "guide".into(),
         }]);
         request.limit = Some(1);
-        let result = search_workspace_index(Path::new("/workspace"), request, &storage, &[])
-            .await
-            .expect("search");
-        let [hit] = result.hits.as_slice() else {
-            panic!("expected the surviving document");
-        };
-        let trace = hit.trace.as_ref().expect("trace");
-        assert_eq!((hit.rank, trace.fusion.rank), (1, 2));
-        assert_eq!(hit.score.to_bits(), trace.fusion.score.to_bits());
-        assert!(trace.ranking.is_none());
-        assert!(trace.final_selection.returned_by_limit);
-        assert_eq!(trace.final_selection.cutoff_rank, 1);
+        for (rule_ranking, batch_sizes) in [(false, &[1, 1][..]), (true, &[3][..])] {
+            request.rule_ranking = rule_ranking;
+            let result =
+                search_workspace_index(Path::new("/workspace"), request.clone(), &storage, &[])
+                    .await
+                    .expect("search");
+            let [hit] = result.hits.as_slice() else {
+                panic!("expected the surviving document");
+            };
+            let trace = hit.trace.as_ref().expect("trace");
+            assert_eq!(hit.entity.id(), &guide_id);
+            assert_eq!((hit.rank, trace.fusion.rank), (1, 2));
+            assert_eq!(hit.score.to_bits(), trace.fusion.score.to_bits());
+            assert!(trace.ranking.is_none());
+            assert!(trace.final_selection.returned_by_limit);
+            assert_eq!(trace.final_selection.cutoff_rank, 1);
+            let mut batches = storage.load_batches.lock().expect("load batches");
+            let sizes = batches
+                .drain(..)
+                .map(|batch| batch.len())
+                .collect::<Vec<_>>();
+            assert_eq!(sizes, batch_sizes);
+        }
     }
 
     #[tokio::test]
@@ -1733,7 +1772,7 @@ mod tests {
                 rank: 1,
             };
             let result =
-                super::candidate_to_hit(candidate, 1, false, &mut data).expect("partial load");
+                super::candidate_to_hit(candidate, 1, 1, false, &mut data).expect("partial load");
             if keep_fragment {
                 let result = result.expect("surviving evidence");
                 assert_eq!(result.evidence.len(), 1);
@@ -2590,6 +2629,7 @@ mod tests {
             limit: Some(10),
             trace: true,
             prefer_symbol: false,
+            rule_ranking: false,
             filter: QueryFilter::default(),
         }
     }

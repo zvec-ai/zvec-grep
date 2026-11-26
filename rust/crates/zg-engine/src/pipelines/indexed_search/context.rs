@@ -156,6 +156,7 @@ pub(crate) async fn context_from_index(
         request.groups.clone()
     };
     let limit = context_group_limit(options.limit, groups.len());
+    let rule_ranking = std::env::var("ZVEC_GREP_ENABLE_RULE_RANKING").as_deref() == Ok("1");
     let mut searches = Vec::with_capacity(groups.len());
     for group in &groups {
         searches.push(
@@ -166,6 +167,7 @@ pub(crate) async fn context_from_index(
                     limit: Some(limit),
                     trace: options.trace,
                     prefer_symbol: options.prefer_symbol,
+                    rule_ranking,
                     filter: options.filter.clone(),
                 },
                 storage,

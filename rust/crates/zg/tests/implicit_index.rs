@@ -725,6 +725,84 @@ fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
     assert!(String::from_utf8_lossy(&stale.stderr).contains("status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle (0/1)\n"), "{}", String::from_utf8_lossy(&stale.stderr));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn indexed_search_rule_ranking_requires_opt_in() {
+    use zg_engine::api::context::result::SearchHitTrace;
+
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.path().join("library.ts"),
+        "function rankneedle() { return 1; }\nfunction wrapper() { return rankneedle(); }\n",
+    )
+    .expect("two matching definitions in one file");
+    fs::write(
+        fixture.root.path().join("client.ts"),
+        "function client() { return rankneedle(); }\n",
+    )
+    .expect("matching definition in another file");
+    let embedding = GatedEmbedding::start().await;
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &embedding.endpoint,
+        "--allow-remote",
+        "--api-key",
+        "local-test-key",
+    ]);
+    let search = |setting: Option<&str>| {
+        let mut command = fixture.command(&[
+            "--mode",
+            "direct",
+            "--fts",
+            "rankneedle",
+            "--refresh",
+            "off",
+            "--preview",
+            "short",
+            "--trace",
+            "--color",
+            "never",
+        ]);
+        if let Some(value) = setting {
+            command.env("ZVEC_GREP_ENABLE_RULE_RANKING", value);
+        }
+        String::from_utf8(success(command.output().expect("search")).stdout).expect("UTF-8 output")
+    };
+    let traces = |output: &str| {
+        output
+            .lines()
+            .filter_map(|line| line.strip_prefix("trace: "))
+            .map(|json| serde_json::from_str::<SearchHitTrace>(json).expect("search trace"))
+            .collect::<Vec<_>>()
+    };
+    let default = search(None);
+    assert_eq!(default, search(Some("0")));
+    assert_eq!(default, search(Some("true")));
+    let fused = traces(&default);
+    assert!(fused.len() >= 3, "{default}");
+    let scores: Vec<_> = default
+        .lines()
+        .filter_map(|line| line.strip_prefix("score: "))
+        .collect();
+    for (i, trace) in fused.iter().enumerate() {
+        assert!(trace.ranking.is_none());
+        assert_eq!(trace.fusion.rank, i + 1);
+        assert_eq!(scores[i], format!("{:.4}", trace.fusion.score));
+    }
+
+    let ranked = traces(&search(Some("1")))
+        .into_iter()
+        .map(|trace| trace.ranking.expect("enabled rule ranking"))
+        .collect::<Vec<_>>();
+    assert_eq!(ranked.len(), fused.len());
+    assert!(ranked.iter().any(|hit| hit.symbol_bonus > 0.0));
+    assert!(ranked.iter().any(|hit| hit.diversity_factor < 1.0));
+}
+
 #[test]
 fn noninteractive_missing_index_requires_explicit_creation() {
     let fixture = Fixture::new();

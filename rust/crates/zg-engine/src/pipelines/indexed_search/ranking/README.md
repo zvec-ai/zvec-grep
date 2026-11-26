@@ -1,13 +1,15 @@
 # Rule ranking
 
-The shared indexed-search engine uses RRF fusion to assign result positions for
-direct, server, and MCP queries. With `--prefer-symbol`, hits from an exact-symbol
-recall route win RRF ties, then entity ID breaks any remaining ties.
-Non-code entities keep their fusion positions
-among loaded hits and their raw RRF scores. Positions occupied by code within
-the result limit are filled by ranking all recalled, loaded `ContentKind::Code`
-entities, including those below the cutoff and those without symbol metadata.
-The engine skips rule ranking when the visible results contain no code.
+Indexed search uses reciprocal rank fusion (RRF) order and scores by default.
+With `--prefer-symbol`, hits from an exact-symbol recall route win RRF ties, then
+entity ID breaks any remaining ties.
+
+Set `ZVEC_GREP_ENABLE_RULE_RANKING=1` on the direct CLI process or on the server
+handling CLI and MCP queries. Only that value enables rule ranking. Non-code
+entities keep their fusion positions among loaded hits and their raw RRF scores.
+The engine fills visible code positions by ranking all recalled, loaded
+`ContentKind::Code` entities, including those below the cutoff and those without
+symbol metadata. Rule ranking runs when at least one visible position holds code.
 
 The policy normalizes RRF by the maximum possible score for the enabled routes,
 adds bounded symbol/definition bonuses, and applies the minimum applicable path
@@ -48,21 +50,21 @@ ranges cannot supply support. The support term uses bounded base scores and
 the same path prior; it does not sum every fragment in a large file. It is an
 extra term after the static bonus cap.
 
-For code hits, `score` is the rule selection score. In mixed results, use
-`rank` for order because code and non-code scores use different scales.
-Trace preserves the original `fusion` rank and score for all hits. For code hits,
-`ranking` records the policy identifier, query features, name match/bonus,
-definition bonus, path roles/exemptions, static score, positive `path_bonus`,
-`file_support_bonus`, `file_support_count`, selected file count, diversity factor,
-and group-local final rank.
+When rule ranking is enabled, `score` is the rule selection score for code hits.
+Use `rank` for order in mixed results because code and non-code scores use
+different scales. The trace preserves the original `fusion` rank and score for
+all hits. For ranked code hits, `ranking` records the policy identifier, query
+features, name match/bonus, definition bonus, path roles/exemptions, static score,
+positive `path_bonus`, `file_support_bonus`, `file_support_count`, selected file
+count, diversity factor, and group-local final rank.
 `path_overrides` lists roles exempted by query/scope, including those not present
 on a particular hit. Without trace, detailed explanation strings are not built.
 Serialized traces may omit `ranking`. Within a ranking trace, omitted
 `path_bonus`, `file_support_bonus`, and `file_support_count` fields default to zero.
 
-The loader batches the whole candidate pool, including entity content, before
-ranking and selection. Monitor both `load_results` and `ranking` timings to
-account for candidate loading and scoring costs. Ranking uses stored metadata
+With rule ranking enabled, the loader batches the whole candidate pool,
+including entity content, before ranking and selection. The `load_results`
+and `ranking` timings cover candidate loading and scoring. Ranking uses stored metadata
 without scanning source files or widening recall.
 
 The tests exercise definition promotion before the result limit, symbol roles,

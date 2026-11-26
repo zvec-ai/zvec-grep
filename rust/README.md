@@ -64,6 +64,12 @@ positional query groups should switch to repeated `--hybrid` flags. Explicit
 `--hybrid`, `--fts`, and `--vector` queries stay separate. Direct and Server modes
 use the same parsing; managed `--rg` retains its pattern/path syntax.
 
+Indexed searches return results in reciprocal rank fusion (RRF) order within
+each query group by default. Set `ZVEC_GREP_ENABLE_RULE_RANKING=1` to enable
+static scoring rules and the same-file penalty for code hits.
+For direct mode, set it on the `zg` command. For server and MCP searches,
+restart the server with the variable set. Existing indexes work in either mode.
+
 Multi-query indexed output labels each nonempty group with its original query
 and position, for example `-- query 2/3: socket timeout --`. Colored output uses
 a dim rule, a magenta label, and a bold query in the terminal's default foreground
@@ -568,10 +574,9 @@ Explicit `--hybrid`, `--fts`, `--vector`, `--fuse`, symbol options, `--trace`, a
 do not trigger automatic path lookup.
 
 In indexed search, `--trace` shows each hit's rank (`#1`, `#2`, …) and `score=`.
-Code hits show the rule-ranking score. Other hits show the raw reciprocal rank
-fusion (RRF) score. These scores use different scales, so use the displayed
-rank for the final order. The trace's `fusion.score` gives the raw RRF score
-for either kind of hit.
+All hits show the raw RRF score by default. When rule ranking is enabled, code
+hits show the rule-ranking score. Use the displayed rank for the final order.
+The trace's `fusion.score` gives the raw RRF score for every hit.
 
 Managed `zg --rg` preserves literal pattern whitespace and supports empty
 patterns with `-e ''`. Matching options include fixed strings (`-F`), case
