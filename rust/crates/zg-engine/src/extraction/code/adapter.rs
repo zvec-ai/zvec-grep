@@ -1594,7 +1594,7 @@ fn decode_rust_string(literal: &str) -> Option<String> {
     Some(decoded)
 }
 
-fn clean_comment_text(value: &str) -> String {
+pub(super) fn clean_comment_text(value: &str) -> String {
     let stripped = value
         .strip_prefix("/**")
         .or_else(|| value.strip_prefix("/*!"))
