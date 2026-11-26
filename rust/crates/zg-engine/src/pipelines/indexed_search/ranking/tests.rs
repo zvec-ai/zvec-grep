@@ -713,6 +713,40 @@ fn with_range(mut hit: SearchHit, start: u64, end: u64) -> SearchHit {
 }
 
 #[test]
+fn java_method_waivers_respect_the_declared_package() {
+    for (package, expected) in [
+        (Some("example.java.util"), 1.0),
+        (Some("other.java.util"), 1.0 / 1.5),
+        (Some(""), 1.0 / 1.5),
+        (None, 1.0 / 1.5),
+    ] {
+        let method = |name| {
+            let mut metadata = code(SymbolType::Function, name, Some("List"));
+            metadata.package = package.map(str::to_owned);
+            Some(metadata)
+        };
+        let out = run(
+            "methods of example.java.util.List",
+            vec![
+                with_range(hit("add", 1, "List.java", 1.0, 1, method("add")), 0, 10),
+                with_range(hit("get", 1, "List.java", 0.9, 2, method("get")), 10, 20),
+                hit("other", 2, "Other.java", 0.1, 3, None),
+            ],
+            &QueryFilter::default(),
+            3,
+        );
+        let trace = out
+            .iter()
+            .find(|hit| hit.entity.id().as_str() == "get")
+            .and_then(|hit| hit.trace.as_ref())
+            .and_then(|trace| trace.ranking.as_ref())
+            .expect("second method's ranking trace");
+        assert_eq!(trace.file_count_at_selection, 1);
+        assert_eq!(trace.diversity_factor, expected, "package {package:?}");
+    }
+}
+
+#[test]
 fn only_independent_anchored_functions_keep_their_scores() {
     let scoped = |kind, name| Some(code(kind, name, Some("net::Router")));
     let function = SymbolType::Function;

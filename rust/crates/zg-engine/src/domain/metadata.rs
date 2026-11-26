@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 // Keep variants in alphabetical order.
@@ -127,6 +129,14 @@ pub struct MemberAlias {
 impl CodeMetadata {
     pub(crate) const SYMBOL_NAME: IndexField = IndexField::String("symbol_name");
     pub(crate) const SYMBOL_TYPE: IndexField = IndexField::String("symbol_type");
+
+    pub(crate) fn qualified_scope(&self) -> Option<Cow<'_, str>> {
+        let scope = self.scope.as_deref()?;
+        Some(match self.package.as_deref() {
+            None | Some("") => Cow::Borrowed(scope),
+            Some(package) => Cow::Owned(format!("{package}.{scope}")),
+        })
+    }
 }
 
 impl IndexedMetadata for CodeMetadata {
