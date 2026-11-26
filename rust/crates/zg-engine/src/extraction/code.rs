@@ -1,4 +1,5 @@
 mod adapter;
+mod data_tables;
 mod outline;
 
 pub(crate) use outline::code_outline;
@@ -177,7 +178,14 @@ fn assemble_output(
         // Fragments are appended contiguously in walk order, so the output
         // length before each append is that entity's head fragment index.
         entity_heads.push(output.len());
-        append_entity(source, entity, max_chars, overlap_chars, &mut output);
+        append_code_entity(
+            source,
+            entity.node,
+            Some(code_entity_metadata(entity)),
+            max_chars,
+            overlap_chars,
+            &mut output,
+        );
     }
     // Anonymous retrieval chunks follow the symbols, preserving graph ordinals.
     append_code_gaps(
@@ -204,6 +212,14 @@ fn assemble_output(
             graph: partitioned,
         };
     }
+    data_tables::append(
+        source,
+        tree.root_node(),
+        code_format,
+        max_chars,
+        overlap_chars,
+        &mut output,
+    );
     // The symbol table is complete now, so partitioning resolves forward
     // references as readily as backward ones. A walk that recorded nothing
     // produces no graph at all, so assembly skips it.
@@ -666,23 +682,23 @@ fn walk_code_node<'tree>(
     }
 }
 
-fn append_entity(
+fn append_code_entity(
     source: &TextSource,
-    entity: &CodeEntity<'_>,
+    node: Node<'_>,
+    metadata: Option<EntityMetadata>,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
-    let metadata = code_entity_metadata(entity);
     let (content_max, content_overlap) =
-        chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
+        chunk_options_for_metadata(max_chars, overlap_chars, metadata.as_ref());
     let range = TextRange::from_coordinates(
-        entity.node.start_byte(),
-        entity.node.end_byte(),
-        entity.node.start_position().row + 1,
-        entity.node.end_position().row + 1,
-        entity.node.start_position().column,
-        entity.node.end_position().column,
+        node.start_byte(),
+        node.end_byte(),
+        node.start_position().row + 1,
+        node.end_position().row + 1,
+        node.start_position().column,
+        node.end_position().column,
     )
     .expect("parser coordinates refer to source text");
     let content = crate::utils::slice_text(
@@ -698,7 +714,7 @@ fn append_entity(
         source_map: None,
         fragments: text_fragments(&content, content_max, content_overlap),
         content: Content::Text(content),
-        metadata: Some(metadata),
+        metadata,
     });
 }
 
@@ -4159,5 +4175,141 @@ public class Service {
         let fragments = extract(&member, ChunkOptions::default()).expect("py member extraction");
         // The leading receiver is excluded; class members are not importable.
         assert_eq!(code_fields(named(&fragments, "fetch")), (Some(1), false));
+    }
+
+    fn assert_data_table(
+        source: &super::TextSource,
+        entity: &ExtractedEntity,
+        binding: &str,
+        declaration: &str,
+    ) {
+        assert_eq!(entity.content, Content::Code(declaration.to_owned()));
+        let Some(EntityMetadata::Code(metadata)) = test_metadata(entity) else {
+            panic!("missing metadata for {binding}");
+        };
+        assert_eq!(metadata.signature.as_deref(), Some(binding));
+        assert!(metadata.symbol_name.is_none());
+        assert!(metadata.symbol_type.is_none());
+        assert_source_backed(source, entity);
+    }
+
+    #[test]
+    fn python_data_table_retains_its_tail_and_preserves_graph_ordinals() {
+        let declaration = concat!(
+            "PARAMETERS: dict = ({\n",
+            "    ('copy', 1): ['shallow', {'methods': ('clone',)}],\n",
+            "    ('reset', 2): {None, False, -1},\n",
+            "    ('end', 3): 'final_marker',\n",
+            "})",
+        );
+        let body = format!("def first(): pass\n{declaration}\ndef caller(): return PARAMETERS()\n");
+        let source = test_source(FileFormat::Python, "bindings.py", &body);
+        let options = ChunkOptions {
+            max_chunk_chars: Some(80),
+            chunk_overlap_chars: Some(8),
+        };
+        for collect_graph in [false, true] {
+            let output = super::extract_for_indexing(&source, options, collect_graph)
+                .expect("Python extraction");
+            assert_eq!(output.fragments.len(), 3);
+            assert_eq!(named(&output.fragments, "first").index, 0);
+            assert_eq!(named(&output.fragments, "caller").index, 1);
+            let table = &output.fragments[2];
+            assert_data_table(&source, table, "PARAMETERS", declaration);
+            assert!(table.fragments.iter().skip(1).any(|fragment| {
+                let Range::Byte(range) = fragment.range else {
+                    return false;
+                };
+                crate::utils::slice_text(
+                    declaration,
+                    usize::try_from(range.start_offset()).expect("fragment start"),
+                    usize::try_from(range.end_offset()).expect("fragment end"),
+                )
+                .is_ok_and(|text| text.contains("final_marker"))
+            }));
+            assert_eq!(output.graph.is_some(), collect_graph);
+            if let Some(graph) = output.graph {
+                assert_eq!(graph.head_fragment_indices, [0, 1]);
+                assert!(graph.resolved.is_empty());
+                assert!(
+                    graph
+                        .pending
+                        .iter()
+                        .any(|edge| edge.ref_name == "PARAMETERS")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn python_data_tables_require_a_static_module_binding() {
+        let declaration = "SINGLE = {'one': 1}";
+        let body = [
+            declaration,
+            "EMPTY = {}",
+            "COMPUTED = {'key': factory()}",
+            "FORMATTED = {'key': f'value {factory()}'}",
+            "COMPREHENSION = {k: 1 for k in source}",
+            "TEMPLATE = '''class Generated: pass'''",
+            "LIMIT = 1",
+            "FIRST = SECOND = {'one': 1}",
+            "target.table = {'one': 1}",
+            "if enabled: CONDITIONAL = {'one': 1}",
+            "def owner():",
+            "    LOCAL = {'one': 1}",
+        ]
+        .join("\n");
+        let source = test_source(FileFormat::Python, "tables.py", &body);
+        let entities = extract(&source, ChunkOptions::default()).expect("Python extraction");
+        assert_eq!(entities.len(), 2);
+        assert_eq!(named(&entities, "owner").index, 0);
+        assert_data_table(&source, &entities[1], "SINGLE", declaration);
+    }
+
+    #[test]
+    fn go_data_tables_preserve_only_their_own_package_var_spec() {
+        let single = "var Words = map[int]string{1: `one`}";
+        let grouped = "ByCode = map[string][]int{\n        \"ok\": {1, 2},\n    }";
+        let body = format!(
+            "package demo\n{single}\nvar (\n    {grouped}\n    Empty = map[int]int{{}}\n\
+             Dynamic = map[int]int{{1: compute()}}\n\
+             ComputedKey = map[int]int{{key(): 2}}\n\
+             A, B = map[int]int{{1: 2}}, map[int]int{{3: 4}}\n\
+             _ = map[int]int{{1: 2}}\n)\n\
+             func owner() {{ local := map[int]int{{1: 2}}; _ = local }}\n"
+        );
+        let source = test_source(FileFormat::Go, "tables.go", &body);
+        let entities = extract(&source, ChunkOptions::default()).expect("Go extraction");
+        assert_eq!(entities.len(), 3);
+        assert_eq!(named(&entities, "owner").index, 0);
+        assert_data_table(&source, &entities[1], "Words", single);
+        assert_data_table(&source, &entities[2], "ByCode", grouped);
+    }
+
+    #[test]
+    fn symbol_free_data_tables_keep_the_plain_text_windows() {
+        for (format, path, body) in [
+            (
+                FileFormat::Python,
+                "data.py",
+                "# Keys and labels\nTABLE = {\n    1: 'first label',\n    2: 'second label',\n}\n",
+            ),
+            (
+                FileFormat::Go,
+                "data.go",
+                "package data\nvar Table = map[int]string{\n    1: \"first label\",\n    2: \"second label\",\n}\n",
+            ),
+        ] {
+            let source = test_source(format, path, body);
+            let options = ChunkOptions {
+                max_chunk_chars: Some(36),
+                chunk_overlap_chars: Some(6),
+            };
+            let plain = super::fallback(&source, 36, 6);
+            assert!(plain.len() > 1);
+            let output = super::extract_code(&source, options, false, true).expect("extraction");
+            assert_eq!(output.fragments, plain);
+            assert!(output.graph.is_none());
+        }
     }
 }

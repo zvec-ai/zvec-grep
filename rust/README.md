@@ -13,6 +13,9 @@ contains the legacy TypeScript implementation.
 
 ## Develop
 
+After upgrading, use `zg --index --rebuild` to pick up newly supported
+declarations in files that have not changed since their last index.
+
 Run development commands from the workspace directory:
 
 ```sh
