@@ -247,7 +247,10 @@ fn enclosing_preview_preserves_the_best_nested_evidence_in_source_coordinates() 
         let result = run(query, candidates, &QueryFilter::default(), 3);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].entity.id().as_str(), "Decoder");
-        assert_eq!(result[0].nested_excerpt, expected.map(source_range));
+        assert_eq!(
+            result[0].nested_excerpt,
+            expected.map(|part| source_range(part).into())
+        );
     }
 }
 

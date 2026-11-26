@@ -13,13 +13,13 @@ use crate::{
     api::context::{
         options::{ContextRoute as SearchRoute, ContextRouteMode as SearchRouteMode, QueryFilter},
         result::{
-            MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace, SearchRecallTrace,
-            TimingEntry,
+            ContentRange, MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace,
+            SearchRecallTrace, TimingEntry,
         },
         stage_trace::StageTrace,
     },
     domain::{
-        Content, Entity, EntityFragment, EntityId, FileId, FileRecord, TextRange,
+        Content, Entity, EntityFragment, EntityId, FileId, FileRecord,
         model::{EmbeddingModelInfo, EmbeddingPurpose},
     },
     models::{EmbeddingOptions, ModelError, ModelRuntimeLease},
@@ -67,7 +67,7 @@ pub(crate) struct SearchHit {
     pub file: FileRecord,
     pub evidence: Vec<SearchEvidence>,
     /// Source coordinates of a nested result represented by this hit.
-    pub nested_excerpt: Option<TextRange>,
+    pub nested_excerpt: Option<ContentRange>,
     pub rank: usize,
     pub score: f64,
     pub matched_by: MatchedBy,
@@ -1050,12 +1050,11 @@ mod tests {
                         .entities
                         .values()
                         .filter(|stored| stored.file.id() == file.id())
-                        .map(|stored| {
-                            (
-                                stored.entity.id().clone(),
-                                stored.entity.source_range(),
-                                true,
-                            )
+                        .map(|stored| crate::storage::IndexedSourceEntity {
+                            id: stored.entity.id().clone(),
+                            range: stored.entity.source_range(),
+                            source_bytes: stored.entity.source_byte_offsets(),
+                            searchable: true,
                         })
                         .collect(),
                 })
@@ -2637,7 +2636,7 @@ mod tests {
             TextRange::from_coordinates(0, text.len(), 1, 1, 0, text.len()).expect("source range"),
         );
         let content = content_kind(text.to_owned());
-        let id = EntityId::new(file.id(), &content, source_range).expect("entity id");
+        let id = EntityId::new(file.id(), &content, &source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&id, 0),
             range: Range::Full,

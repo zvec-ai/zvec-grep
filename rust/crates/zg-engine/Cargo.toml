@@ -41,6 +41,7 @@ llama-cpp-2.workspace = true
 # Use the same pinned official runtime in Cargo tests and every native package.
 # API selection does not select the download version; build.rs owns that pin.
 ort.workspace = true
+liteparse.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"
@@ -69,6 +70,7 @@ tree-sitter-typescript.workspace = true
 uuid.workspace = true
 zg-engine-macros = { path = "macros" }
 zg-host-native = { path = "../zg-host-native" }
+zg-pdfium = { path = "../zg-pdfium" }
 zg-llama-native = { path = "../zg-llama-native", optional = true }
 zg-ort-native = { path = "../zg-ort-native", optional = true }
 zg-zvec-fp16 = { path = "../zg-zvec-fp16" }

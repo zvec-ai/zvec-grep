@@ -287,7 +287,7 @@ fn retain_representatives(shortlist: &mut Vec<Scored>, query: &QueryFeatures) {
             .is_some_and(|e| matches!(e.fragment.range, Range::Byte(_)));
         if hit.nested_excerpt.is_none()
             && (index < parent || !has_fragment)
-            && let Ok((Range::Text(source), excerpt)) =
+            && let Ok((source @ ContentRange::Text { .. }, excerpt)) =
                 super::context::hit_source_ranges(&shortlist[index].hit)
         {
             shortlist[parent].hit.nested_excerpt = Some(excerpt.unwrap_or(source));

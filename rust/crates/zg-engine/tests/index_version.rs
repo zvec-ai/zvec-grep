@@ -47,7 +47,7 @@ fn explicit_options(root: &Path, address: SocketAddr) -> IndexOptions {
 fn assert_version_diagnostic(diagnostic: &str, actual_version: Option<u32>) {
     if let Some(version) = actual_version {
         assert!(
-            diagnostic.contains(&format!("unsupported index version {version}; expected 2")),
+            diagnostic.contains(&format!("unsupported index version {version}; expected 3")),
             "{diagnostic}"
         );
         assert!(
@@ -108,7 +108,7 @@ async fn assert_incompatible_operations(
             panic!("expected rebuild-required compatibility");
         };
         assert_eq!(actual, actual_version);
-        assert_eq!(expected_version, 2);
+        assert_eq!(expected_version, 3);
         assert_version_diagnostic(&reason, actual_version);
         assert_manifest_unchanged(root, manifest)?;
     }
@@ -152,12 +152,12 @@ async fn assert_current_index(engine: &ZvecGrep, root: &Path) -> TestResult<Valu
     assert!(info.indexed);
     assert_eq!(
         info.compatibility,
-        IndexCompatibility::Compatible { version: 2 }
+        IndexCompatibility::Compatible { version: 3 }
     );
     assert_eq!(info.index_status(), IndexStatus::Ready);
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
-    assert_eq!(manifest["indexVersion"], 2);
+    assert_eq!(manifest["indexVersion"], 3);
     assert!(manifest["sourceRoot"].get("relative").is_none());
     assert_eq!(manifest["index"]["state"], "enabled");
     for field in [
@@ -175,7 +175,7 @@ async fn assert_current_index(engine: &ZvecGrep, root: &Path) -> TestResult<Valu
 }
 
 #[tokio::test]
-async fn v2_without_graph_setting_supports_search_refresh_and_watch() -> TestResult {
+async fn current_version_without_graph_setting_supports_search_refresh_and_watch() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();
     let server = EmbeddingServer::start()?;
@@ -185,7 +185,7 @@ async fn v2_without_graph_setting_supports_search_refresh_and_watch() -> TestRes
     engine.index(options.clone()).await?;
     let mut manifest = assert_current_index(&engine, root).await?;
     let generation = manifest["storageGeneration"].clone();
-    // Exercise the manifest shape emitted by 0.3.0; the storage format is unchanged.
+    // The graph setting remains optional within the current index version.
     manifest["index"]["descriptor"]
         .as_object_mut()
         .expect("descriptor")
@@ -238,9 +238,10 @@ async fn incompatible_versions_require_explicit_rebuild_across_public_operations
     for version in [
         Some(json!(0)),
         Some(json!(1)),
-        Some(json!(3)),
+        Some(json!(2)),
         Some(json!(4)),
         Some(json!(5)),
+        Some(json!(6)),
         None,
         Some(Value::Null),
         Some(json!("2")),
@@ -314,7 +315,7 @@ async fn unbuilt_workspaces_require_a_valid_current_version_before_initializatio
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": 2,
+            "indexVersion": 3,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": state },
@@ -328,11 +329,11 @@ async fn unbuilt_workspaces_require_a_valid_current_version_before_initializatio
         assert_eq!(info.index_status(), expected_status);
         assert_eq!(
             info.workspace_index.expect("workspace").index_version,
-            Some(2)
+            Some(3)
         );
         assert_eq!(server.requests.load(Ordering::Acquire), 0);
 
-        for version in [None, Some(Value::Null), Some(json!("2")), Some(json!(3))] {
+        for version in [None, Some(Value::Null), Some(json!("2")), Some(json!(2))] {
             let mut incompatible = current.clone();
             let actual_version = version
                 .as_ref()

@@ -1,6 +1,7 @@
 use super::storage::SearchStorage;
+use crate::pipelines::freshness::file_freshness_status;
 
-use std::{fs, path::Path};
+use std::path::Path;
 
 use crate::{
     EngineError,
@@ -9,14 +10,13 @@ use crate::{
         options::{ContextRoute, ContextRouteMode},
         result::{
             ContentRange, ContextContentRole, ContextCoverage, ContextDiagnostics,
-            ContextGroupResult, ContextItem, ContextItemKind, ContextItemStatus,
-            ContextQueryGroupMatch, ContextQueryGroupRole, ContextSelectionReason, ContextSource,
-            ContextWorkspaceIndex, EmptyReason, IndexDiagnostics, IndexQueryGroupDiagnostics,
-            IndexRouteDiagnostics, MatchedBy,
+            ContextGroupResult, ContextItem, ContextItemKind, ContextQueryGroupMatch,
+            ContextQueryGroupRole, ContextSelectionReason, ContextSource, ContextWorkspaceIndex,
+            EmptyReason, IndexDiagnostics, IndexQueryGroupDiagnostics, IndexRouteDiagnostics,
+            MatchedBy,
         },
     },
-    domain::{Content, EntityMetadata, FileRecord, Range, TextRange, Workspace},
-    utils::sha256_hex,
+    domain::{Content, EntityMetadata, Range, Workspace},
 };
 
 use super::pipeline::{
@@ -294,7 +294,7 @@ fn search_plan_to_context_items(
                 rank: hit.rank,
                 absolute_path: workspace_root.join(hit.file.relative_path()),
                 relative_path: hit.file.relative_path().to_path_buf(),
-                range: hit.entity.source_range().into(),
+                range: ContentRange::from_entity(&hit.entity),
                 excerpt_range: target.excerpt_range,
                 content_range: target.content_range,
                 match_ranges: Vec::new(),
@@ -304,6 +304,8 @@ fn search_plan_to_context_items(
                     hit.entity.content(),
                     hit.entity.metadata(),
                 ),
+                content_windows: Vec::new(),
+                pdf_boxes: crate::api::context::result::PdfBox::from_entity(&hit.entity),
                 content_role: Some(target.content_role),
                 status: file_freshness_status(workspace_root, &hit.file),
                 score: Some(hit.score),
@@ -494,17 +496,17 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
     let (content_range, excerpt) = hit_source_ranges(hit)?;
     Ok(ContextItemTarget {
         content: content_to_text(hit.entity.content()),
-        content_range: content_range.into(),
+        content_range,
         content_role: ContextContentRole::Source,
-        excerpt_range: hit.nested_excerpt.or(excerpt).map(Into::into),
+        excerpt_range: hit.nested_excerpt.clone().or(excerpt),
     })
 }
 
 pub(super) fn hit_source_ranges(
     hit: &SearchHit,
-) -> Result<(Range, Option<TextRange>), EngineError> {
+) -> Result<(ContentRange, Option<ContentRange>), EngineError> {
     let Some(evidence) = hit.evidence.first() else {
-        return Ok((hit.entity.source_range(), None));
+        return Ok((ContentRange::from_entity(&hit.entity), None));
     };
     let fragment = &evidence.fragment;
     let invalid_fragment = |error| {
@@ -513,8 +515,8 @@ pub(super) fn hit_source_ranges(
             fragment.id.as_str()
         ))
     };
-    match (fragment.range, hit.entity.content()) {
-        (Range::Full, _) => Ok((hit.entity.source_range(), None)),
+    match (&fragment.range, hit.entity.content()) {
+        (Range::Full, _) => Ok((ContentRange::from_entity(&hit.entity), None)),
         (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 invalid_fragment(EngineError::invalid_argument(
@@ -526,79 +528,16 @@ pub(super) fn hit_source_ranges(
                     "fragment end offset exceeds platform limits",
                 ))
             })?;
-            let lines = crate::utils::line_byte_offsets(text);
-            let local = crate::utils::text_range_from_offsets(text, &lines, start, end)
-                .map_err(invalid_fragment)?;
-            let to_source = |local| match hit.entity.source_range() {
-                Range::Full => Ok(local),
-                Range::Text(origin) => crate::utils::map_text_range(local, origin),
-                Range::Byte(_) => Err(EngineError::invalid_argument(
-                    "fragment content coordinates cannot be mapped to this entity source",
-                )),
-            };
-            let source = to_source(local).map_err(invalid_fragment)?;
-            // Fragments locate search evidence, not the returned content boundary.
-            // Keep the indexed entity intact so full previews can display it and
-            // bounded previews can select context around the exact evidence range.
-            let whole = crate::utils::text_range_from_offsets(text, &lines, 0, text.len())
-                .map_err(invalid_fragment)?;
-            let content_range = to_source(whole).map_err(invalid_fragment)?;
-            Ok((Range::Text(content_range), Some(source)))
+            let excerpt =
+                ContentRange::project_text(&hit.entity, start..end).map_err(invalid_fragment)?;
+            // Fragments locate evidence; full previews retain the complete entity.
+            let whole =
+                ContentRange::project_text(&hit.entity, 0..text.len()).map_err(invalid_fragment)?;
+            Ok((whole, Some(excerpt)))
         }
         _ => Err(invalid_fragment(EngineError::invalid_argument(
             "fragments use Full or entity-relative byte ranges for text and code; images require Full",
         ))),
-    }
-}
-
-fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextItemStatus {
-    let absolute_path = workspace_root.join(file.relative_path());
-    let metadata = match fs::metadata(&absolute_path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            // Missing sources prove drift; inaccessible metadata alone does not.
-            return if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) {
-                ContextItemStatus::PossiblyStale
-            } else {
-                ContextItemStatus::Fresh
-            };
-        }
-    };
-    if !metadata.is_file() {
-        return ContextItemStatus::PossiblyStale;
-    }
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|duration| duration.as_millis().try_into().ok());
-    if metadata.len() == file.snapshot().size_bytes
-        && modified.is_some()
-        && modified == file.snapshot().modified_epoch_ms
-    {
-        return ContextItemStatus::Fresh;
-    }
-    if let Some(expected) = &file.snapshot().content_hash
-        && let Ok(bytes) = fs::read(&absolute_path)
-    {
-        return if sha256_hex(&bytes) == *expected {
-            ContextItemStatus::Fresh
-        } else {
-            ContextItemStatus::PossiblyStale
-        };
-    }
-    let metadata_changed = metadata.len() != file.snapshot().size_bytes
-        || modified
-            .zip(file.snapshot().modified_epoch_ms)
-            .is_some_and(|(current, indexed)| current != indexed);
-    if metadata_changed {
-        ContextItemStatus::PossiblyStale
-    } else {
-        // Missing index, timestamp or hash information is not proof of an update.
-        ContextItemStatus::Fresh
     }
 }
 
@@ -636,6 +575,113 @@ mod tests {
     use super::{normalize_context_request, select_and_rank_context_items};
 
     #[test]
+    fn pdf_context_returns_full_entity_and_maps_fragment_to_its_physical_page() {
+        use crate::{
+            domain::{
+                ByteRange, Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus,
+                FileRecord, FileSnapshot, FragmentId, PdfBlock, PdfSourceMap, PdfSourcePart, Range,
+                SourcePath,
+            },
+            pipelines::indexed_search::pipeline::{SearchEvidence, SearchHit},
+        };
+        let text = "# Recovery\n\n等待 starts here\ncontinuation on the next physical page";
+        let split = text.find("continuation").expect("split");
+        let content = Content::Text(text.into());
+        let map = PdfSourceMap {
+            markdown_start: 100,
+            text_len: text.len(),
+            parts: vec![
+                PdfSourcePart {
+                    range: 0..split,
+                    block: PdfBlock {
+                        page: 2,
+                        id: 1,
+                        page_width: 612.0,
+                        page_height: 792.0,
+                        bbox: None,
+                    },
+                },
+                PdfSourcePart {
+                    range: split..text.len(),
+                    block: PdfBlock {
+                        page: 4,
+                        id: 2,
+                        page_width: 612.0,
+                        page_height: 792.0,
+                        bbox: None,
+                    },
+                },
+            ],
+        };
+        let source_range = Range::Pdf(map.locate(0..map.text_len).expect("location").into());
+        let file_id = FileId::new(1);
+        let id = EntityId::new(file_id, &content, &source_range).expect("ID");
+        let fragment = EntityFragment {
+            id: FragmentId::new(&id, 0),
+            range: Range::Byte(
+                ByteRange::new(
+                    u64::try_from(split).expect("start"),
+                    u64::try_from(text.len()).expect("end"),
+                )
+                .expect("range"),
+            ),
+        };
+        let hit = SearchHit {
+            entity: Entity::new(
+                id,
+                file_id,
+                source_range,
+                content,
+                None,
+                vec![fragment.clone()],
+            )
+            .expect("entity")
+            .with_source_map(Some(std::sync::Arc::new(map)))
+            .expect("source map"),
+            file: FileRecord::new(
+                file_id,
+                SourcePath::new("manual.pdf").expect("path"),
+                FileSnapshot {
+                    size_bytes: 42,
+                    modified_epoch_ms: None,
+                    content_hash: None,
+                },
+                FileIndexStatus::NotIndexed,
+            )
+            .expect("file"),
+            evidence: vec![SearchEvidence { fragment }],
+            nested_excerpt: None,
+            rank: 1,
+            score: 1.0,
+            matched_by: MatchedBy::Fts,
+            trace: None,
+        };
+        let target = super::context_item_target(&hit).expect("context");
+        assert_eq!(target.content, text);
+        assert_eq!(
+            target.content_range,
+            ContentRange::Pdf {
+                pages: vec![2, 4],
+                start_byte_offset: 100,
+                end_byte_offset: 100 + text.len(),
+            }
+        );
+        assert_eq!(
+            target.excerpt_range,
+            Some(ContentRange::Pdf {
+                pages: vec![4],
+                start_byte_offset: 100 + split,
+                end_byte_offset: 100 + text.len(),
+            })
+        );
+        assert_eq!(target.content_range.start_line(), None);
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "End-to-end assertions for fragment and entity boundaries"
+    )]
     fn best_fragment_preserves_evidence_and_returns_the_complete_entity() {
         use crate::{
             domain::{
@@ -654,7 +700,7 @@ mod tests {
             TextRange::from_coordinates(10, 21, 2, 3, 3, 2).expect("fragment source range"),
         );
         let content = Content::Text(source.into());
-        let entity_id = EntityId::new(file_id, &content, source_range).expect("entity id");
+        let entity_id = EntityId::new(file_id, &content, &source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&entity_id, 0),
             range: fragment_range,
@@ -667,7 +713,7 @@ mod tests {
             entity: Entity::new(
                 entity_id,
                 file_id,
-                source_range,
+                source_range.clone(),
                 content,
                 None,
                 vec![fragment.clone(), full.clone()],
@@ -697,8 +743,11 @@ mod tests {
         let target = super::context_item_target(&hit).expect("fragment content");
         assert_eq!(target.content_role, ContextContentRole::Source);
         assert_eq!(target.content, source);
-        assert_eq!(target.excerpt_range, Some(fragment_source_range.into()));
-        assert_eq!(target.content_range, source_range.into());
+        assert_eq!(
+            target.excerpt_range,
+            Some(fragment_source_range.clone().into())
+        );
+        assert_eq!(target.content_range, source_range.clone().into());
         assert_eq!(hit.entity.content(), &Content::Text(source.into()));
         let search = SearchPlanResult {
             routes: Vec::new(),
@@ -717,14 +766,17 @@ mod tests {
             &request.groups[0],
         )
         .expect("context items");
-        assert_eq!(items[0].range, source_range.into());
-        assert_eq!(items[0].excerpt_range, Some(fragment_source_range.into()));
-        assert_eq!(items[0].content_range, source_range.into());
+        assert_eq!(items[0].range, source_range.clone().into());
+        assert_eq!(
+            items[0].excerpt_range,
+            Some(fragment_source_range.clone().into())
+        );
+        assert_eq!(items[0].content_range, source_range.clone().into());
         assert_eq!(items[0].content, source);
         hit.evidence.reverse();
         let target = super::context_item_target(&hit).expect("full content");
         assert_eq!(target.content, source);
-        assert_eq!(target.content_range, source_range.into());
+        assert_eq!(target.content_range, source_range.clone().into());
         assert_eq!(
             target.excerpt_range, None,
             "full fragments do not create an excerpt range"
@@ -759,11 +811,16 @@ mod tests {
                 .fragments
                 .remove(0);
             let file_id = FileId::new(1);
-            let id = EntityId::new(file_id, &extracted.content, extracted.source_range)
+            let id = EntityId::new(file_id, &extracted.content, &extracted.source_range)
                 .expect("entity ID");
             let fragment = EntityFragment {
                 id: FragmentId::new(&id, 0),
-                range: extracted.fragments.last().expect("EOF fragment").range,
+                range: extracted
+                    .fragments
+                    .last()
+                    .expect("EOF fragment")
+                    .range
+                    .clone(),
             };
             let Range::Byte(bytes) = fragment.range else {
                 panic!("chunked source")
@@ -861,7 +918,7 @@ mod tests {
             TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len()).expect("range"),
         );
         let content = Content::Text(content.to_owned());
-        let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
+        let id = EntityId::new(source.id(), &content, &source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&id, 0),
             range: Range::Full,
@@ -1169,6 +1226,8 @@ mod tests {
             match_ranges: Vec::new(),
             content: id.to_owned(),
             outline: None,
+            content_windows: Vec::new(),
+            pdf_boxes: Vec::new(),
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(1.0),

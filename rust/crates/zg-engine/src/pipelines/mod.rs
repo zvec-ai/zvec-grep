@@ -6,4 +6,5 @@ pub(crate) mod indexing;
 pub(crate) mod path_search;
 pub(crate) mod relationships;
 
+mod freshness;
 mod read_access;

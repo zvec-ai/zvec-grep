@@ -31,7 +31,7 @@ def cargo_environment(binary, environment):
                 "ORT_DYLIB_PATH", "ZVEC_GREP_NATIVE_LIB_DIR", "GGML_BACKEND_PATH"):
         env.pop(key, None)
     project_libraries = ("llama.dll", "ggml*.dll", "zvec_c_api.dll", "onnxruntime*.dll",
-                         "libllama.so*", "libggml*.so*", "libzvec_c_api.so*", "libonnxruntime.so*")
+                         "pdfium.dll", "libpdfium.so", "libllama.so*", "libggml*.so*", "libzvec_c_api.so*", "libonnxruntime.so*")
     profile = Path(binary).resolve().parent
     paths = []
     for entry in env.get("PATH", "").split(os.pathsep):
