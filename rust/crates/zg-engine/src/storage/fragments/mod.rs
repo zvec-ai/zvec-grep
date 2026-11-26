@@ -265,7 +265,7 @@ impl Fragments {
             "create FP16 vector query",
         )?;
         native(
-            request.set_diskann_params(DiskannQueryParams::new(top_k.max(80))),
+            request.set_diskann_params(DiskannQueryParams::new(top_k.max(1000))),
             "configure DiskANN search",
         )?;
         configure_query(
