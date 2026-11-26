@@ -248,6 +248,7 @@ def run(args, budget, env, info):
     env["ZG_MODEL_BENCH_RUNTIME_MODE"] = "server" if server_concurrency is not None else "direct"
     if server_concurrency is not None:
         env["ZVEC_GREP_EMBEDDING_CONCURRENCY"] = str(server_concurrency)
+        env["ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM"] = str(server_concurrency)
     env.pop("ZVEC_GREP_ORT_THREAD_BUDGET", None)
     if ort_thread_budget is not None:
         env["ZVEC_GREP_ORT_THREAD_BUDGET"] = str(ort_thread_budget)
