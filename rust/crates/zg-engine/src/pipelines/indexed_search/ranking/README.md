@@ -3,9 +3,9 @@
 The shared indexed-search engine uses RRF fusion to assign result positions for
 direct, server, and MCP queries. With `--prefer-symbol`, hits from an exact-symbol
 recall route win RRF ties, then entity ID breaks any remaining ties.
-Non-code entities keep their fusion positions
-among loaded hits and their raw RRF scores. Positions occupied by code within
-the result limit are filled by ranking all recalled, loaded `ContentKind::Code`
+Non-code entities keep their fusion order and raw RRF scores. They keep their
+positions while distinct code candidates are available. Positions occupied by
+code within the result limit are filled by ranking all recalled, loaded `ContentKind::Code`
 entities, including those below the cutoff and those without symbol metadata.
 The engine skips rule ranking when the visible results contain no code.
 
@@ -39,7 +39,19 @@ are dependency code. Neither `dist/` nor `.d.ts` alone implies generated code.
 Final selection is greedy: after each selected entity, remaining entities from
 the same file receive a soft factor of `1 / (1 + 0.5 * selected_count)`. There is
 no hard per-file cap. A code pool from a single file skips this selection
-penalty. Context group coverage is handled outside this module.
+penalty.
+
+If a class and its method both earn a result slot, the enclosing symbol covers
+both source spans. Its short preview can show the matched method while its full
+preview shows the entire class. Each fused route can name a symbol to keep,
+including qualified names and names such as `#decrypt` or `~Widget`.
+The selector fills the freed slots from the remaining pool and skips symbols
+whose source contains or is contained by an existing selection in the same file.
+It then ranks the retained code hits using only those hits for file diversity.
+Sibling methods can still appear together. Once distinct code hits run out,
+subsequent documents can move up, and the result can be shorter than the limit.
+Across query groups, group coverage and global rank determine which of two
+nested group results appears in the merged list.
 
 Before selection, a file's representative definition can gain up to 0.15 from
 at most two additional definitions. Support must have name or path evidence,

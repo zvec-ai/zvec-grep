@@ -42,6 +42,7 @@ fn hit_with_fragment(source: &str, start: usize, end: usize) -> SearchHit {
         )
         .expect("file"),
         evidence: vec![SearchEvidence { fragment }],
+        nested_excerpt: None,
         rank: 1,
         score: 1.0,
         matched_by: MatchedBy::Fts,

@@ -303,28 +303,28 @@ async fn extensionless_scripts_preserve_outline_language_across_reopen() -> Test
         fs::write(root.join("bin").join(name), "#!/bin/sh\necho changed\n")?;
     }
     let engine = ZvecGrep::new();
-    let result = engine
-        .context(ContextOptions {
-            root: Some(root.to_path_buf()),
-            routes: vec![ContextRoute {
-                mode: ContextRouteMode::Fts,
-                query: "outline_probe".into(),
-            }],
-            auto_update: false,
-            allow_remote: true,
-            limit: Some(20),
-            ..ContextOptions::default()
-        })
-        .await?;
-    for (name, language) in [
-        ("python-tool", "python"),
-        ("node-tool", "javascript"),
-        ("uv-tool", "python"),
-        ("uv-options-tool", "python"),
+    for (kind, symbol, summary) in [
+        (SymbolType::Function, "outline_probe", "calls: stored_call"),
+        (SymbolType::Class, "Probe", "members:"),
     ] {
-        for (kind, symbol, summary) in [
-            (SymbolType::Function, "outline_probe", "calls: stored_call"),
-            (SymbolType::Class, "Probe", "members:"),
+        let result = engine
+            .context(ContextOptions {
+                root: Some(root.to_path_buf()),
+                routes: vec![ContextRoute {
+                    mode: ContextRouteMode::Fts,
+                    query: symbol.into(),
+                }],
+                auto_update: false,
+                allow_remote: true,
+                limit: Some(20),
+                ..ContextOptions::default()
+            })
+            .await?;
+        for (name, language) in [
+            ("python-tool", "python"),
+            ("node-tool", "javascript"),
+            ("uv-tool", "python"),
+            ("uv-options-tool", "python"),
         ] {
             let item = result.items.iter().find(|item| {
                 item.relative_path == Path::new("bin").join(name)
@@ -1016,7 +1016,7 @@ pub mod catalog {
             root: Some(root.to_path_buf()),
             routes: vec![ContextRoute {
                 mode: ContextRouteMode::Fts,
-                query: "orchard".into(),
+                query: "Model".into(),
             }],
             limit: Some(30),
             auto_update: false,

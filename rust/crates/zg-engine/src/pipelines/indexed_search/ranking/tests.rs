@@ -105,6 +105,7 @@ fn fixture_hit(
         )
         .expect("file"),
         evidence: vec![],
+        nested_excerpt: None,
         rank,
         score,
         matched_by: MatchedBy::Fts,
@@ -137,6 +138,195 @@ fn run(query: &str, hits: Vec<SearchHit>, filter: &QueryFilter, limit: usize) ->
         limit,
         None,
     )
+}
+
+fn symbol_at(id: &str, rank: usize, kind: SymbolType, start: u64, end: u64) -> SearchHit {
+    let mut candidate = hit(id, 1, "example.py", 1.0, rank, Some(code(kind, id, None)));
+    let entity = &candidate.entity;
+    candidate.entity = Entity::new(
+        entity.id().clone(),
+        entity.file_id(),
+        Range::Byte(crate::domain::ByteRange::new(start, end).expect("symbol range")),
+        entity.content().clone(),
+        entity.metadata().cloned(),
+        entity.fragments().to_vec(),
+    )
+    .expect("entity");
+    candidate
+}
+
+#[test]
+fn a_class_replaces_its_nested_method_and_backfills_the_top_ten() {
+    let mut hits = vec![
+        symbol_at("Parser", 1, SymbolType::Class, 0, 100),
+        symbol_at("parse", 2, SymbolType::Function, 10, 20),
+    ];
+    for index in 0_u16..9 {
+        let start = 100 + u64::from(index) * 10;
+        hits.push(symbol_at(
+            &format!("other_{index}"),
+            usize::from(index) + 3,
+            SymbolType::Function,
+            start,
+            start + 10,
+        ));
+    }
+    let out = run("behavior", hits, &QueryFilter::default(), 10);
+    assert_eq!(out.len(), 10);
+    assert_eq!(out[0].entity.id().as_str(), "Parser");
+    assert!(out.iter().all(|hit| hit.entity.id().as_str() != "parse"));
+    let last = &out[9];
+    assert_eq!(last.entity.id().as_str(), "other_8");
+    let trace = last.trace.as_ref().expect("trace");
+    assert_eq!((trace.fusion.rank, last.rank), (11, 10));
+}
+
+#[test]
+fn enclosing_preview_preserves_the_best_nested_evidence_in_source_coordinates() {
+    use crate::{domain::ByteRange, pipelines::indexed_search::pipeline::SearchEvidence};
+
+    let unpack = "def unpack(self):\r\n        return decrypt(ciphertext)";
+    let longer =
+        "def lookup_previous(self):\r\n        return self.cached_entries.get(self.previous_key)";
+    let class = format!("class Decoder:\r\n    {longer}\r\n    {unpack}");
+    let source = format!("# 前言\r\n{class}\r\n");
+    let source_range = |part: &str| {
+        let start = source.find(part).expect("fixture source");
+        crate::utils::text_range_from_offsets(
+            &source,
+            &crate::utils::line_byte_offsets(&source),
+            start,
+            start + part.len(),
+        )
+        .expect("source coordinates")
+    };
+    let symbol = |name: &str, kind, rank, body: &str, matched: Option<&str>| {
+        let metadata = Some(code(kind, name, None));
+        let mut hit = hit(name, 1, "sample.py", 1.0, rank, metadata);
+        let id = hit.entity.id().clone();
+        let fragment = EntityFragment {
+            id: FragmentId::new(&id, 0),
+            range: matched.map_or(Range::Full, |matched| {
+                let start = body.find(matched).expect("fixture fragment") as u64;
+                Range::Byte(ByteRange::new(start, start + matched.len() as u64).expect("fragment"))
+            }),
+        };
+        hit.entity = Entity::new(
+            id,
+            hit.file.id(),
+            Range::Text(source_range(body)),
+            Content::Code(body.to_owned()),
+            hit.entity.metadata().cloned(),
+            vec![fragment.clone()],
+        )
+        .expect("fixture entity");
+        hit.evidence = vec![SearchEvidence { fragment }];
+        hit
+    };
+    let matched = "decrypt(ciphertext)";
+    for (query, parent_rank, parent_fragment, child_fragment, expected) in [
+        ("evidence", 3, None, Some(matched), Some(matched)),
+        ("evidence", 3, Some("class Decoder"), None, Some(unpack)),
+        ("evidence", 1, Some("class Decoder"), Some(matched), None),
+        ("evidence", 1, None, Some(matched), Some(matched)),
+        ("Decoder", 3, None, Some(matched), None),
+    ] {
+        let first_child = 1 + usize::from(parent_rank == 1);
+        let function = SymbolType::Function;
+        let candidates = vec![
+            symbol("unpack", function, first_child, unpack, child_fragment),
+            symbol("lookup_previous", function, first_child + 1, longer, None),
+            symbol(
+                "Decoder",
+                SymbolType::Class,
+                parent_rank,
+                &class,
+                parent_fragment,
+            ),
+        ];
+        let result = run(query, candidates, &QueryFilter::default(), 3);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].entity.id().as_str(), "Decoder");
+        assert_eq!(
+            result[0].nested_excerpt,
+            expected.map(|part| source_range(part).into())
+        );
+    }
+}
+
+#[test]
+fn a_named_method_keeps_its_siblings_and_documents_can_fill_vacancies() {
+    let hits = vec![
+        symbol_at("parse", 1, SymbolType::Function, 10, 20),
+        symbol_at("Parser", 2, SymbolType::Class, 0, 100),
+        document("guide", 2, "guide.md", 0.9, 3),
+        symbol_at("validate", 4, SymbolType::Function, 30, 40),
+        document("notes", 3, "notes.md", 0.8, 5),
+    ];
+    for limit in [4, 10] {
+        let out = run("parse", hits.clone(), &QueryFilter::default(), limit);
+        assert_eq!(
+            out.iter()
+                .map(|hit| (hit.entity.id().as_str(), hit.rank))
+                .collect::<Vec<_>>(),
+            [("parse", 1), ("validate", 2), ("guide", 3), ("notes", 4)]
+        );
+    }
+}
+
+#[test]
+fn a_broader_query_keeps_the_enclosing_source_only_if_it_earned_a_slot() {
+    let hits = vec![
+        symbol_at("from_index", 1, SymbolType::Function, 10, 20),
+        symbol_at("Coordinates", 2, SymbolType::Class, 0, 100),
+        symbol_at("materialize", 3, SymbolType::Function, 100, 120),
+    ];
+    let query = "how does from_index handle conversion";
+    let filter = QueryFilter::default();
+    let top_one = run(query, hits.clone(), &filter, 1);
+    assert_eq!(top_one[0].entity.id().as_str(), "from_index");
+
+    let out = run(query, hits, &filter, 2);
+    assert_eq!(
+        out.iter()
+            .map(|hit| hit.entity.id().as_str())
+            .collect::<Vec<_>>(),
+        ["Coordinates", "materialize"]
+    );
+    assert_eq!(out[0].trace.as_ref().expect("trace").fusion.rank, 2);
+}
+
+#[test]
+fn removed_methods_do_not_penalize_their_file_in_the_final_order() {
+    let hits = vec![
+        symbol_at("parse", 1, SymbolType::Function, 10, 20),
+        symbol_at("Parser", 2, SymbolType::Class, 0, 100),
+        symbol_at("standalone", 3, SymbolType::Function, 100, 120),
+        hit("peer", 2, "other.py", 0.8, 4, None),
+        hit("tail", 3, "third.py", 0.55, 5, None),
+    ];
+    // The shortlist is parse, peer, Parser, tail. Removing parse restores
+    // Parser's full score and lets the backfilled standalone outrank tail.
+    let out = run("behavior", hits, &QueryFilter::default(), 4);
+    assert_eq!(
+        out.iter()
+            .map(|item| item.entity.id().as_str())
+            .collect::<Vec<_>>(),
+        ["Parser", "peer", "standalone", "tail"]
+    );
+    for (item, (rank, file_count, factor, score)) in out.iter().zip([
+        (1, 0, 1.0, 1.0),
+        (2, 0, 1.0, 0.8),
+        (3, 1, 1.0 / 1.5, 1.0 / 1.5),
+        (4, 0, 1.0, 0.55),
+    ]) {
+        let trace = item.trace.as_ref().expect("hit trace");
+        let ranking = trace.ranking.as_ref().expect("code ranking");
+        assert_eq!((item.rank, item.score), (rank, score));
+        assert_eq!((ranking.rank, ranking.score), (rank, score));
+        assert_eq!(ranking.file_count_at_selection, file_count);
+        assert_eq!(ranking.diversity_factor, factor);
+    }
 }
 
 #[test]
@@ -212,6 +402,44 @@ fn documents_do_not_affect_code_dependency_or_diversity_factors() {
     assert_eq!(ranking.diversity_factor, 1.0);
     assert_eq!(ranking.rank, 3);
     assert_eq!(trace.final_selection.cutoff_rank, 5);
+}
+
+#[test]
+fn fused_literal_routes_keep_the_requested_methods() {
+    let routes = ["`~Widget`", "get"].map(|query| ResolvedSearchRoute {
+        id: query.into(),
+        mode: ContextRouteMode::Fts,
+        query: query.into(),
+    });
+    let hits = vec![
+        symbol_at("Widget", 1, SymbolType::Class, 0, 100),
+        symbol_at("~Widget", 2, SymbolType::Function, 10, 20),
+        symbol_at("get", 3, SymbolType::Function, 30, 40),
+    ];
+    let out = rank(hits, &routes, &QueryFilter::default(), 1.0, 3, None);
+    let mut names: Vec<_> = out.iter().map(|hit| hit.entity.id().as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["get", "~Widget"]);
+}
+
+#[test]
+fn exact_routes_match_whole_stored_names_including_punctuation() {
+    let destructor = code(SymbolType::Function, "~Widget", Some("ui.Widget"));
+    for query in ["~Widget", "ui::Widget::~Widget", "`ui.Widget.~Widget`"] {
+        assert!(
+            QueryFeatures::new(query).directly_names_symbol(&destructor),
+            "{query}"
+        );
+    }
+    let overload = code(SymbolType::Function, "operator bool", Some("Widget"));
+    assert!(QueryFeatures::new("Widget::operator bool").directly_names_symbol(&overload));
+
+    let queries = QueryFeatures::from_queries(&["get", "explain `~Widget`"]);
+    assert!(queries.directly_names_symbol(&code(SymbolType::Function, "get", None)));
+    assert!(!queries.directly_names_symbol(&destructor));
+    assert!(!QueryFeatures::new("Other::~Widget").directly_names_symbol(&destructor));
+    let class = code(SymbolType::Class, "Widget", None);
+    assert!(!QueryFeatures::new("~Widget").directly_names_symbol(&class));
 }
 
 #[test]

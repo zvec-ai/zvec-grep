@@ -13,8 +13,8 @@ use crate::{
     api::context::{
         options::{ContextRoute as SearchRoute, ContextRouteMode as SearchRouteMode, QueryFilter},
         result::{
-            MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace, SearchRecallTrace,
-            TimingEntry,
+            ContentRange, MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace,
+            SearchRecallTrace, TimingEntry,
         },
         stage_trace::StageTrace,
     },
@@ -66,6 +66,8 @@ pub(crate) struct SearchHit {
     pub entity: Entity,
     pub file: FileRecord,
     pub evidence: Vec<SearchEvidence>,
+    /// Source coordinates of a nested result represented by this hit.
+    pub nested_excerpt: Option<ContentRange>,
     pub rank: usize,
     pub score: f64,
     pub matched_by: MatchedBy,
@@ -669,6 +671,7 @@ fn candidate_to_hit(
         entity: stored.entity,
         file: stored.file,
         evidence: loaded_evidence,
+        nested_excerpt: None,
         rank: candidate.rank,
         score: candidate.score,
         matched_by,

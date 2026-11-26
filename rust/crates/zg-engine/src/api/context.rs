@@ -679,6 +679,35 @@ pub mod result {
     }
 
     impl ContentRange {
+        pub(crate) fn byte_interval(&self) -> Option<(u64, u64)> {
+            let (start, end) = match *self {
+                Self::Text {
+                    start_byte_offset,
+                    end_byte_offset,
+                    ..
+                } => (
+                    start_byte_offset.try_into().ok()?,
+                    end_byte_offset.try_into().ok()?,
+                ),
+                Self::Byte {
+                    start_offset,
+                    end_offset,
+                } => (start_offset, end_offset),
+                Self::File | Self::Pdf { .. } => return None,
+            };
+            (start < end).then_some((start, end))
+        }
+
+        /// Tests containment in either direction for ranges from the same file.
+        pub(crate) fn is_nested_with(&self, other: &Self) -> bool {
+            let (Some((start, end)), Some((other_start, other_end))) =
+                (self.byte_interval(), other.byte_interval())
+            else {
+                return false;
+            };
+            (start <= other_start && other_end <= end) || (other_start <= start && end <= other_end)
+        }
+
         /// Starting byte in decoded text, assembled PDF text, or binary content.
         #[must_use]
         pub fn start_byte_offset(&self) -> Option<usize> {
@@ -862,6 +891,36 @@ mod tests {
     use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
+
+    #[test]
+    fn nested_source_uses_nonempty_byte_offsets() {
+        let text: result::ContentRange = TextRange::from_coordinates(10, 20, 1, 1, 10, 20)
+            .expect("source coordinates")
+            .into();
+        for (start_offset, end_offset, nested) in [
+            (5, 25, true),
+            (10, 20, true),
+            (10, 15, true),
+            (15, 20, true),
+            (5, 15, false),
+            (20, 25, false),
+            (15, 15, false),
+        ] {
+            let bytes = result::ContentRange::Byte {
+                start_offset,
+                end_offset,
+            };
+            assert_eq!(text.is_nested_with(&bytes), nested);
+            assert_eq!(bytes.is_nested_with(&text), nested);
+        }
+        assert!(!result::ContentRange::File.is_nested_with(&text));
+        let pdf = result::ContentRange::Pdf {
+            pages: vec![1],
+            start_byte_offset: 10,
+            end_byte_offset: 20,
+        };
+        assert!(!pdf.is_nested_with(&text));
+    }
 
     #[test]
     fn pdf_boxes_preserve_blocks_and_pages_without_duplicate_or_missing_bounds() {

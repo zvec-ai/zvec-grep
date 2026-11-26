@@ -1,7 +1,7 @@
 use super::storage::SearchStorage;
 use crate::pipelines::freshness::file_freshness_status;
 
-use std::{collections::HashSet, path::Path};
+use std::path::Path;
 
 use crate::{
     EngineError,
@@ -16,7 +16,7 @@ use crate::{
             MatchedBy,
         },
     },
-    domain::{Content, Range, Workspace},
+    domain::{Content, EntityMetadata, Range, Workspace},
 };
 
 use super::pipeline::{
@@ -345,49 +345,51 @@ fn select_and_rank_context_items(
             deduped.push(item);
         }
     }
-    let mut globally_ranked = deduped.clone();
-    globally_ranked.sort_by(compare_global_rank);
-    let mut selected = HashSet::<String>::new();
+    deduped.sort_by(compare_global_rank);
     let mut prioritized = Vec::new();
 
     for group_id in coverage_group_ids {
         if prioritized.len() >= DEFAULT_CONTEXT_PRIORITY_LIMIT {
             break;
         }
-        let mut candidates = deduped
+        let best = deduped
             .iter()
-            .filter(|item| !selected.contains(&context_item_dedupe_key(item)))
-            .filter(|item| query_group_match(item, group_id).is_some())
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| compare_group_rank(left, right, group_id));
-        if let Some(mut candidate) = candidates.into_iter().next() {
-            selected.insert(context_item_dedupe_key(&candidate));
+            .enumerate()
+            .filter(|(_, item)| query_group_match(item, group_id).is_some())
+            .filter(|(_, item)| !nested_in_selection(item, &prioritized))
+            .min_by(|(_, left), (_, right)| compare_group_rank(left, right, group_id));
+        if let Some((index, _)) = best {
+            let mut candidate = deduped.remove(index);
             candidate.selection_reason = Some(ContextSelectionReason::Coverage);
             candidate.coverage_group = Some(group_id.clone());
             prioritized.push(candidate);
         }
     }
-    for mut candidate in globally_ranked.iter().cloned() {
-        if prioritized.len() >= DEFAULT_CONTEXT_PRIORITY_LIMIT {
-            break;
+    for mut candidate in deduped {
+        if nested_in_selection(&candidate, &prioritized) {
+            continue;
         }
-        let key = context_item_dedupe_key(&candidate);
-        if selected.insert(key) {
+        if prioritized.len() < DEFAULT_CONTEXT_PRIORITY_LIMIT {
             candidate.selection_reason = Some(ContextSelectionReason::GlobalFill);
             candidate.coverage_group = None;
-            prioritized.push(candidate);
         }
+        prioritized.push(candidate);
     }
-    prioritized.extend(
-        globally_ranked
-            .into_iter()
-            .filter(|item| !selected.contains(&context_item_dedupe_key(item))),
-    );
     for (index, item) in prioritized.iter_mut().enumerate() {
         item.rank = index + 1;
     }
     prioritized
+}
+
+fn nested_in_selection(item: &ContextItem, selected: &[ContextItem]) -> bool {
+    if !matches!(item.metadata, Some(EntityMetadata::Code(_))) {
+        return false;
+    }
+    selected.iter().any(|other| {
+        other.absolute_path == item.absolute_path
+            && matches!(other.metadata, Some(EntityMetadata::Code(_)))
+            && item.range.is_nested_with(&other.range)
+    })
 }
 
 fn merge_query_group_matches(
@@ -491,13 +493,20 @@ struct ContextItemTarget {
 }
 
 fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError> {
+    let (content_range, excerpt) = hit_source_ranges(hit)?;
+    Ok(ContextItemTarget {
+        content: content_to_text(hit.entity.content()),
+        content_range,
+        content_role: ContextContentRole::Source,
+        excerpt_range: hit.nested_excerpt.clone().or(excerpt),
+    })
+}
+
+pub(super) fn hit_source_ranges(
+    hit: &SearchHit,
+) -> Result<(ContentRange, Option<ContentRange>), EngineError> {
     let Some(evidence) = hit.evidence.first() else {
-        return Ok(ContextItemTarget {
-            content: content_to_text(hit.entity.content()),
-            content_range: ContentRange::from_entity(&hit.entity),
-            content_role: ContextContentRole::Source,
-            excerpt_range: None,
-        });
+        return Ok((ContentRange::from_entity(&hit.entity), None));
     };
     let fragment = &evidence.fragment;
     let invalid_fragment = |error| {
@@ -506,15 +515,8 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             fragment.id.as_str()
         ))
     };
-    let (content, content_range, excerpt_range) = match (
-        fragment.range.clone(),
-        hit.entity.content(),
-    ) {
-        (Range::Full, content) => (
-            content_to_text(content),
-            ContentRange::from_entity(&hit.entity),
-            None,
-        ),
+    match (&fragment.range, hit.entity.content()) {
+        (Range::Full, _) => Ok((ContentRange::from_entity(&hit.entity), None)),
         (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 invalid_fragment(EngineError::invalid_argument(
@@ -531,20 +533,12 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             // Fragments locate evidence; full previews retain the complete entity.
             let whole =
                 ContentRange::project_text(&hit.entity, 0..text.len()).map_err(invalid_fragment)?;
-            (text.clone(), whole, Some(excerpt))
+            Ok((whole, Some(excerpt)))
         }
-        _ => {
-            return Err(invalid_fragment(EngineError::invalid_argument(
-                "fragments use Full or entity-relative byte ranges for text and code; images require Full",
-            )));
-        }
-    };
-    Ok(ContextItemTarget {
-        content,
-        content_range,
-        content_role: ContextContentRole::Source,
-        excerpt_range,
-    })
+        _ => Err(invalid_fragment(EngineError::invalid_argument(
+            "fragments use Full or entity-relative byte ranges for text and code; images require Full",
+        ))),
+    }
 }
 
 fn rank_as_f64(rank: usize) -> f64 {
@@ -656,6 +650,7 @@ mod tests {
             )
             .expect("file"),
             evidence: vec![SearchEvidence { fragment }],
+            nested_excerpt: None,
             rank: 1,
             score: 1.0,
             matched_by: MatchedBy::Fts,
@@ -739,6 +734,7 @@ mod tests {
                 SearchEvidence { fragment },
                 SearchEvidence { fragment: full },
             ],
+            nested_excerpt: None,
             rank: 1,
             score: 1.0,
             matched_by: MatchedBy::Fts,
@@ -851,6 +847,7 @@ mod tests {
                 )
                 .expect("file"),
                 evidence: vec![SearchEvidence { fragment }],
+                nested_excerpt: None,
                 rank: 1,
                 score: 1.0,
                 matched_by: MatchedBy::Fts,
@@ -934,6 +931,7 @@ mod tests {
                     .expect("entity"),
                 file: file.clone(),
                 evidence: Vec::new(),
+                nested_excerpt: None,
                 rank: 1,
                 score: 1.0,
                 matched_by: MatchedBy::Fts,
@@ -1125,6 +1123,71 @@ mod tests {
             selected.iter().map(|item| item.rank).collect::<Vec<_>>(),
             [1, 2, 3]
         );
+    }
+
+    #[test]
+    fn coverage_skips_a_nested_parent_and_selects_the_next_group_hit() {
+        let items = vec![
+            code_item("first_method", "Q1", 1, 10, 20),
+            code_item("class", "Q2", 1, 0, 100),
+            code_item("other_function", "Q2", 2, 100, 120),
+        ];
+        let selected = select_and_rank_context_items(items, &["Q1".into(), "Q2".into()]);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].entity_id.as_deref(), Some("first_method"));
+        assert_eq!(selected[0].query_groups.len(), 1);
+        assert_eq!(selected[0].query_groups[0].id, "Q1");
+        assert_eq!(selected[1].entity_id.as_deref(), Some("other_function"));
+        assert_eq!(selected[1].coverage_group.as_deref(), Some("Q2"));
+        assert_eq!(selected[1].query_groups[0].rank, 2);
+    }
+
+    #[test]
+    fn global_fill_and_tail_skip_nested_code_only_in_the_same_file() {
+        let mut other_file = code_item("other_file", "Q2", 3, 10, 20);
+        other_file.absolute_path = "/workspace/other.rs".into();
+        other_file.relative_path = "other.rs".into();
+        let mut items = vec![
+            code_item("class", "Q1", 1, 0, 100),
+            code_item("early_method", "Q2", 1, 10, 20),
+            item("document", group("Q2", 2, MatchedBy::Fts)),
+            other_file,
+            code_item("late_method", "Q2", 10, 80, 90),
+        ];
+        for rank in 2..=8 {
+            items.push(item(
+                &format!("hit-{rank}"),
+                group("Q1", rank, MatchedBy::Fts),
+            ));
+        }
+        let selected = select_and_rank_context_items(items, &[]);
+        let ids: Vec<_> = selected
+            .iter()
+            .filter_map(|item| item.entity_id.as_deref())
+            .collect();
+
+        assert_eq!(ids.len(), 10);
+        assert_eq!(ids[0], "class");
+        assert!(!ids.contains(&"early_method") && !ids.contains(&"late_method"));
+        assert!(ids.contains(&"document") && ids.contains(&"other_file"));
+        assert_eq!(
+            selected[5].selection_reason,
+            Some(ContextSelectionReason::GlobalFill)
+        );
+        assert_eq!(selected[6].selection_reason, None);
+    }
+
+    fn code_item(id: &str, query_group: &str, rank: usize, start: u64, end: u64) -> ContextItem {
+        let mut result = item(id, group(query_group, rank, MatchedBy::Fts));
+        result.range = ContentRange::Byte {
+            start_offset: start,
+            end_offset: end,
+        };
+        result.metadata = Some(crate::domain::EntityMetadata::Code(
+            crate::domain::CodeMetadata::default(),
+        ));
+        result
     }
 
     fn group(id: &str, rank: usize, matched_by: MatchedBy) -> ContextQueryGroupMatch {
