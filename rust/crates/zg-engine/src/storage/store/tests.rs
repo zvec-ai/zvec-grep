@@ -675,6 +675,7 @@ fn fixture(
             id,
             content,
             Some(EntityMetadata::Code(CodeMetadata {
+                is_supplemental: false,
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("quoted'\\name\0suffix".to_owned()),
                 scope: None,
@@ -1980,6 +1981,7 @@ fn index_code_file(
         id,
         Content::Code(text.to_owned()),
         Some(EntityMetadata::Code(CodeMetadata {
+            is_supplemental: false,
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some(symbol.to_owned()),
             scope: None,

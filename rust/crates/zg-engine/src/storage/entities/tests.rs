@@ -12,6 +12,7 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
         content,
         metadata.then(|| {
             EntityMetadata::Code(CodeMetadata {
+                is_supplemental: false,
                 symbol_name: Some("symbol".into()),
                 symbol_type: Some(SymbolType::Function),
                 scope: Some("module".into()),

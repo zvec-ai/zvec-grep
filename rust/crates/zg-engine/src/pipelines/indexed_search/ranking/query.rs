@@ -2,6 +2,18 @@
 use super::Policy;
 use crate::domain::{CodeMetadata, SymbolType};
 
+#[derive(Debug, Default)]
+pub(super) enum SourceLookup {
+    #[default]
+    General,
+    Literal,
+    Identifier(String),
+}
+
+const EXACT_NAME_BONUS: f64 = 0.25;
+const PURE_DEFINITION_BONUS: f64 = 0.85;
+const EXPLICIT_DEFINITION_BONUS: f64 = 0.40;
+
 #[derive(Default)]
 // These independent features may all apply at once.
 #[allow(clippy::struct_excessive_bools)]
@@ -16,6 +28,7 @@ pub(super) struct QueryFeatures {
     pub(super) generated: bool,
     requested_kind: Option<SymbolType>,
     pure_symbol: bool,
+    pub(super) source_lookup: SourceLookup,
     implementations: bool,
 }
 
@@ -46,6 +59,7 @@ impl QueryFeatures {
         );
         explicit_names.sort();
         explicit_names.dedup();
+        let source_lookup = source_lookup(query.trim());
         let requested_kind = [
             ("class", SymbolType::Class),
             ("function", SymbolType::Function),
@@ -59,6 +73,7 @@ impl QueryFeatures {
         .into_iter()
         .find_map(|(word, kind)| has(word).then_some(kind));
         Self {
+            source_lookup,
             implementations: has("implementations")
                 || lower.contains("实现类")
                 || lower.contains("所有实现"),
@@ -130,6 +145,15 @@ impl QueryFeatures {
         }
         for (enabled, name) in [
             (self.pure_symbol, "pure_symbol"),
+            (
+                matches!(self.source_lookup, SourceLookup::Literal)
+                    || matches!(&self.source_lookup, SourceLookup::Identifier(name) if name.is_ascii()),
+                "source_lookup",
+            ),
+            (
+                matches!(&self.source_lookup, SourceLookup::Identifier(name) if !name.is_ascii()),
+                "verify_identifier",
+            ),
             (self.implementations, "implementations"),
             (self.usages, "usages"),
             (self.tests, "tests"),
@@ -149,13 +173,30 @@ impl QueryFeatures {
         self.symbol_bonus_with(code, Policy::CURRENT)
     }
 
+    fn binding_bonus(&self, code: &CodeMetadata, policy: Policy) -> (&'static str, f64, f64) {
+        // Only the extractor's complete, single-binding declaration owns
+        // this name. A mention in a matching fragment is not a declaration.
+        if code.is_supplemental
+            && let SourceLookup::Identifier(target) = &self.source_lookup
+            && code.signature.as_deref() == Some(target.as_str())
+        {
+            let definition = match (policy.definition_intent, self.pure_symbol) {
+                (true, true) => PURE_DEFINITION_BONUS,
+                (true, false) => EXPLICIT_DEFINITION_BONUS,
+                (false, _) => 0.10,
+            };
+            return ("binding_exact", EXACT_NAME_BONUS, definition);
+        }
+        ("none", 0.0, 0.0)
+    }
+
     pub(super) fn symbol_bonus_with(
         &self,
         code: &CodeMetadata,
         policy: Policy,
     ) -> (&'static str, f64, f64) {
         let Some(name) = code.symbol_name.as_deref().filter(|s| !s.is_empty()) else {
-            return ("none", 0.0, 0.0);
+            return self.binding_bonus(code, policy);
         };
         let scope = code.scope.as_deref().unwrap_or_default().replace('.', "::");
         let name = name.replace('.', "::");
@@ -170,7 +211,7 @@ impl QueryFeatures {
             let bonus = if query_name.contains("::") && query_name == qualified {
                 ("qualified_exact", 0.35)
             } else if query_name == name && informative(&query_name) {
-                ("exact", 0.25)
+                ("exact", EXACT_NAME_BONUS)
             } else if query_name.to_lowercase() == name.to_lowercase() && informative(&query_name) {
                 ("case_folded", 0.10)
             } else {
@@ -241,9 +282,9 @@ impl QueryFeatures {
             if self.implementations && code.symbol_type == Some(SymbolType::Interface) {
                 0.0
             } else if self.pure_symbol {
-                0.85
+                PURE_DEFINITION_BONUS
             } else if self.explicit_names.len() == 1 {
-                0.40
+                EXPLICIT_DEFINITION_BONUS
             } else {
                 definition
             }
@@ -300,6 +341,81 @@ impl QueryFeatures {
             .sum::<f64>();
         sum / count_as_f64(query_tokens.len()).max(1.0)
     }
+}
+
+fn source_lookup(query: &str) -> SourceLookup {
+    if query.parse::<f64>().is_ok() {
+        return SourceLookup::Literal;
+    }
+    // Quoting one complete phrase is a literal lookup. Individually quoted
+    // identifiers in a sentence still describe behavior.
+    for quote in ['\'', '"', '`'] {
+        if let Some(text) = query
+            .strip_prefix(quote)
+            .and_then(|text| text.strip_suffix(quote))
+            .filter(|text| !text.is_empty() && !text.contains(quote))
+        {
+            if quote == '`' && identifier_shaped(text) {
+                return SourceLookup::Identifier(text.to_owned());
+            }
+            return SourceLookup::Literal;
+        }
+    }
+    let target = value_lookup_target(query).unwrap_or(query);
+    let target = target
+        .strip_prefix('`')
+        .and_then(|name| name.strip_suffix('`'))
+        .unwrap_or(target);
+    if identifier_shaped(target) {
+        SourceLookup::Identifier(target.to_owned())
+    } else {
+        SourceLookup::General
+    }
+}
+
+fn identifier_shaped(text: &str) -> bool {
+    text.chars().any(char::is_alphanumeric)
+        && text
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | ':' | '.'))
+}
+
+/// Keep the original spelling for candidate-local name checks.
+fn value_lookup_target(query: &str) -> Option<&str> {
+    let query = query.trim_end_matches(['?', '？']).trim_end();
+    if let Some(target) = query.strip_suffix("的值是多少") {
+        return Some(target.trim());
+    }
+    // ASCII case folding keeps all byte offsets in the original query valid.
+    let lower = query.to_ascii_lowercase();
+    let question = lower.strip_prefix("what is ");
+    if let Some(target) = question.and_then(|request| request.strip_suffix(" set to")) {
+        let start = "what is ".len();
+        return Some(&query[start..start + target.len()]);
+    }
+    if let Some(request) = lower.strip_prefix("where is ")
+        && let Some(target) = request
+            .strip_suffix(" defined")
+            .or_else(|| request.strip_suffix(" declared"))
+    {
+        let start = "where is ".len();
+        return Some(&query[start..start + target.len()]);
+    }
+    let request = question
+        .or_else(|| lower.strip_prefix("find "))
+        .unwrap_or(&lower);
+    let request = request.strip_prefix("the ").unwrap_or(request);
+    let target = [
+        "constant ",
+        "field ",
+        "value of ",
+        "default value of ",
+        "definition of ",
+        "declaration of ",
+    ]
+    .iter()
+    .find_map(|prefix| request.strip_prefix(prefix))?;
+    Some(&query[query.len() - target.len()..])
 }
 
 fn count_as_f64(count: usize) -> f64 {

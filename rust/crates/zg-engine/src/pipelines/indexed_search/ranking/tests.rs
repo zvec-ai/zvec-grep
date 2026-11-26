@@ -24,6 +24,7 @@ fn code(kind: SymbolType, name: &str, scope: Option<&str>) -> CodeMetadata {
         language: None,
         arity: None,
         is_exported: false,
+        is_supplemental: false,
         is_declaration: false,
         package: None,
         has_internal_linkage: false,
@@ -157,6 +158,169 @@ fn documents_keep_fusion_order_and_scores_across_paths_and_repeated_files() {
         assert!(trace.final_selection.returned_by_limit);
         assert_eq!(trace.final_selection.cutoff_rank, 2);
     }
+}
+
+#[test]
+fn supplemental_statements_compete_normally_for_direct_lookups() {
+    fn ranking(hit: &SearchHit) -> &SearchRankingTrace {
+        hit.trace
+            .as_ref()
+            .expect("trace")
+            .ranking
+            .as_ref()
+            .expect("ranking")
+    }
+    let mut statement = fixture_hit(
+        "statement",
+        1,
+        "a.rs",
+        1.0,
+        1,
+        Content::Code("register(\"road cache\", loader, 加载器)".into()),
+        Some(CodeMetadata {
+            is_supplemental: true,
+            signature: Some("缓存上限".into()),
+            ..CodeMetadata::default()
+        }),
+    );
+    statement
+        .evidence
+        .push(super::super::pipeline::SearchEvidence {
+            fragment: statement.entity.fragments()[0].clone(),
+        });
+    let legacy = hit("fallback", 1, "a.rs", 0.9, 2, None);
+    let named = hit(
+        "function",
+        1,
+        "a.rs",
+        0.8,
+        3,
+        Some(code(SymbolType::Function, "dispatch", None)),
+    );
+    for (query, expected_factor) in [
+        ("How does `resolve` call `dispatch`?", 0.5),
+        ("`resolve` and `dispatch`", 0.5),
+        ("How does the field CACHE_KEY affect lookup?", 0.5),
+        ("What is CACHE_KEY and CACHE_SIZE set to?", 0.5),
+        ("foo和bar如何协作", 0.5),
+        ("加载", 0.5),
+        ("缓存上限", 1.0),
+        ("加载器", 1.0),
+        ("`缓存上限`", 1.0),
+        ("`未知名称`", 0.5),
+        ("What is 缓存上限 set to?", 1.0),
+        ("缓存上限的值是多少？", 1.0),
+        ("其他设置的值是多少？", 0.5),
+        ("DEFAULT_LIMIT", 1.0),
+        ("loader", 1.0),
+        ("module::CACHE_KEY", 1.0),
+        ("What is the value of `CACHE_KEY`?", 1.0),
+        ("What is `CACHE_KEY` set to?", 1.0),
+        ("field cache_size", 1.0),
+        ("\"road cache\"", 1.0),
+        ("-42", 1.0),
+        ("register(\"road cache\", loader, 加载器)", 1.0),
+    ] {
+        let out = run(
+            query,
+            vec![statement.clone(), legacy.clone(), named.clone()],
+            &QueryFilter::default(),
+            3,
+        );
+        let target = out
+            .iter()
+            .find(|hit| hit.entity.id() == statement.entity.id())
+            .expect("supplemental statement");
+        let trace = ranking(target);
+        assert_eq!(trace.supplemental_factor, Some(expected_factor), "{query}");
+        assert_eq!(
+            target.score,
+            (1.0 + (trace.symbol_bonus + trace.definition_bonus)) * expected_factor,
+            "{query}"
+        );
+        assert_eq!(target.rank == 1, expected_factor == 1.0, "{query}");
+        let old = out
+            .iter()
+            .find(|hit| hit.entity.id() == legacy.entity.id())
+            .expect("existing fallback");
+        assert_eq!(old.score, 0.9);
+        assert_eq!(ranking(old).supplemental_factor, None);
+    }
+    let out = run(
+        "How does the cache work?",
+        vec![statement, legacy],
+        &QueryFilter::default(),
+        2,
+    );
+    assert_eq!(
+        out[0].score, 1.0,
+        "a pool with no symbols has no competition prior"
+    );
+    assert_eq!(ranking(&out[0]).supplemental_factor, Some(1.0));
+}
+
+#[test]
+fn exact_bound_declarations_can_overtake_source_mentions_at_the_cutoff() {
+    let binding = CodeMetadata {
+        is_supplemental: true,
+        signature: Some("ROUTE_DEFAULTS".into()),
+        ..CodeMetadata::default()
+    };
+    let mut pool: Vec<_> = (1..=10)
+        .map(|rank| {
+            fixture_hit(
+                &rank.to_string(),
+                1,
+                "a.rs",
+                1.0,
+                rank,
+                Content::Code("read(ROUTE_DEFAULTS)".into()),
+                Some(code(SymbolType::Function, "load", None)),
+            )
+        })
+        .collect();
+    pool.push(hit("table", 1, "a.rs", 0.15, 11, Some(binding.clone())));
+    let out = run("ROUTE_DEFAULTS", pool, &QueryFilter::default(), 10);
+    assert_eq!(out[0].entity.id().as_str(), "table");
+    let trace = out[0].trace.as_ref().expect("trace");
+    assert_eq!(trace.fusion.rank, 11);
+    let ranking = trace.ranking.as_ref().expect("ranking");
+    assert_eq!(ranking.symbol_match, "binding_exact");
+    assert_eq!(
+        (ranking.symbol_bonus, ranking.definition_bonus),
+        (0.25, 0.85)
+    );
+
+    for query in [
+        "What is `ROUTE_DEFAULTS` set to?",
+        "Where is ROUTE_DEFAULTS defined?",
+    ] {
+        assert_eq!(
+            QueryFeatures::new(query).symbol_bonus(&binding),
+            ("binding_exact", 0.25, 0.40)
+        );
+    }
+    for query in [
+        "route_defaults",
+        "ROUTE_DEFAULT",
+        "\"ROUTE_DEFAULTS\"",
+        "How does ROUTE_DEFAULTS affect startup?",
+        "Where are ROUTE_DEFAULTS and ROUTES defined?",
+    ] {
+        assert_eq!(
+            QueryFeatures::new(query).symbol_bonus(&binding),
+            ("none", 0.0, 0.0),
+            "{query}"
+        );
+    }
+    let unmarked = CodeMetadata {
+        is_supplemental: false,
+        ..binding
+    };
+    assert_eq!(
+        QueryFeatures::new("ROUTE_DEFAULTS").symbol_bonus(&unmarked),
+        ("none", 0.0, 0.0)
+    );
 }
 
 #[test]
@@ -701,6 +865,7 @@ fn ranking_traces_default_omitted_evidence_fields() {
     let trace: SearchHitTrace = serde_json::from_value(value).expect("trace with omitted evidence");
     let ranking = trace.ranking.expect("ranking");
     assert_eq!(ranking.path_bonus, 0.0);
+    assert_eq!(ranking.supplemental_factor, None);
     assert_eq!(ranking.file_support_bonus, 0.0);
     assert_eq!(ranking.file_support_count, 0);
 }

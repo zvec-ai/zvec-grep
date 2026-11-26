@@ -6,7 +6,7 @@ use super::{
     adapter::named_children, append_code_entity, code_node_range, code_node_span, fallback,
 };
 use crate::{
-    domain::{FileFormat, Range, TextRange},
+    domain::{CodeMetadata, EntityMetadata, FileFormat, Range, TextRange},
     extraction::{ExtractedEntity, TextSource},
     utils::line_byte_offsets,
 };
@@ -61,7 +61,12 @@ pub(super) fn extract_symbol_free_file(
             candidate += 1;
         }
         if candidate == chunks.len() || chunks[candidate].0 > node.start_byte() {
-            split.push((node.start_byte(), node.end_byte()));
+            let cuts = super::callbacks::boundaries(node, format, &source.text, max_chars);
+            for (from, to) in super::callbacks::pieces(node.start_byte(), node.end_byte(), &cuts) {
+                let slice = &source.text[from..to];
+                let start = to - slice.trim_start().len();
+                split.push((start, start + slice.trim().len()));
+            }
         }
     }
     if split.is_empty() {
@@ -142,13 +147,18 @@ pub(super) fn append_statement_gaps(
         .filter(|&node| is_searchable_statement(node, format))
         .peekable();
     while let Some(statement) = statements.next() {
+        let cuts = super::callbacks::boundaries(statement, format, &source.text, max_chars);
         let first = gaps.partition_point(|&(_, end)| end <= statement.start_byte());
-        for &(gap_start, gap_end) in gaps[first..]
+        for (gap_end, start, end) in gaps[first..]
             .iter()
             .take_while(|&&(start, _)| start < statement.end_byte())
+            .flat_map(|&(gap_start, gap_end)| {
+                let start = gap_start.max(statement.start_byte());
+                let end = gap_end.min(statement.end_byte());
+                super::callbacks::pieces(start, end, &cuts)
+                    .map(move |(start, end)| (gap_end, start, end))
+            })
         {
-            let start = gap_start.max(statement.start_byte());
-            let end = gap_end.min(statement.end_byte());
             let range = if start == statement.start_byte() && end == statement.end_byte() {
                 adjacent_statement_range(
                     statement,
@@ -174,7 +184,8 @@ pub(super) fn append_statement_gaps(
                 crate::utils::text_range_from_offsets(&source.text, offsets, start, end)
                     .expect("statement gap refers to source text")
             };
-            append_code_entity(source, range, None, max_chars, overlap_chars, output);
+            let metadata = statement_metadata(statement, range, format, &source.text);
+            append_code_entity(source, range, metadata, max_chars, overlap_chars, output);
         }
     }
 }
@@ -212,6 +223,72 @@ fn adjacent_statement_range<'tree>(
         last = statements.next().expect("peeked statement");
     }
     code_node_span(first, last)
+}
+
+fn statement_metadata(
+    statement: Node<'_>,
+    range: TextRange,
+    format: FileFormat,
+    source: &str,
+) -> Option<EntityMetadata> {
+    let start = range.start_byte_offset();
+    let end = range.end_byte_offset();
+    // Callback bodies in JS/TS were searchable before statement recovery.
+    if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript)
+        && std::iter::successors(Some(statement), Node::next_named_sibling)
+            .take_while(|node| node.start_byte() < end)
+            .any(|node| overlaps_callback(node, start, end))
+    {
+        return None;
+    }
+    // Carry a multiline declaration's binding into each fragment, including
+    // the middle of a lookup table. It is retrieval metadata, not a graph symbol.
+    let signature = (start == statement.start_byte()
+        && end == statement.end_byte()
+        && statement.start_position().row != statement.end_position().row)
+        .then(|| declaration_binding(statement))
+        .flatten()
+        .map(|node| &source[node.byte_range()])
+        .filter(|name| *name != "_")
+        .map(str::to_owned);
+    Some(EntityMetadata::Code(CodeMetadata {
+        is_supplemental: true,
+        signature,
+        ..CodeMetadata::default()
+    }))
+}
+
+fn declaration_binding(statement: Node<'_>) -> Option<Node<'_>> {
+    let binding = match statement.kind() {
+        "expression_statement" => {
+            let assignment = statement.named_child(0)?;
+            if assignment.kind() != "assignment" {
+                return None;
+            }
+            assignment.child_by_field_name("left")?
+        }
+        "var_declaration" | "const_declaration" if statement.named_child_count() == 1 => {
+            let spec = statement.named_child(0)?;
+            let mut cursor = spec.walk();
+            let mut names = spec.children_by_field_name("name", &mut cursor);
+            let first = names.next()?;
+            names.next().is_none().then_some(first)?
+        }
+        _ => statement.child_by_field_name("name")?,
+    };
+    (binding.kind() == "identifier").then_some(binding)
+}
+
+fn overlaps_callback(node: Node<'_>, start: usize, end: usize) -> bool {
+    if node.end_byte() <= start || node.start_byte() >= end {
+        return false;
+    }
+    matches!(
+        node.kind(),
+        "arrow_function" | "function_expression" | "generator_function" | "method_definition"
+    ) || node
+        .named_children(&mut node.walk())
+        .any(|child| overlaps_callback(child, start, end))
 }
 
 fn contains_named_code(

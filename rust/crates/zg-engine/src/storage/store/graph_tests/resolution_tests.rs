@@ -3,6 +3,7 @@ use crate::domain::{CodeMetadata, EntityMetadata, Language};
 
 fn target_metadata(index: usize) -> CodeMetadata {
     CodeMetadata {
+        is_supplemental: false,
         symbol_type: Some(SymbolType::Function),
         symbol_name: Some("target'quoted".into()),
         scope: Some(format!("scope{index}")),

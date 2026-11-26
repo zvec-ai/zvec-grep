@@ -336,6 +336,9 @@ pub mod result {
         pub symbol_match: String,
         pub symbol_bonus: f64,
         pub definition_bonus: f64,
+        /// Applied to supplemental module statements when they compete with named code.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub supplemental_factor: Option<f64>,
         #[serde(default)]
         pub path_bonus: f64,
         #[serde(default)]

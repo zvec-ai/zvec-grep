@@ -110,6 +110,7 @@ fn entity_records_preserve_image_content_ranges_and_external_metadata() {
         ),
     ] {
         let metadata = Some(EntityMetadata::Code(CodeMetadata {
+            is_supplemental: false,
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some("symbol".into()),
             scope: Some("module".into()),

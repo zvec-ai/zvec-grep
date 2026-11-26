@@ -11,10 +11,10 @@ use super::{
 };
 use crate::{
     api::context::{options::QueryFilter, result::SearchRankingTrace},
-    domain::{ContentKind, EntityMetadata, FileId},
+    domain::{Content, ContentKind, EntityMetadata, FileId, Range},
 };
 use paths::Roles;
-use query::QueryFeatures;
+use query::{QueryFeatures, SourceLookup};
 
 const FILE_DECAY: f64 = 0.50;
 
@@ -25,6 +25,7 @@ struct Policy {
     path_weight: f64,
     weak_names: bool,
     definition_intent: bool,
+    supplemental_factor: f64,
     support_weight: f64,
     bonus_cap: f64,
 }
@@ -35,6 +36,7 @@ impl Policy {
         path_weight: 0.35,
         weak_names: true,
         definition_intent: true,
+        supplemental_factor: 0.5,
         support_weight: 0.15,
         bonus_cap: 1.25,
     };
@@ -45,6 +47,7 @@ impl Policy {
         path_weight: 0.0,
         weak_names: false,
         definition_intent: false,
+        supplemental_factor: 1.0,
         support_weight: 0.0,
         bonus_cap: 0.50,
     };
@@ -57,6 +60,7 @@ struct Scored {
     symbol_match: &'static str,
     symbol_bonus: f64,
     definition_bonus: f64,
+    supplemental_factor: Option<f64>,
     path_bonus: f64,
     support_bonus: f64,
     support_count: u32,
@@ -151,7 +155,11 @@ fn score_code(
     let mut queries = routes.iter().map(|r| r.query.as_str()).collect::<Vec<_>>();
     queries.sort_unstable();
     queries.dedup();
-    let query = QueryFeatures::new(&queries.join("\n"));
+    let query_text = queries.join("\n");
+    let query = QueryFeatures::new(&query_text);
+    let competes_with_symbols = hits.iter().any(|hit| {
+        matches!(hit.entity.metadata(), Some(EntityMetadata::Code(code)) if code.symbol_name.is_some())
+    });
     let mut overrides = Roles::overrides(&query, filter);
     let roles = hits
         .iter()
@@ -167,6 +175,27 @@ fn score_code(
                 Some(EntityMetadata::Code(code)) => query.symbol_bonus_with(code, policy),
                 _ => ("none", 0.0, 0.0),
             };
+            let supplemental_factor = match hit.entity.metadata() {
+                Some(EntityMetadata::Code(code))
+                    if code.is_supplemental && code.symbol_name.is_none() =>
+                {
+                    Some(
+                        if competes_with_symbols
+                            && !matches_source_lookup(
+                                &hit,
+                                code.signature.as_deref(),
+                                &query.source_lookup,
+                                &query_text,
+                            )
+                        {
+                            policy.supplemental_factor
+                        } else {
+                            1.0
+                        },
+                    )
+                }
+                _ => None,
+            };
             let base = hit.score / maximum_rrf;
             let mut path_bonus = policy.path_weight
                 * query.path_affinity(&hit.file.relative_path().display().to_string());
@@ -176,7 +205,8 @@ fn score_code(
             }
             let static_score = (base
                 + (symbol_bonus + definition_bonus + path_bonus).min(policy.bonus_cap))
-                * roles.factor(overrides);
+                * roles.factor(overrides)
+                * supplemental_factor.unwrap_or(1.0);
             Scored {
                 hit,
                 base,
@@ -184,6 +214,7 @@ fn score_code(
                 symbol_match,
                 symbol_bonus,
                 definition_bonus,
+                supplemental_factor,
                 path_bonus,
                 support_bonus: 0.0,
                 support_count: 0,
@@ -196,6 +227,64 @@ fn score_code(
         support::apply(&mut scored, policy.support_weight);
     }
     (query, scored)
+}
+
+/// Recognize unquoted source pasted into search without reading the whole
+/// entity. The leading recall evidence identifies the best matching fragment.
+fn matches_source_lookup(
+    hit: &SearchHit,
+    binding: Option<&str>,
+    lookup: &SourceLookup,
+    query: &str,
+) -> bool {
+    const MAX_BYTES: usize = 8 * 1024;
+    let (query, whole_identifier) = match lookup {
+        SourceLookup::Literal => return true,
+        SourceLookup::Identifier(name) if name.is_ascii() || binding == Some(name.as_str()) => {
+            return true;
+        }
+        // Without whitespace, a Unicode identifier can also read like a sentence.
+        SourceLookup::Identifier(name) => (name.as_str(), true),
+        SourceLookup::General => (query.trim(), false),
+    };
+    if query.is_empty() || query.len() > MAX_BYTES {
+        return false;
+    }
+    let (Content::Code(source), Some(evidence)) = (hit.entity.content(), hit.evidence.first())
+    else {
+        return false;
+    };
+    let fragment = match evidence.fragment.range {
+        Range::Full => source.as_str(),
+        Range::Byte(range) => {
+            let (Ok(start), Ok(end)) = (
+                usize::try_from(range.start_offset()),
+                usize::try_from(range.end_offset()),
+            ) else {
+                return false;
+            };
+            let Some(fragment) = source.get(start..end) else {
+                return false;
+            };
+            fragment
+        }
+        Range::Text(_) => return false,
+    };
+    let searchable = &fragment[..fragment.floor_char_boundary(MAX_BYTES)];
+    if !whole_identifier {
+        return searchable.contains(query);
+    }
+    let identifier_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '_' | '$');
+    searchable.match_indices(query).any(|(start, _)| {
+        !fragment[..start]
+            .chars()
+            .next_back()
+            .is_some_and(identifier_char)
+            && !fragment[start + query.len()..]
+                .chars()
+                .next()
+                .is_some_and(identifier_char)
+    })
 }
 
 fn compare(a: &Scored, b: &Scored, a_score: f64, b_score: f64) -> Ordering {
@@ -250,6 +339,7 @@ fn select(
                 symbol_match: item.symbol_match.to_owned(),
                 symbol_bonus: item.symbol_bonus,
                 definition_bonus: item.definition_bonus,
+                supplemental_factor: item.supplemental_factor,
                 path_bonus: item.path_bonus,
                 file_support_bonus: item.support_bonus,
                 file_support_count: item.support_count,

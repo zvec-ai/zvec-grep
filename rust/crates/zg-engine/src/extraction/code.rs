@@ -1,4 +1,5 @@
 mod adapter;
+mod callbacks;
 mod outline;
 mod statements;
 
@@ -822,6 +823,7 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         _ => "::",
     };
     EntityMetadata::Code(CodeMetadata {
+        is_supplemental: false,
         symbol_type: entity.symbol_type,
         symbol_name: entity.name.clone(),
         scope: (!entity.breadcrumb.is_empty()).then(|| entity.breadcrumb.join(scope_separator)),
@@ -1218,6 +1220,7 @@ mod tests {
         assert_eq!(
             test_metadata(add).cloned(),
             Some(EntityMetadata::Code(CodeMetadata {
+                is_supplemental: false,
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("add".to_owned()),
                 scope: None,
@@ -1226,15 +1229,7 @@ mod tests {
                 language: Some(CodeLanguage::TypeScript),
                 documentation: Some("Adds one.".to_owned()),
                 arity: Some(1),
-                is_exported: false,
-                is_declaration: false,
-                package: None,
-                has_internal_linkage: false,
-                declares_type: false,
-                alias_of: None,
-                object_members: Vec::new(),
-                overwritten_by: None,
-                exported_as: Vec::new(),
+                ..CodeMetadata::default()
             }))
         );
         assert!(matches!(
@@ -1244,6 +1239,7 @@ mod tests {
         assert_eq!(
             test_metadata(create).cloned(),
             Some(EntityMetadata::Code(CodeMetadata {
+                is_supplemental: false,
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("create".to_owned()),
                 scope: Some("Box".to_owned()),
@@ -1252,15 +1248,7 @@ mod tests {
                 language: Some(CodeLanguage::TypeScript),
                 documentation: None,
                 arity: Some(0),
-                is_exported: false,
-                is_declaration: false,
-                package: None,
-                has_internal_linkage: false,
-                declares_type: false,
-                alias_of: None,
-                object_members: Vec::new(),
-                overwritten_by: None,
-                exported_as: Vec::new(),
+                ..CodeMetadata::default()
             }))
         );
         assert!(matches!(
@@ -1451,6 +1439,7 @@ mod tests {
             assert_eq!(
                 test_metadata(named(&fragments, name)).cloned(),
                 Some(EntityMetadata::Code(CodeMetadata {
+                    is_supplemental: false,
                     symbol_type: Some(kind),
                     symbol_name: Some(name.to_owned()),
                     scope: Some(scope.to_owned()),
@@ -1653,7 +1642,9 @@ mod tests {
     fn plain_chunks(fragments: &[ExtractedEntity]) -> Vec<String> {
         fragments
             .iter()
-            .filter(|fragment| test_metadata(fragment).is_none())
+            .filter(|fragment| {
+                !matches!(test_metadata(fragment), Some(EntityMetadata::Code(code)) if code.symbol_name.is_some() || code.symbol_type.is_some())
+            })
             .map(|fragment| match test_content(fragment) {
                 Content::Code(text) | Content::Text(text) => text,
                 content @ Content::Image(_) => panic!("unexpected content {content:?}"),
@@ -1675,6 +1666,7 @@ mod tests {
         assert_eq!(
             test_metadata(named(&c, "Widget")).cloned(),
             Some(EntityMetadata::Code(CodeMetadata {
+                is_supplemental: false,
                 symbol_type: Some(SymbolType::Class),
                 symbol_name: Some("Widget".to_owned()),
                 scope: None,
@@ -1714,6 +1706,7 @@ mod tests {
         assert_eq!(
             test_metadata(named(&go, "Value")).cloned(),
             Some(EntityMetadata::Code(CodeMetadata {
+                is_supplemental: false,
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("Value".to_owned()),
                 scope: Some("Widget".to_owned()),
@@ -1754,6 +1747,7 @@ mod tests {
         assert_eq!(
             test_metadata(named(&python, "fetch")).cloned(),
             Some(EntityMetadata::Code(CodeMetadata {
+                is_supplemental: false,
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("fetch".to_owned()),
                 scope: Some("Service".to_owned()),
@@ -3192,7 +3186,7 @@ public class Service {
                 assert_eq!(named(&output.fragments, existing).index, 0);
                 for entity in &output.fragments {
                     assert_source_backed(&source, entity);
-                    if test_metadata(entity).is_none()
+                    if !matches!(test_metadata(entity), Some(EntityMetadata::Code(code)) if code.symbol_name.is_some())
                         && let Content::Code(content) = &entity.content
                         && crate::utils::utf16_len(content) > 20
                     {
@@ -3263,6 +3257,87 @@ public class Service {
         );
         let output = extract(&js, options).expect("same-line statements");
         assert_eq!(plain_chunks(&output), ["a();  b();"]);
+    }
+
+    #[test]
+    fn long_callback_registrations_keep_their_source_in_separate_entities() {
+        for (format, file, prefix, named_head, opening, inner, closing) in [
+            (
+                FileFormat::Go,
+                "suite.go",
+                "package demo\n",
+                "func ready() {}\n",
+                "var _ = Register(\"suite\", func() {",
+                "Test(\"case\", func() {",
+                "})",
+            ),
+            (
+                FileFormat::JavaScript,
+                "suite.js",
+                "",
+                "function ready() {}\n",
+                "Register(\"suite\", () => {",
+                "Test(\"case\", () => {",
+                "});",
+            ),
+            (
+                FileFormat::TypeScript,
+                "suite.ts",
+                "",
+                "function ready() {}\n",
+                "Register(\"suite\", () => {",
+                "Test(\"case\", () => {",
+                "});",
+            ),
+        ] {
+            for mixed in [false, true] {
+                // Parameterized suites can put every nested callback in a
+                // single loop, leaving no outer sibling to split at.
+                let loop_head = if format == FileFormat::Go {
+                    "for _, item := range cases {"
+                } else {
+                    "for (const item of cases) {"
+                };
+                let wrapper = format!(
+                    "{opening}\n {loop_head}\n  {inner}\n    useValue(\"first_capture_🙂_123456789\");\n    useValue(\"second_capture_123456789\");\n    useValue(\"third_capture_123456789\");\n    useValue(\"last_capture_123456789\");\n  {closing}\n }}\n{closing}"
+                );
+                let header = if mixed { named_head } else { "" };
+                let text = format!("{prefix}{header}{wrapper}\n");
+                let source = test_source(format, file, &text);
+                let options = ChunkOptions {
+                    max_chunk_chars: Some(115),
+                    chunk_overlap_chars: Some(12),
+                };
+                let output = super::extract_for_indexing(&source, options, true)
+                    .expect("callback extraction");
+                let mut covered = vec![false; text.len()];
+                for (index, entity) in output.fragments.iter().enumerate() {
+                    assert_eq!(entity.index, index);
+                    assert_source_backed(&source, entity);
+                    let Range::Text(range) = entity.source_range else {
+                        panic!("text entity")
+                    };
+                    let bytes = range.start_byte_offset()..range.end_byte_offset();
+                    assert!(
+                        !(text[bytes.clone()].contains("first_capture")
+                            && text[bytes.clone()].contains("last_capture")),
+                        "{format:?}, mixed={mixed}"
+                    );
+                    covered[bytes].fill(true);
+                }
+                let start = text.find(&wrapper).expect("wrapper start");
+                for (offset, ch) in wrapper.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
+                    assert!(
+                        covered[start + offset],
+                        "{format:?}, mixed={mixed}, missing {ch} at {offset}"
+                    );
+                }
+                if mixed {
+                    assert_eq!(named(&output.fragments, "ready").index, 0);
+                    assert_eq!(output.graph.expect("graph").head_fragment_indices, [0]);
+                }
+            }
+        }
     }
 
     #[test]
@@ -4379,7 +4454,19 @@ public class Service {
                     .iter()
                     .find(|entity| matches!(&entity.content, Content::Code(text) if text == table))
                     .expect("one complete dictionary assignment");
-                assert!(entity.metadata.is_none());
+                if has_caller {
+                    let Some(EntityMetadata::Code(metadata)) = &entity.metadata else {
+                        panic!("expected recovered module statement");
+                    };
+                    assert!(metadata.is_supplemental);
+                    assert_eq!(
+                        metadata.signature.as_deref(),
+                        Some("_SPECIAL_METHODS_PARAMS")
+                    );
+                    assert!(metadata.symbol_name.is_none());
+                } else {
+                    assert!(entity.metadata.is_none());
+                }
                 assert!(
                     matches!(entity.source_range, Range::Text(r) if r.start_line() == 3 && r.end_line() == 7)
                 );

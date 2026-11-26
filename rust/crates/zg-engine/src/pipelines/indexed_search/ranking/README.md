@@ -31,6 +31,21 @@ Usage queries disable definition bonuses. Queries asking for implementations
 do not boost the interface/trait declaration itself. Static name/definition/path
 bonuses are capped at 1.25 in the normalized RRF scale.
 
+When the candidate pool includes a named symbol, supplemental module statements
+use a static score factor of 0.5 for natural-language queries. Direct ASCII
+identifiers, whole quoted phrases, numbers, and single-target value lookups
+such as `What is CACHE_KEY set to?` use 1.0. A Unicode identifier, including
+one in a value lookup, qualifies when it matches the statement's binding or
+a whole identifier in its best matching fragment. A statement also keeps its
+full score when its best matching fragment contains the complete, case-sensitive query in the first
+8 KiB. Mentioning several identifiers in a question does not trigger an exemption.
+Existing anonymous chunks keep their original scores.
+
+For a single identifier or explicit single-target value or declaration lookup,
+an exact, case-sensitive match to a supplemental statement's extracted binding
+earns the exact name and definition bonuses. The trace labels this match
+`binding_exact`. Occurrences in fragment text do not earn these bonuses.
+
 Path roles use workspace-relative components and explicit filename patterns.
 Test/example/dependency intent and narrowly targeted include globs can waive a
 role penalty. A common dependency penalty is neutralized when all code candidates
@@ -53,6 +68,7 @@ For code hits, `score` is the rule selection score. In mixed results, use
 Trace preserves the original `fusion` rank and score for all hits. For code hits,
 `ranking` records the policy identifier, query features, name match/bonus,
 definition bonus, path roles/exemptions, static score, positive `path_bonus`,
+`supplemental_factor` for supplemental statements,
 `file_support_bonus`, `file_support_count`, selected file count, diversity factor,
 and group-local final rank.
 `path_overrides` lists roles exempted by query/scope, including those not present

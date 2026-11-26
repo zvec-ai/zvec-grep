@@ -88,6 +88,7 @@ fn metadata_fragments(
         source_range,
         content,
         Some(EntityMetadata::Code(CodeMetadata {
+            is_supplemental: false,
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some("harvest 春'\\crop".into()),
             scope: Some("Garden".into()),

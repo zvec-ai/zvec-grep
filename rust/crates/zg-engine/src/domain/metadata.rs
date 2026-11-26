@@ -52,11 +52,15 @@ impl IndexField {
 )]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeMetadata {
+    /// Retrieval content recovered outside the symbols of a mixed code file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_supplemental: bool,
     pub symbol_type: Option<SymbolType>,
     pub symbol_name: Option<String>,
     pub scope: Option<String>,
     /// Declaration syntax without comments, attributes, decorators or implementation bodies.
     /// Literal types and parameter defaults remain part of the declaration.
+    /// For a supplemental statement with a single recovered binding, this is its identifier.
     pub signature: Option<String>,
     pub documentation: Option<String>,
     pub visibility: Option<Visibility>,
