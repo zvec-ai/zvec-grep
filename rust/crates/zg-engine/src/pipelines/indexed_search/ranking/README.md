@@ -41,9 +41,10 @@ full score when its best matching fragment contains the complete, case-sensitive
 8 KiB. Mentioning several identifiers in a question does not trigger an exemption.
 Existing anonymous chunks keep their original scores.
 
-For a general query, code scoring subtracts earlier supplemental entities
-from each other code entity's rank on that same recall route. Each supplemental
-entity contributes its best fragment rank once per route. The rule preserves
+For a general query with vector recall, code scoring subtracts earlier
+supplemental entities from each other code entity's rank on the same vector
+route. Each supplemental entity contributes its best fragment rank once per
+vector route. FTS evidence keeps its original rank in every mode. The rule preserves
 the original fusion positions reserved for documents. Explicit source
 lookups use the original ranks. The ranking trace's `adjusted_route_ranks`
 lists changed ranks used for code scoring, alongside the original recall and

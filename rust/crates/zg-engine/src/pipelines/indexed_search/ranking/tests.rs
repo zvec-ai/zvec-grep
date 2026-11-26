@@ -254,11 +254,11 @@ fn general_queries_adjust_independent_route_ranks_once_per_supplemental_entity()
         if changes {
             assert_eq!(
                 ranked.adjusted_route_ranks,
-                BTreeMap::from([("fts".into(), 2), ("vector".into(), 7)])
+                BTreeMap::from([("vector".into(), 7)])
             );
             assert_eq!(
                 ranked.static_score,
-                reciprocal_rank(2) + reciprocal_rank(2) + reciprocal_rank(7)
+                reciprocal_rank(4) + reciprocal_rank(2) + reciprocal_rank(7)
             );
         } else {
             assert!(ranked.adjusted_route_ranks.is_empty(), "{query}");
@@ -279,6 +279,37 @@ fn general_queries_adjust_independent_route_ranks_once_per_supplemental_entity()
                 .all(|(a, b)| a.entity.id() == b.entity.id() && a.score == b.score)
         );
     }
+}
+
+#[test]
+fn fts_only_keeps_lexical_ranks_when_supplemental_entities_are_present() {
+    use super::super::pipeline::reciprocal_rank;
+    let mut pool = supplemental_recall_pool();
+    for hit in &mut pool {
+        let raw = hit.trace.as_mut().expect("fixture trace");
+        raw.recall.retain(|r| r.path == ContextRouteMode::Fts);
+        hit.score = raw
+            .recall
+            .iter()
+            .filter_map(|r| r.rank)
+            .map(reciprocal_rank)
+            .sum();
+        raw.fusion.score = hit.score;
+    }
+    let out = run(
+        "How is a request processed?",
+        pool,
+        &QueryFilter::default(),
+        4,
+    );
+    let trace = out
+        .iter()
+        .find(|h| h.entity.id().as_str() == "symbol")
+        .and_then(|h| h.trace.as_ref())
+        .expect("named result");
+    let ranking = trace.ranking.as_ref().expect("code ranking");
+    assert!(ranking.adjusted_route_ranks.is_empty());
+    assert_eq!(ranking.static_score, trace.fusion.score);
 }
 
 #[test]

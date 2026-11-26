@@ -333,7 +333,7 @@ pub mod result {
         pub policy: String,
         pub query_features: Vec<String>,
         pub normalized_base: f64,
-        /// Effective ranks for code scoring on routes where supplemental entities preceded this hit.
+        /// Effective vector ranks for code scoring where supplemental entities preceded this hit.
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         pub adjusted_route_ranks: std::collections::BTreeMap<String, usize>,
         pub symbol_match: String,

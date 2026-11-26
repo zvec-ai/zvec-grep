@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::{SourceLookup, matches_source_lookup};
 use crate::{
+    api::context::options::ContextRouteMode,
     domain::EntityMetadata,
     pipelines::indexed_search::pipeline::{SearchHit, reciprocal_rank},
 };
@@ -20,9 +21,12 @@ impl SupplementalRanks {
             return ranks;
         }
         for hit in hits.iter().filter(|hit| supplemental(hit)) {
-            // Recall already retains just the best fragment rank per entity per route.
+            // Keep lexical evidence at its original rank, including in hybrid
+            // search. Each entity contributes one best fragment per vector route.
             for route in hit.recall() {
-                if let Some(rank) = route.rank {
+                if route.path == ContextRouteMode::Vector
+                    && let Some(rank) = route.rank
+                {
                     ranks
                         .0
                         .entry(route.route_id.clone())
