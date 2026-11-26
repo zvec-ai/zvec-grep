@@ -58,7 +58,11 @@ Use production `resolve_index_concurrency` and
 concurrency only when no explicit admission policy is provided. Clear inherited
 indexing concurrency overrides so `default` uses the backend default:
 
-- llama.cpp has one in-flight batch; C controls native context parallelism within it.
+- llama.cpp uses C concurrent contexts on CPU, Metal and CUDA. Calls from one
+  operation share its C allowance; Server requests are capped by the fixed startup
+  context capacity. Each operation admits one batch at a time, independent of C;
+  production indexing therefore uses one caller. CPU threads per context are
+  configured independently.
 - Transformers/ONNX uses C sessions in direct mode. Resident mode fixes pool
   capacity at server startup and caps request C to that capacity. All Sessions
   share the process-global intra-op pool configured by T. The runtime selects Q.
@@ -86,13 +90,21 @@ runtime control. Historical records with dynamic batching retain their original
 metadata and must use separate output directories.
 
 `--server-concurrency C` selects resident runtime behavior and fixes the pool
-capacity with the production `ZVEC_GREP_EMBEDDING_CONCURRENCY` variable. Omit it
-for direct mode, where each measured C controls session count. `--ort-thread-budget T`
+capacity with `ZVEC_GREP_EMBEDDING_CONCURRENCY` for ORT and
+`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp. Omit it for direct mode, where
+each measured C controls session/context count. `--ort-thread-budget T`
 sets `ZVEC_GREP_ORT_THREAD_BUDGET`; omission uses the production automatic default.
 Ambient C/T overrides are cleared. Use separate output directories for different
 server capacities and T values. `--clients K` fixes caller count independently of
 production admission; omit it for the production workload. These controls are
 fingerprinted and validated against observed results.
+
+The fixed-shape case sends all clients through one operation lease. For llama.cpp,
+`--clients K` therefore measures K callers waiting for that operation's single
+batch admission slot; each admitted batch can still use C contexts. It does not
+simulate K independent Server requests, which acquire separate operation leases.
+Compare versions with identical clients and thread settings before attributing
+latency changes to native execution.
 
 Reports record session count, global intra-op configuration, effective execution
 concurrency, admission and native batch shape. They never multiply shared thread
@@ -298,3 +310,14 @@ configuration and initialization counts. The separate
 requests against pools of 1/2/4 Sessions, including correctness and cancellation.
 This is a correctness/latency regression, not a performance-only shape case or
 an end-to-end indexing/storage/retrieval benchmark.
+
+For llama.cpp, C always controls context concurrency. `--server-concurrency N`
+sets the fixed Server context capacity; requests are capped to N and share the
+same pool. Direct mode sizes the pool from C. In both modes,
+`ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT` can fix CPU threads per context;
+otherwise the default is half the available logical
+CPUs divided by pool capacity, floored and at least one. CUDA/Metal use one CPU
+helper thread per context. Resume checks include `--server-concurrency` and
+`ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT`, excluding the unused ambient context override.
+Results from the earlier CPU-thread-budget implementation are not comparable at
+the same C without matching resources.
