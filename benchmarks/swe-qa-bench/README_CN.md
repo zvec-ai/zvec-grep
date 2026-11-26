@@ -80,7 +80,9 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 
 独立的 [SWE-QA Offline 工作流](../../.github/workflows/swe-qa-offline.yml) 会在相关路径的 PR 和 `main` push 上运行 Python 与共享 Node 回归测试。它不读取模型密钥、不构建 candidate，也不运行 Harbor 或模型 trial。
 
-`workflow_dispatch` 默认选择 `repro-3`（3 题），也可选择 `all-full`（20 题）或 `smoke`（5 题）。`candidate_ref` 默认是 `main`，指定要单独检出并打包的 Rust 源码分支、标签或提交；benchmark harness 与候选源码分开。`model` 输入默认是 `glm-5.2`，也可选择 `qwen3.8-max`；所选模型同时用于执行和评审。独立的 `embedding` 输入默认是 `local`，对应 `local/potion-code-16m-v2`；选择 `remote` 时使用与 Retrieval-only 工作流一致的 `qwen/qwen3.7-text-embedding`。
+`workflow_dispatch` 默认选择 `repro-3`（3 题），也可选择 `all-full`（20 题）或 `smoke`（5 题）。`candidate_ref` 默认是 `main`，指定要单独检出并打包的 Rust 源码分支、标签或提交；benchmark harness 与候选源码分开。`model` 默认使用 `qwen4-max` 执行和自评，也可选择 `glm-5.2` 或 `qwen3.8-max`。独立的 `embedding` 输入默认是 `local`，对应 `local/potion-code-16m-v2`；选择 `remote` 时使用与 Retrieval-only 工作流一致的 `qwen/qwen3.7-text-embedding`。
+
+用 `judge` 重评已保存的答案时，选择生成答案的模型，例如旧 GLM 运行使用 `--model glm-5.2`。评分前会核对每条 trial 记录的模型。旧记录缺少模型字段时，请按原运行配置选择。
 
 `repro-3` 固定运行 3 题 × 2 个 profile × 5 次 = 30 个 trial，供小规模复现与迭代。任务按[运行 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943) 中的调查路径和评分波动选取。下表范围均来自该轮最终成功的五次测试：
 
@@ -92,7 +94,7 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 
 此分层是历史样本的描述，不是统计显著性标准，也不是模型的固有随机性等级。低波动组仍存在路径变化；高波动组的一次 baseline 使用子代理，主轨迹未展开其内部调用。新一轮应与历史同三题比较，失败尝试的开销单独计入。
 
-CI 默认使用 OpenCode `1.18.4`、`custom-openai/glm-5.2` 和本地 Embedding，每个任务、每个 profile 独立运行 5 次。请在仓库的 Actions secret 中配置 `GLM_API_KEY`，用于 Agent 执行和评审。两个执行模型沿用同一个 secret 名称；其中的百炼业务空间 API Key 需要具有所选模型的调用权限。远端 Embedding 还需要 Actions secret `QWEN_EMBEDDING_API_KEY` 和仓库 variable `QWEN_EMBEDDING_ENDPOINT`；只有选择 `embedding=remote` 时才会将源码内容发送到该远端 Embedding endpoint。上文的 Claude Code 配置对应已发布的本地测试协议。
+CI 默认使用 OpenCode `1.18.4`、`custom-openai/qwen4-max` 和本地 Embedding，每个任务、每个 profile 独立运行 5 次。请将有权调用所选模型的百炼业务空间 API Key 存入仓库的 Actions secret `GLM_API_KEY`。三个模型执行和自评时共用该密钥和同一个 OpenAI 兼容地址。Fork 可通过仓库变量 `SWE_QA_MODEL_BASE_URL` 指定自己业务空间的地址。远端 Embedding 还需要 Actions secret `QWEN_EMBEDDING_API_KEY` 和仓库 variable `QWEN_EMBEDDING_ENDPOINT`；只有选择 `embedding=remote` 时才会将源码内容发送到该远端 Embedding endpoint。上文的 Claude Code 配置对应已发布的本地测试协议。
 
 CI 的固定 trial 次数、失败重试上限及 local/remote Embedding 模型映射由版本化的 [`ci-config.json`](ci-config.json) 指定。执行模型、Embedding runtime、任务范围和 Rust 源码是手动运行的输入；密钥与 endpoint 属于运行环境配置。
 
@@ -106,7 +108,7 @@ SWE-QA suite 显式配置版本化的 [`index.ignore`](zg_bench/swe_qa/data/inde
 
 OpenCode 的两个 profile、子代理和评审统一使用所选模型，并请求以下参数，常量位于 `zg_bench/settings.py`：
 
-| 参数 | Qwen3.8 Max / GLM-5.2 执行与评审请求值 |
+| 参数 | Qwen4 Max / Qwen3.8 Max / GLM-5.2 执行与评审请求值 |
 | --- | --- |
 | `temperature` | `0` |
 | `seed` | `42` |
@@ -115,11 +117,11 @@ OpenCode 的两个 profile、子代理和评审统一使用所选模型，并请
 | `max_tokens` | `32000` |
 | `response_format` | 不传入 |
 
-所有 trial 和重试使用同一个 seed。custom-openai 下的 Qwen3.8 Max、GLM 配置，以及 DashScope 下的 GLM 配置均设置 `reasoningEffort = "high"`，OpenAI-compatible SDK 会将其映射为 HTTP 请求中的 `reasoning_effort`。执行模型显式声明 `limit.output`，评审请求的 `max_tokens` 使用同一个 `BENCHMARK_MAX_OUTPUT_TOKENS` 常量。
+所有 trial 和重试使用同一个 seed。custom-openai 下的 Qwen4 Max、Qwen3.8 Max、GLM 配置，以及 DashScope 下的 GLM 配置均设置 `reasoningEffort = "high"`，OpenAI-compatible SDK 会将其映射为 HTTP 请求中的 `reasoning_effort`。执行模型显式声明 `limit.output`，评审请求的 `max_tokens` 使用同一个 `BENCHMARK_MAX_OUTPUT_TOKENS` 常量。
 
-[百炼 Chat Completions 文档](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions) 说明了模型间的参数差异：Qwen3.8 Max 在思考模式下会将低于 `0.6` 的温度自动调整为 `0.6`，并将 `reasoning_effort="high"` 映射为 `xhigh`。因此此配置下 Qwen 的**实际温度不是零**。此外，`max_tokens=32000` 对 Qwen 只限制最终回答，不包含思考；对未设置 `thinking_budget` 的 GLM-5.2 则限制思考与回答的总和。本 benchmark 保留相同请求字段，但两个模型的实际采样设置和 token 预算并不完全相同。
+[百炼 Chat Completions 文档](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions) 说明了模型间的参数差异：Qwen3.8 Max 在思考模式下会将低于 `0.6` 的温度自动调整为 `0.6`，并将 `reasoning_effort="high"` 映射为 `xhigh`。因此 Qwen3.8 Max 在此配置下的实际温度为 `0.6`。此外，`max_tokens=32000` 对 Qwen3.8 Max 只限制最终回答，不包含思考；对未设置 `thinking_budget` 的 GLM-5.2 则限制思考与回答的总和。本 benchmark 保留相同请求字段，但两个模型的实际采样设置和 token 预算并不完全相同。
 
-Qwen3.8 Max 默认开启 `preserve_thinking`。OpenCode 模型配置设置 `interleaved: {"field": "reasoning_content"}`，将历史思考内容通过独立的 `reasoning_content` 字段回传，不拼入回答正文。参见[深度思考用法](https://help.aliyun.com/zh/model-studio/deep-thinking)和[Qwen3.8 Max 模型信息](https://help.aliyun.com/zh/model-studio/qwen3-8-max)。原有独立的 Qwen3.7 配置仍保持关闭 thinking。
+Qwen3.8 Max 默认开启 `preserve_thinking`。Qwen4 Max 和 Qwen3.8 Max 的 OpenCode 配置均设置 `interleaved: {"field": "reasoning_content"}`，将历史思考内容通过独立的 `reasoning_content` 字段回传，不拼入回答正文。参见[深度思考用法](https://help.aliyun.com/zh/model-studio/deep-thinking)和[Qwen3.8 Max 模型信息](https://help.aliyun.com/zh/model-studio/qwen3-8-max)。原有独立的 Qwen3.7 配置仍保持关闭 thinking。
 
 执行和评审请求均不传入 `response_format`。评审提示词仍要求 JSON，并保留严格的评分解析与格式错误重试；报告元数据记录 `response_format = null`，表示请求未强制响应格式。
 
@@ -127,7 +129,7 @@ OpenCode 配置同时声明模型支持 temperature，并为所有内置 agent�
 
 两个 OpenCode profile 在全局及全部内置 agent（包含子代理）统一禁止 `websearch` 和 `webfetch`。即使 Harbor 跳过交互式权限确认，这两个工具也不会出现在发给模型的工具列表中。本地仓库搜索、文件读取和 zvec-grep MCP 仍可使用。这是网页工具限制，并非容器网络隔离；shell 命令及安装、模型连接仍可访问网络。
 
-CI 还会使用锁定版本的 OpenCode 连接本地模拟服务，验证连续工具调用请求中的采样参数、开启 Qwen3.8 Max / GLM thinking、实际 HTTP 字段 `reasoning_effort = "high"`、网页工具限制，以及 Qwen 历史 `reasoning_content` 字段的回传，不需要模型凭证。
+CI 还会使用锁定版本的 OpenCode 连接本地模拟服务，验证连续工具调用请求中的采样参数、开启 Qwen4 Max / Qwen3.8 Max / GLM thinking、实际 HTTP 字段 `reasoning_effort = "high"`、网页工具限制，以及 Qwen 历史 `reasoning_content` 字段的回传，不需要模型凭证。
 
 每个任务在同一个 runner 上运行 Baseline 和 zvec-grep，对配对结果进行评审，并将 Harbor 运行证据和独立任务报告上传为 artifacts。全部任务完成后生成聚合报告；部分任务失败时，Summary 仍展示已完成任务的报告，不将不完整结果作为完整 benchmark 聚合。
 

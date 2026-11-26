@@ -95,8 +95,14 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
             set(self.workflow["on"]), {"workflow_dispatch", "workflow_call"}
         )
         model = self.workflow["on"]["workflow_dispatch"]["inputs"]["model"]
-        self.assertEqual(model["default"], "glm-5.2")
-        self.assertEqual(set(model["options"]), {"glm-5.2", "qwen3.8-max"})
+        self.assertEqual(model["default"], "qwen4-max")
+        callable_model = self.workflow["on"]["workflow_call"]["inputs"]["model"]
+        self.assertEqual(callable_model["default"], model["default"])
+        wrapper = yaml.load(
+            (ROOT / ".github/workflows/zg-bench.yml").read_text(), Loader=yaml.BaseLoader
+        )
+        self.assertNotIn("model", wrapper["jobs"]["e2e"]["with"])
+        self.assertEqual(set(model["options"]), {"glm-5.2", "qwen3.8-max", "qwen4-max"})
         embedding = self.workflow["on"]["workflow_dispatch"]["inputs"]["embedding"]
         self.assertEqual(embedding["default"], "local")
         self.assertEqual(set(embedding["options"]), {"local", "remote"})

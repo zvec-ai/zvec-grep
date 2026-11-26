@@ -241,6 +241,7 @@ class SessionUsageReportingTests(unittest.TestCase):
                     references_path=references,
                     output_dir=root / "report",
                     expected=["reflex:6"],
+                    model="glm-5.2",
                     completion_fn=completion,
                 )
             self.assertEqual(report["usage_scope"], SESSION_USAGE_SCOPE)

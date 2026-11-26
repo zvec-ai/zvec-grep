@@ -151,11 +151,17 @@ Harbor/model trials.
 `workflow_dispatch` defaults to `repro-3` (3 tasks); `all-full` (20 tasks) and
 `smoke` (5 tasks) remain available. `candidate_ref` defaults to `main` and
 selects the Rust source branch, tag, or commit to build as the candidate npm
-package; the harness checkout and candidate source are separate. Its `model` input defaults to
-`glm-5.2`; select `qwen3.8-max` to run the same protocol with Qwen. The selected
-model is used for both execution and judging. The independent `embedding` input
+package. The harness and candidate source use separate checkouts.
+The `model` input defaults to `qwen4-max` for both execution and
+self-judging. Select `glm-5.2` or `qwen3.8-max` to run the same protocol with
+another model. The independent `embedding` input
 defaults to `local`, using `local/potion-code-16m-v2`; select `remote` to use
 `qwen/qwen3.7-text-embedding`, matching the Retrieval-only workflow.
+
+When rescoring saved answers with `judge`, select their execution model, for
+example `--model glm-5.2` for older GLM runs. The judge checks each recorded
+model before sending requests. For older trials without a model field, use
+the model from the original run configuration.
 
 The `repro-3` scope runs 3 tasks × 2 profiles × 5 trials = 30 trials. Its fixed
 tasks were selected from [run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943)
@@ -175,11 +181,12 @@ to a subagent whose internal calls are absent from the main trace. Compare new
 trials against the same three historical tasks, and account for failed-attempt
 overhead separately.
 
-CI uses OpenCode `1.18.4` with `custom-openai/glm-5.2` and local embedding by
+CI uses OpenCode `1.18.4` with `custom-openai/qwen4-max` and local embedding by
 default, with five trials per task and profile. Configure the repository's
-`GLM_API_KEY` Actions secret for agent
-execution and judging. The existing secret name is retained for both models;
-its Bailian business-space API key must have access to the selected model.
+`GLM_API_KEY` Actions secret with a Bailian workspace key that can invoke the
+selected model. All three models use this key and the same OpenAI-compatible
+base URL for execution and self-judging. Forks can set the repository variable
+`SWE_QA_MODEL_BASE_URL` to their workspace URL.
 Remote embedding additionally requires the `QWEN_EMBEDDING_API_KEY` Actions
 secret and `QWEN_EMBEDDING_ENDPOINT` repository variable. Source content is sent
 to that remote embedding endpoint only when `embedding=remote`.
@@ -213,7 +220,7 @@ Each task job has a six-hour ceiling, including setup and retries.
 Both OpenCode profiles, their delegated agents, and the judge use the selected
 model with the following requested settings, shared in `zg_bench/settings.py`:
 
-| Parameter | Qwen3.8 Max / GLM-5.2 execution and judging |
+| Parameter | Qwen4 Max / Qwen3.8 Max / GLM-5.2 execution and judging |
 | --- | --- |
 | `temperature` | `0` |
 | `seed` | `42` |
@@ -222,8 +229,8 @@ model with the following requested settings, shared in `zg_bench/settings.py`:
 | `max_tokens` | `32000` |
 | `response_format` | Omitted |
 
-The same seed is used for every trial and retry. The custom-openai Qwen3.8 Max
-and GLM configurations and the DashScope GLM configuration set `reasoningEffort = "high"`; the
+The same seed is used for every trial and retry. The custom-openai Qwen4 Max,
+Qwen3.8 Max and GLM configurations and the DashScope GLM configuration set `reasoningEffort = "high"`; the
 OpenAI-compatible SDK maps this to the HTTP field `reasoning_effort`.
 Execution sets the model's `limit.output` explicitly, and the judge uses the
 same `BENCHMARK_MAX_OUTPUT_TOKENS` constant for `max_tokens`.
@@ -231,14 +238,14 @@ same `BENCHMARK_MAX_OUTPUT_TOKENS` constant for `max_tokens`.
 The [Bailian Chat Completions reference](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)
 documents model-specific behavior: Qwen3.8 Max raises a requested temperature
 below `0.6` to `0.6` in thinking mode, and maps `high` reasoning effort to
-`xhigh`. These requests therefore do **not** give Qwen an effective temperature
-of zero. Also, `max_tokens=32000` limits Qwen's final answer, excluding thinking;
+`xhigh`. These requests therefore do **not** give Qwen3.8 Max an effective temperature
+of zero. Also, `max_tokens=32000` limits Qwen3.8 Max's final answer, excluding thinking;
 for GLM-5.2 without `thinking_budget`, it limits thinking and the answer together.
 The benchmark retains the same requested fields across these models, but their
 effective sampling settings and token budgets are not identical.
 
-Qwen3.8 Max enables `preserve_thinking` by default. Its OpenCode model config
-sets `interleaved: {"field": "reasoning_content"}` so historical reasoning is
+Qwen3.8 Max enables `preserve_thinking` by default. The Qwen4 Max and
+Qwen3.8 Max OpenCode configurations set `interleaved: {"field": "reasoning_content"}` so historical reasoning is
 returned in the separate `reasoning_content` field, rather than concatenated
 into answer content. See the [thinking guide](https://help.aliyun.com/zh/model-studio/deep-thinking)
 and [Qwen3.8 Max model information](https://help.aliyun.com/zh/model-studio/qwen3-8-max).
@@ -267,7 +274,7 @@ restriction, not container network isolation; shell commands and setup/model
 connections still have network access.
 
 CI also checks the pinned OpenCode binary against a local fake provider to
-verify the sampling parameters, enabled Qwen3.8 Max / GLM thinking, the actual
+verify the sampling parameters, enabled Qwen4 Max / Qwen3.8 Max / GLM thinking, the actual
 `reasoning_effort = "high"` request field, and web-tool restrictions in
 consecutive tool-calling requests, including Qwen's historical
 `reasoning_content` field, without using model credentials.

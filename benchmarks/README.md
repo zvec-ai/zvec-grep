@@ -37,7 +37,7 @@ Remote embedding also requires its own key and endpoint; see
 | --- | --- | --- |
 | PR opened, reopened or updated, including fork PRs | Retrieval-only on the exact PR base and head; local embedding | Updated PR bot comment, Actions summaries and `retrieval-comparison` artifact |
 | New PR Conversation comment with `@zg-bench` on its own line | The same Retrieval version comparison | One bot comment, updated from queued status to results |
-| Manual **ZG Bench** dispatch with `pr_number` | Retrieval comparison; e2e only with explicit `run_e2e: true` | The same bot comment and run artifacts |
+| Manual **ZG Bench** dispatch with `pr_number` | Retrieval comparison, plus SWE-QA execution and self-judging with `qwen4-max` when `run_e2e: true` | The same bot comment and run artifacts |
 | Manual **SWE-QA Bench** dispatch | Selected e2e scope, model and embedding runtime | Task evidence and aggregate report |
 | Relevant benchmark source/workflow changes | Offline benchmark regression checks | CI logs; no model calls |
 

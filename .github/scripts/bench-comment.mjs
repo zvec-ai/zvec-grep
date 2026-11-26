@@ -126,7 +126,7 @@ export async function prepare({ github, context, core, env }) {
     "| --- | --- | --- |",
     "| Retrieval | Queued | PR base vs head; SWE-QA20 + BEIR + DuRetrieval + Quarry; local embedding |",
     runE2e
-      ? "| e2e | Queued | SWE-QA20; OpenCode + GLM-5.2; baseline / zvec-grep; 5 trials per profile |"
+      ? "| e2e | Queued | SWE-QA20 with OpenCode using the workflow default model for execution and self-judging (baseline / zvec-grep, 5 trials per profile) |"
       : "| e2e | Skipped | Disabled by default |",
     "",
     `[View run and artifacts](${runUrl(context)})`,

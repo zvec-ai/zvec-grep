@@ -13,6 +13,7 @@ from zg_bench.settings import (
     OPENCODE_QWEN_ENABLE_THINKING,
     OPENCODE_QWEN_REASONING_EFFORT,
     OPENCODE_QWEN_TEMPERATURE,
+    SWE_QA_QWEN_MODELS,
 )
 
 SCORE_KEYS = ("correctness", "completeness", "relevance", "clarity", "coherence")
@@ -34,12 +35,15 @@ MODEL_REQUEST_SPECS = {
         reasoning_effort=OPENCODE_GLM_REASONING_EFFORT,
         max_tokens=BENCHMARK_MAX_OUTPUT_TOKENS,
     ),
-    "qwen3.8-max": ModelRequestSpec(
-        temperature=OPENCODE_QWEN_TEMPERATURE,
-        enable_thinking=OPENCODE_QWEN_ENABLE_THINKING,
-        reasoning_effort=OPENCODE_QWEN_REASONING_EFFORT,
-        max_tokens=BENCHMARK_MAX_OUTPUT_TOKENS,
-    ),
+    **{
+        model: ModelRequestSpec(
+            temperature=OPENCODE_QWEN_TEMPERATURE,
+            enable_thinking=OPENCODE_QWEN_ENABLE_THINKING,
+            reasoning_effort=OPENCODE_QWEN_REASONING_EFFORT,
+            max_tokens=BENCHMARK_MAX_OUTPUT_TOKENS,
+        )
+        for model in SWE_QA_QWEN_MODELS
+    },
 }
 JUDGE_MODELS = tuple(MODEL_REQUEST_SPECS)
 

@@ -9,6 +9,7 @@ from zg_bench.core.errors import (
     SweQaError,
 )
 from zg_bench.core.protocol import (
+    JUDGE_MODELS,
     PROFILE_NAMES,
     SCORE_KEYS,
     judge_label,
@@ -36,11 +37,32 @@ from zg_bench.reports.aggregate import aggregate_reports as aggregate_reports
 from zg_bench.reports.render import (
     write_report,
 )
-from zg_bench.settings import BENCHMARK_SEED
+from zg_bench.settings import BENCHMARK_SEED, DEFAULT_SWE_QA_MODEL
 from zg_bench.swe_qa.pairs import (
     load_pairs,
     load_references,
 )
+
+
+def _validate_self_judge_model(pairs: dict[str, dict[str, Any]], model: str) -> None:
+    for task, pair in pairs.items():
+        for profile in PROFILE_NAMES:
+            for trial in pair["profiles"][profile]["trials"]:
+                recorded = trial.get("model")
+                if recorded is None:  # Older evidence can omit the execution model.
+                    continue
+                location = f"{task} {profile} trial {trial['trial_index']}"
+                if not isinstance(recorded, str) or not recorded.strip():
+                    raise SweQaError(f"{location} has an invalid execution model")
+                # Harbor evidence may use a bare ID or a provider/model name.
+                execution_model = recorded.split("/", 1)[-1]
+                if execution_model != model:
+                    message = (
+                        f"{location} used {recorded!r} and cannot be self-judged by {model!r}."
+                    )
+                    if execution_model in JUDGE_MODELS:
+                        message += f" Use --model {execution_model} for its trials."
+                    raise SweQaError(message)
 
 
 def judge_pairs(
@@ -52,7 +74,7 @@ def judge_pairs(
     completion_fn: Completion | None = None,
     attempts: int = 3,
     concurrency: int | None = None,
-    model: str = "glm-5.2",
+    model: str = DEFAULT_SWE_QA_MODEL,
 ) -> dict[str, Any]:
     """Apply the same-model judge and emit JSON/Markdown reports."""
     label = judge_label(model)
@@ -60,6 +82,7 @@ def judge_pairs(
         raise SweQaError("judge attempts must be between 1 and 5")
     concurrency = judge_concurrency(concurrency)
     pairs = load_pairs(pairs_root, expected)
+    _validate_self_judge_model(pairs, model)
     references = load_references(references_path)
     missing_references = [task for task in expected if task not in references]
     if missing_references:

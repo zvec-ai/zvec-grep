@@ -22,9 +22,8 @@ from ..settings import (
     OPENCODE_CUSTOM_GLM_MODEL,
     OPENCODE_CUSTOM_GLM_MODEL_ID,
     OPENCODE_CUSTOM_QWEN_BASE_URL,
-    OPENCODE_CUSTOM_QWEN_MODEL,
-    OPENCODE_CUSTOM_QWEN_MODEL_ID,
     OPENCODE_DASHSCOPE_BASE_URL,
+    SWE_QA_QWEN_MODELS,
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_EMBEDDING,
     ZVEC_GREP_EMBEDDING_ENDPOINT,
@@ -37,7 +36,6 @@ CLAUDE_CODE_CREDENTIAL_ENV_VARS = (
 )
 
 _GLM_REQUEST = model_request_spec("glm-5.2")
-_QWEN_REQUEST = model_request_spec("qwen3.8-max")
 
 
 @dataclass(frozen=True)
@@ -82,6 +80,27 @@ class ResolvedOpenCodeModel:
     configuration: OpenCodeModel
     credential_name: str | None
     api_key: str | None
+
+
+def _custom_qwen_model(model_id: str, display_name: str) -> AgentModelSupport:
+    request = model_request_spec(model_id)
+    return AgentModelSupport(
+        "opencode",
+        f"custom-openai/{model_id}",
+        opencode=OpenCodeModel(
+            provider="custom-openai",
+            model_id=model_id,
+            base_url=OPENCODE_CUSTOM_QWEN_BASE_URL,
+            credential_env_vars=("GLM_API_KEY", "OPENAI_API_KEY"),
+            base_url_env_vars=("GLM_BASE_URL", "OPENAI_BASE_URL"),
+            temperature=request.temperature,
+            enable_thinking=request.enable_thinking,
+            reasoning_effort=request.reasoning_effort,
+            output_limit=request.max_tokens,
+            display_name=display_name,
+            interleaved=True,
+        ),
+    )
 
 
 AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
@@ -137,22 +156,9 @@ AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
             enable_thinking=False,
         ),
     ),
-    AgentModelSupport(
-        "opencode",
-        OPENCODE_CUSTOM_QWEN_MODEL,
-        opencode=OpenCodeModel(
-            provider="custom-openai",
-            model_id=OPENCODE_CUSTOM_QWEN_MODEL_ID,
-            base_url=OPENCODE_CUSTOM_QWEN_BASE_URL,
-            credential_env_vars=("GLM_API_KEY", "OPENAI_API_KEY"),
-            base_url_env_vars=("GLM_BASE_URL", "OPENAI_BASE_URL"),
-            temperature=_QWEN_REQUEST.temperature,
-            enable_thinking=_QWEN_REQUEST.enable_thinking,
-            reasoning_effort=_QWEN_REQUEST.reasoning_effort,
-            output_limit=_QWEN_REQUEST.max_tokens,
-            display_name="Qwen 3.8 Max",
-            interleaved=True,
-        ),
+    *(
+        _custom_qwen_model(model_id, display_name)
+        for model_id, display_name in SWE_QA_QWEN_MODELS.items()
     ),
 )
 

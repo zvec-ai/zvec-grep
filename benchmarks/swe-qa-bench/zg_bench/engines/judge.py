@@ -22,6 +22,7 @@ from zg_bench.metrics.usage import (
 )
 from zg_bench.settings import (
     BENCHMARK_SEED,
+    DEFAULT_SWE_QA_MODEL,
 )
 
 DEFAULT_JUDGE_CONCURRENCY = 3
@@ -40,14 +41,14 @@ def judge_temperature(model: str) -> float:
     return model_request_spec(model).temperature
 
 
-def judge_generation_metadata(model: str = "glm-5.2") -> dict[str, Any]:
+def judge_generation_metadata(model: str = DEFAULT_SWE_QA_MODEL) -> dict[str, Any]:
     spec = model_request_spec(model)
     return {
         "enable_thinking": spec.enable_thinking,
         "reasoning_effort": spec.reasoning_effort,
         "max_tokens": spec.max_tokens,
         # The rubric prompt requests JSON; no API-enforced format is enabled.
-        # Parsing and retries enforce valid scores for both supported models.
+        # Parsing and retries enforce valid scores for each supported model.
         "response_format": None,
     }
 
@@ -182,7 +183,7 @@ def judge_candidate(
     reference: str,
     candidate: str,
     attempts: int,
-    model: str = "glm-5.2",
+    model: str = DEFAULT_SWE_QA_MODEL,
 ) -> dict[str, Any]:
     generation = judge_generation_metadata(model)
     prompt = _judge_prompt(question=question, reference=reference, candidate=candidate)
@@ -235,7 +236,7 @@ def judge_task_trials(
     api_base: str,
     attempts: int,
     concurrency: int,
-    model: str = "glm-5.2",
+    model: str = DEFAULT_SWE_QA_MODEL,
 ) -> dict[str, list[dict[str, Any]]]:
     work_items = [
         (profile_name, trial)
