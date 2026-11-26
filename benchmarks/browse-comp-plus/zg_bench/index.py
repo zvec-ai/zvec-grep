@@ -51,6 +51,7 @@ def index_is_ready(
     environment["ZVEC_GREP_HOME"] = str(
         (artifacts / "runtime" / "zvec-home").resolve()
     )
+    environment["ZVEC_GREP_MODEL_CACHE"] = str((artifacts / "models").resolve())
     status = run_command(
         [executable, "--status", root, "--mode", "direct", "--check-ready"],
         cwd=root,
@@ -83,6 +84,7 @@ def build_index(
     environment["ZVEC_GREP_HOME"] = str(
         (artifacts / "runtime" / "zvec-home").resolve()
     )
+    environment["ZVEC_GREP_MODEL_CACHE"] = str((artifacts / "models").resolve())
     _prepare_remote_authorization(config, executable, root, environment)
 
     existing = artifacts / "state" / "index.json"
@@ -163,6 +165,7 @@ def build_index(
         "build_wall_seconds": build_wall_seconds,
         "index_bytes": _directory_bytes(index_dir),
         "runtime_bytes": _directory_bytes(artifacts / "runtime" / "zvec-home"),
+        "model_cache_bytes": _directory_bytes(artifacts / "models"),
         "status_output": status.stdout,
         "statistics": _parse_status(status.stdout),
         "build_stdout_log": str(stdout_log.resolve()),
