@@ -623,6 +623,21 @@ fn qualified_scopes_require_the_whole_component_suffix() {
 }
 
 #[test]
+fn rust_generic_scopes_match_the_type_identifier() {
+    let parser = QueryFeatures::new("list methods of Parser");
+    assert!(parser.names_function_file_or_scope("jsonc.rs", Some("Parser<'a>")));
+    assert!(!parser.names_function_file_or_scope("jsonc.rs", Some("OtherParser<'a>")));
+    assert!(!parser.names_function_file_or_scope("jsonc.rs", Some("Wrapper<ast::Parser>")));
+
+    let qualified = QueryFeatures::new("methods of jsonc::Parser");
+    let scope = "crate::jsonc::Parser<'a, Vec<ast::Node>>";
+    assert!(qualified.names_function_file_or_scope("dispatch.rs", Some(scope)));
+    assert!(!qualified.names_function_file_or_scope("dispatch.rs", Some("legacy::Parser<'a>")));
+    let scope = "Registry<fn() -> ast::Node>::jsonc::Parser<'a>";
+    assert!(qualified.names_function_file_or_scope("dispatch.rs", Some(scope)));
+}
+
+#[test]
 fn leading_qualified_types_anchor_their_methods() {
     for query in [
         "Router::{connect, disconnect}",

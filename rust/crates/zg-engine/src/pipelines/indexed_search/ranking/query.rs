@@ -1,5 +1,5 @@
 //! Query-local structural signals; source text references are not name matches.
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use super::Policy;
 use crate::domain::{CodeMetadata, SymbolType};
@@ -262,8 +262,8 @@ impl QueryFeatures {
 
     pub(super) fn names_function_file_or_scope(&self, path: &str, scope: Option<&str>) -> bool {
         if scope.is_some_and(|scope| {
-            let scope = scope.replace('.', "::");
-            self.scope_names.contains(&scope)
+            let scope = scope_type_name(scope);
+            self.scope_names.contains(scope.as_ref())
                 || scope
                     .match_indices("::")
                     .any(|(i, _)| self.scope_names.contains(&scope[i + 2..]))
@@ -381,6 +381,30 @@ fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
         .collect();
     scope_names.extend(standalone_names.into_iter().map(str::to_owned));
     (scope_names, file_stems)
+}
+
+/// Keep the qualified type name from extracted scopes such as `jsonc::Parser<'a>`.
+fn scope_type_name(scope: &str) -> Cow<'_, str> {
+    if !scope.contains(['.', '<']) {
+        return Cow::Borrowed(scope);
+    }
+    let mut name = String::with_capacity(scope.len());
+    let mut depth = 0;
+    for (i, ch) in scope.char_indices() {
+        match ch {
+            '<' => {
+                if depth == 0 {
+                    name.truncate(name.trim_end().len());
+                }
+                depth += 1;
+            }
+            '>' if depth > 0 && !scope[..i].ends_with('-') => depth -= 1,
+            _ if depth > 0 => {}
+            '.' => name.push_str("::"),
+            _ => name.push(ch),
+        }
+    }
+    Cow::Owned(name)
 }
 
 fn normalized_stem(name: &str) -> String {
