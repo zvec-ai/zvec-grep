@@ -6,7 +6,7 @@
     "claims_sha256": "86f0435d08fdb65d1aa41d1472684f57e6e71930626497bdf4d7a9ec1a632217",
     "corpus_member": "data/corpus.jsonl",
     "corpus_sha256": "b8d6c89624cb2ed74dee8938effc4f5d8bd2086887880af8110d64be4ceade62",
-    "beir_source_lock_sha256": "8f1c15bfd8083eebe4f85f5b308fa1cc6c52ceffd08d6b573e8f62572b3023fe",
+    "beir_source_lock_sha256": "d54fe93a2cb3e64348b0ad91e0f4d8a23660bcc111f843722e7cbc30be0d2064",
     "beir_mirror_revision": "b3b5335604bf5ee3c4447671af975ea25143d4f5",
     "semantics_url": "https://github.com/allenai/scifact/blob/master/doc/evaluation.md",
     "description": "Four fixed materialized abstracts and their complete original SciFact evidence sets. Sentence numbers are zero-based."

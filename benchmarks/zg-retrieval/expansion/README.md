@@ -77,7 +77,7 @@ out-of-range source lines are still rejected.
 
 After one shared Rust package build, SWE-QA20, BEIR, DuRetrieval and Quarry run
 in four parallel suite jobs. BEIR and DuRetrieval use
-`local/potion-multilingual-128m`; the two code suites use
+`local/bekko-256-int8`; the two code suites use
 `local/potion-code-16m-v2`. These configured models are the default `local`
 workflow choice. The optional `remote` choice overrides all four suites with
 `qwen/qwen3.7-text-embedding` without changing the pinned dataset files. Each
