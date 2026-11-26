@@ -2,10 +2,10 @@
 
 mod compute;
 mod concurrency;
+pub(crate) mod llama_config;
 mod manager;
 pub(crate) mod ort_config;
 
 pub(super) use compute::ModelComputeRuntime;
-pub(super) use concurrency::LOCAL_CONCURRENCY_CAP;
 pub(crate) use concurrency::{batch_concurrency, resolve_index_concurrency};
 pub(crate) use manager::{ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest};

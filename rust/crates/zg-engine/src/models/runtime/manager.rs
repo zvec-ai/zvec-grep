@@ -16,7 +16,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::compute::ModelComputeRuntime;
-use super::concurrency::{batch_concurrency, is_transformers, local_runtime_limit};
+use super::concurrency::{batch_concurrency, is_llama, is_transformers, local_runtime_limit};
+use super::llama_config::{LlamaResources, LlamaSettings};
 use crate::domain::{
     Content,
     model::{Device, EmbeddingModelInfo, EmbeddingResult, HttpEmbeddingConfig, ModelConfig},
@@ -29,7 +30,13 @@ use crate::models::{
     },
 };
 
-type ModelFactory = dyn Fn(&str, ModelConfig, ModelComputeRuntime, usize) -> Result<Arc<dyn EmbeddingModel>, ModelError>
+type ModelFactory = dyn Fn(
+        &str,
+        ModelConfig,
+        ModelComputeRuntime,
+        usize,
+        Option<Arc<LlamaResources>>,
+    ) -> Result<Arc<dyn EmbeddingModel>, ModelError>
     + Send
     + Sync;
 
@@ -45,6 +52,7 @@ struct ManagerInner {
     state: Mutex<ManagerState>,
     policy: CachePolicy,
     default_ort_sessions: usize,
+    llama_settings: LlamaSettings,
 }
 
 #[derive(Default)]
@@ -53,6 +61,7 @@ struct ManagerState {
     entries: HashMap<ModelRuntimeKey, CachedRuntime>,
     maintenance: Option<SyncSender<()>>,
     server_ort_sessions: Option<usize>,
+    server_llama: Option<Arc<LlamaResources>>,
 }
 
 #[derive(Clone, Copy)]
@@ -93,7 +102,7 @@ struct ModelRuntimeEntry {
 struct ModelRuntime {
     model: Arc<dyn EmbeddingModel>,
     active_embeddings: AtomicUsize,
-    // llama.cpp callers with the same budget share admission across all leases.
+    // Backends with a local runtime limit share admission across leases.
     batch_permits: Option<Arc<Semaphore>>,
 }
 
@@ -128,6 +137,7 @@ struct ModelRuntimeKey {
     device: Option<Device>,
     local_limit: Option<usize>,
     ort_sessions: Option<usize>,
+    llama_contexts: Option<usize>,
 }
 
 /// A counted handle to a shared model runtime.
@@ -156,8 +166,8 @@ pub(crate) struct ModelRuntimeSnapshot {
 
 impl ModelRuntimeManager {
     pub(crate) fn new() -> Self {
-        Self::with_factory(|reference, options, compute, sessions| {
-            create_embedding_model(reference, Some(options), compute, sessions)
+        Self::with_factory(|reference, options, compute, sessions, llama| {
+            create_embedding_model(reference, Some(options), compute, sessions, llama)
         })
     }
 
@@ -167,6 +177,7 @@ impl ModelRuntimeManager {
             ModelConfig,
             ModelComputeRuntime,
             usize,
+            Option<Arc<LlamaResources>>,
         ) -> Result<Arc<dyn EmbeddingModel>, ModelError>
         + Send
         + Sync
@@ -187,6 +198,7 @@ impl ModelRuntimeManager {
                 state: Mutex::new(ManagerState::default()),
                 policy,
                 default_ort_sessions: super::ort_config::default_sessions(),
+                llama_settings: LlamaSettings::capture(),
             }),
         }
     }
@@ -212,6 +224,8 @@ impl ModelRuntimeManager {
             ));
         }
         state.server_ort_sessions = Some(sessions.max(1));
+        let settings = self.inner.llama_settings;
+        state.server_llama = Some(settings.resources(settings.server_contexts));
         Ok(())
     }
 
@@ -241,6 +255,9 @@ impl ModelRuntimeManager {
                 )
             }));
         }
+        let llama =
+            is_llama(&reference).then(|| self.inner.llama_resources(&state, embedding_concurrency));
+        key.llama_contexts = llama.as_ref().map(|resources| resources.contexts);
         self.inner.start_maintenance(&mut state)?;
         retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
 
@@ -256,6 +273,7 @@ impl ModelRuntimeManager {
                 options,
                 self.inner.compute_runtime.clone(),
                 key.ort_sessions.unwrap_or(1),
+                llama,
             )?;
             let entry = Arc::new(ModelRuntimeEntry {
                 runtime: Arc::new(ModelRuntime {
@@ -407,6 +425,17 @@ impl ManagerState {
 }
 
 impl ManagerInner {
+    fn llama_resources(
+        &self,
+        state: &ManagerState,
+        requested: Option<usize>,
+    ) -> Arc<LlamaResources> {
+        state
+            .server_llama
+            .clone()
+            .unwrap_or_else(|| self.llama_settings.resources(requested.unwrap_or(1)))
+    }
+
     fn start_maintenance(self: &Arc<Self>, state: &mut ManagerState) -> Result<(), ModelError> {
         if state.maintenance.is_none() {
             let (sender, receiver) = mpsc::sync_channel(1);
@@ -490,6 +519,7 @@ impl ModelRuntimeLease {
         let mut key = ModelRuntimeKey::new(&request.reference, &request.options);
         key.local_limit = self.key.local_limit;
         key.ort_sessions = self.key.ort_sessions;
+        key.llama_contexts = self.key.llama_contexts;
         self.key == key
     }
 
@@ -510,7 +540,7 @@ impl ModelRuntimeLease {
     }
 
     pub(crate) fn index_batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
-        if is_transformers(&self.key.reference) {
+        if is_transformers(&self.key.reference) || is_llama(&self.key.reference) {
             Some(self.admission_concurrency())
         } else {
             batch_concurrency(&self.key.reference, requested)
@@ -692,6 +722,7 @@ impl ModelRuntimeKey {
                 .then(|| local_runtime_limit(reference, None))
                 .flatten(),
             ort_sessions: None,
+            llama_contexts: None,
         }
     }
 
