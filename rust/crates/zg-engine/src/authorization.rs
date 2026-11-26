@@ -226,16 +226,13 @@ pub fn query_authorization(
 pub fn query_authorizations(
     options: &crate::api::context::ContextOptions,
 ) -> Result<Vec<QueryAuthorization>, EngineError> {
-    use crate::api::context::options::{ContextRouteMode, RefreshPolicy};
+    use crate::api::context::options::RefreshPolicy;
     options.validate_index_targets()?;
     if options.rg {
         return Ok(Vec::new());
     }
     let request = crate::pipelines::indexed_search::context::normalize_context_request(options)?;
-    let query_text = request
-        .routes
-        .iter()
-        .any(|route| route.mode == ContextRouteMode::Vector);
+    let query_text = request.uses_vectors();
     let workspace_content = options
         .refresh
         .map_or(options.auto_update, |refresh| refresh != RefreshPolicy::Off);

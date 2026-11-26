@@ -177,13 +177,6 @@ fn prepare_writer_context(
     Ok(Some(plan))
 }
 
-pub(super) fn uses_vectors(request: &super::context::NormalizedContextRequest) -> bool {
-    request
-        .routes
-        .iter()
-        .any(|route| route.mode == crate::api::context::options::ContextRouteMode::Vector)
-}
-
 pub(crate) fn validate_existing_targets(
     root: &Path,
     layout: &crate::domain::WorkspaceLayout,
@@ -226,6 +219,7 @@ pub(crate) fn query_targets(
 /// Capture the same populated kinds for runtime acquisition and retrieval. An
 /// incremental writer may publish its first fragment while a query is in flight.
 struct QueryPlan {
+    targets: Vec<ContentIndex>,
     populated_kinds: BTreeSet<ContentKind>,
     requests: Vec<ModelRuntimeRequest>,
 }
@@ -242,17 +236,18 @@ fn query_plan(
             "embedding model information is missing",
         )
     })?;
-    let targets = query_targets(descriptor, options)?;
     let mut plan = QueryPlan {
+        targets: query_targets(descriptor, options)?,
         populated_kinds: storage.populated_kinds(&[])?,
         requests: Vec::new(),
     };
-    if !uses_vectors(request) {
+    if !request.uses_vectors() {
         return Ok(plan);
     }
-    storage.validate_vector_targets(&targets)?;
+    storage.validate_vector_targets(&plan.targets)?;
     if options.device.is_some()
-        && !targets
+        && !plan
+            .targets
             .iter()
             .any(|t| t.embedding.model().provider() == "local")
     {
@@ -261,7 +256,8 @@ fn query_plan(
         ));
     }
     let mut seen = HashSet::new();
-    plan.requests = targets
+    plan.requests = plan
+        .targets
         .iter()
         .filter(|target| plan.populated_kinds.contains(&target.kind))
         .map(|table| &table.embedding)
@@ -311,6 +307,7 @@ async fn query_storage(
     context_from_index(
         workspace,
         storage,
+        &plan.targets,
         &plan.populated_kinds,
         &embedding_models,
         options,

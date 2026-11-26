@@ -1019,7 +1019,6 @@ fn load_schema(
             "workspace storage schema does not exist",
         ));
     };
-    validate_indexes(&indexes)?;
     write_record(
         &descriptor,
         &serde_json::to_vec(&SchemaRecord::new(&indexes)).map_err(|error| json_error(&error))?,

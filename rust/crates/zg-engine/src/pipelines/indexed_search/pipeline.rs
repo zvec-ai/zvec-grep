@@ -1305,9 +1305,13 @@ mod tests {
             context_from_index, normalize_context_request,
         };
         let request = normalize_context_request(options).expect("valid input");
+        let descriptor = workspace.index().descriptor().expect("enabled index");
+        let targets =
+            super::super::service::query_targets(descriptor, options).expect("valid targets");
         context_from_index(
             workspace,
             storage,
+            &targets,
             &[ContentKind::Text, ContentKind::Code].into(),
             models,
             options,

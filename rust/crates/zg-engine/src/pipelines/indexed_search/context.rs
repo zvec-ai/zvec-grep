@@ -31,19 +31,32 @@ const DEFAULT_CONTEXT_TOTAL_LIMIT: usize = 30;
 const DEFAULT_CONTEXT_PRIORITY_LIMIT: usize = 6;
 const CONTEXT_GROUP_RRF_K: f64 = 60.0;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct NormalizedContextRequest {
-    pub display_query: String,
-    pub routes: Vec<ContextRoute>,
-    pub groups: Vec<NormalizedContextGroup>,
+    display_query: String,
+    groups: Vec<NormalizedContextGroup>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct NormalizedContextGroup {
-    pub id: String,
-    pub query: String,
-    pub role: ContextQueryGroupRole,
-    pub routes: Vec<ContextRoute>,
+impl NormalizedContextRequest {
+    pub(crate) fn uses_vectors(&self) -> bool {
+        self.groups.iter().any(NormalizedContextGroup::uses_vectors)
+    }
+}
+
+#[derive(Debug)]
+struct NormalizedContextGroup {
+    id: String,
+    query: String,
+    role: ContextQueryGroupRole,
+    routes: Vec<ContextRoute>,
+}
+
+impl NormalizedContextGroup {
+    fn uses_vectors(&self) -> bool {
+        self.routes
+            .iter()
+            .any(|route| route.mode == ContextRouteMode::Vector)
+    }
 }
 
 pub(crate) fn normalize_context_request(
@@ -102,32 +115,40 @@ pub(crate) fn normalize_context_request(
         .collect::<Vec<_>>();
     groups.extend(
         routes
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(index, route)| NormalizedContextGroup {
                 id: format!("Q{}", primary_queries.len() + index + 1),
                 query: route.query.clone(),
                 role: ContextQueryGroupRole::Supplemental,
-                routes: vec![route.clone()],
+                routes: vec![route],
             }),
     );
-    let all_routes = groups
-        .iter()
-        .flat_map(|group| group.routes.iter().cloned())
-        .collect::<Vec<_>>();
     let display_query = if primary_queries.is_empty() {
-        routes
+        groups
             .iter()
-            .map(|route| route.query.as_str())
+            .map(|group| group.query.as_str())
             .collect::<Vec<_>>()
             .join(" | ")
     } else {
         primary_queries.join(" | ")
     };
 
+    if options.fuse {
+        groups = vec![NormalizedContextGroup {
+            id: "Q1".to_owned(),
+            query: display_query.clone(),
+            role: if primary_queries.is_empty() {
+                ContextQueryGroupRole::Supplemental
+            } else {
+                ContextQueryGroupRole::Primary
+            },
+            routes: groups.into_iter().flat_map(|group| group.routes).collect(),
+        }];
+    }
+
     Ok(NormalizedContextRequest {
         display_query,
-        routes: all_routes,
         groups,
     })
 }
@@ -135,43 +156,19 @@ pub(crate) fn normalize_context_request(
 pub(crate) async fn context_from_index(
     workspace: &Workspace,
     storage: &dyn SearchStorage,
+    targets: &[ContentIndex],
     populated_kinds: &BTreeSet<ContentKind>,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
     request: &NormalizedContextRequest,
 ) -> Result<ContextResult, EngineError> {
-    let groups = if options.fuse {
-        vec![NormalizedContextGroup {
-            id: "Q1".to_owned(),
-            query: request.display_query.clone(),
-            role: if request
-                .groups
-                .iter()
-                .any(|group| group.role == ContextQueryGroupRole::Primary)
-            {
-                ContextQueryGroupRole::Primary
-            } else {
-                ContextQueryGroupRole::Supplemental
-            },
-            routes: request.routes.clone(),
-        }]
-    } else {
-        request.groups.clone()
-    };
-    let descriptor = workspace
-        .index()
-        .descriptor()
-        .ok_or_else(|| EngineError::unsupported("workspace indexing is disabled"))?;
-    let targets = super::service::query_targets(descriptor, options)?;
+    let groups = &request.groups;
     let per_query = context_group_limit(options.limit, groups.len());
     let mut bundles = Vec::with_capacity(groups.len());
-    for query in &groups {
-        let vector = query
-            .routes
-            .iter()
-            .any(|route| route.mode == ContextRouteMode::Vector);
+    for query in groups {
+        let vector = query.uses_vectors();
         let mut searches = Vec::new();
-        for pool in ranking_groups(&targets, vector) {
+        for pool in ranking_groups(targets, vector) {
             let kinds: Vec<_> = pool
                 .kinds
                 .iter()
@@ -212,12 +209,11 @@ pub(crate) async fn context_from_index(
         }
         bundles.push(searches);
     }
-    let summary_groups = ranking_groups(&targets, super::service::uses_vectors(request));
+    let summary_groups = ranking_groups(targets, request.uses_vectors());
     build_context_result(
         workspace.source_root(),
         workspace,
         request,
-        &groups,
         bundles,
         summary_groups,
         per_query,
@@ -255,11 +251,11 @@ fn build_context_result(
     root: &Path,
     workspace: &Workspace,
     request: &NormalizedContextRequest,
-    groups: &[NormalizedContextGroup],
     bundles: Vec<Vec<(IndexResultGroup, SearchPlanResult)>>,
     mut result_groups: Vec<IndexResultGroup>,
     per_query_limit: usize,
 ) -> Result<ContextResult, EngineError> {
+    let groups = &request.groups;
     let coverage_groups = groups
         .iter()
         .filter(|group| group.role == ContextQueryGroupRole::Primary)
@@ -1134,7 +1130,6 @@ mod tests {
                 &requested_root,
                 &workspace,
                 &request,
-                &request.groups,
                 vec![vec![(result_group.clone(), search.clone())]],
                 vec![result_group],
                 10,
@@ -1218,7 +1213,7 @@ mod tests {
 
     #[test]
     fn normalizes_primary_and_supplemental_query_groups_like_main() {
-        let request = normalize_context_request(&ContextOptions {
+        let mut options = ContextOptions {
             query: Some(" alpha ".to_owned()),
             queries: vec![" beta ".to_owned()],
             routes: vec![ContextRoute {
@@ -1226,8 +1221,8 @@ mod tests {
                 query: " gamma ".to_owned(),
             }],
             ..ContextOptions::default()
-        })
-        .expect("normalized context request");
+        };
+        let request = normalize_context_request(&options).expect("normalized context request");
 
         assert_eq!(request.display_query, "alpha | beta");
         assert_eq!(request.groups.len(), 3);
@@ -1236,7 +1231,21 @@ mod tests {
         assert_eq!(request.groups[0].routes.len(), 2);
         assert_eq!(request.groups[2].id, "Q3");
         assert_eq!(request.groups[2].role, ContextQueryGroupRole::Supplemental);
-        assert_eq!(request.routes.len(), 5);
+        assert!(!request.groups[2].uses_vectors());
+
+        options.fuse = true;
+        let fused = normalize_context_request(&options).expect("fused context request");
+        let [group] = fused.groups.as_slice() else {
+            panic!("expected one fused group")
+        };
+        assert_eq!(group.query, "alpha | beta");
+        assert_eq!(group.role, ContextQueryGroupRole::Primary);
+        let routes: Vec<_> = request
+            .groups
+            .into_iter()
+            .flat_map(|group| group.routes)
+            .collect();
+        assert_eq!(group.routes, routes);
     }
 
     #[test]
