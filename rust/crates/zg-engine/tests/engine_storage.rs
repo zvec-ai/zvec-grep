@@ -535,6 +535,66 @@ async fn text_and_code_share_one_model_and_support_incremental_search() -> TestR
 }
 
 #[tokio::test]
+async fn one_time_consent_covers_only_the_data_disclosed_before_a_workspace_change() -> TestResult {
+    use zg_engine::authorization::query_authorizations;
+    let directory = tempdir()?;
+    let root = directory.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    let engine = ZvecGrep::new();
+    engine.index(index_options(root)).await?;
+    fs::write(root.join("guide.txt"), "Login guide.")?;
+
+    let mut files_only = ContextOptions {
+        root: Some(root.to_owned()),
+        query: Some("login".into()),
+        refresh: Some(RefreshPolicy::Background),
+        ..ContextOptions::default()
+    };
+    let scopes = query_authorizations(&files_only)?;
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].workspace_content && !scopes[0].query_text);
+    files_only.authorize_once(&scopes[0]);
+
+    // Another operation publishes the first row after the user approves files only.
+    engine.index(index_options(root)).await?;
+    files_only.refresh = Some(RefreshPolicy::Off);
+    let requests = server.requests.load(Ordering::Acquire);
+    let scopes = query_authorizations(&files_only)?;
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].query_text && !scopes[0].workspace_content);
+    let error = engine
+        .context(files_only)
+        .await
+        .expect_err("query text needs consent");
+    assert_eq!(error.code(), EngineError::PERMISSION_DENIED);
+    assert_eq!(server.requests.load(Ordering::Acquire), requests);
+
+    let mut query_only = ContextOptions {
+        root: Some(root.to_owned()),
+        query: Some("login".into()),
+        refresh: Some(RefreshPolicy::Wait),
+        ..ContextOptions::default()
+    };
+    query_only.authorize_once(&scopes[0]);
+    assert!(query_authorizations(&query_only)?.is_empty());
+    fs::write(root.join("new.txt"), "Private notes added after consent.")?;
+    // Daemon requests serialize the distinction between an empty grant and an omitted field.
+    let query_only = serde_json::from_value(serde_json::to_value(query_only)?)?;
+    let scopes = query_authorizations(&query_only)?;
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].workspace_content && !scopes[0].query_text);
+    let error = engine
+        .context(query_only)
+        .await
+        .expect_err("new files need consent");
+    assert_eq!(error.code(), EngineError::PERMISSION_DENIED);
+    assert_eq!(server.requests.load(Ordering::Acquire), requests);
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn per_kind_models_select_the_destination_and_rank_groups_after_reopen() -> TestResult {
     use zg_engine::api::index::options::{ContentKind, Device, EmbeddingModelSpec};
     let directory = tempdir()?;
@@ -542,7 +602,10 @@ async fn per_kind_models_select_the_destination_and_rank_groups_after_reopen() -
     let code = EmbeddingServer::start()?;
     let docs = EmbeddingServer::start()?;
     fs::write(root.join("guide.txt"), "Login checks the password.")?;
-    fs::write(root.join("login.rs"), "pub fn login() {}")?;
+    fs::write(
+        root.join("login"),
+        "#!/usr/bin/env python3\ndef login(): pass\n",
+    )?;
     configure_remote_model(root, code.address)?;
     let engine = ZvecGrep::new();
     engine.index(index_options(root)).await?;
@@ -574,7 +637,7 @@ async fn per_kind_models_select_the_destination_and_rank_groups_after_reopen() -
         ..Default::default()
     };
     for (kind, path, target, other) in [
-        (ContentKind::Code, "login.rs", &code, &docs),
+        (ContentKind::Code, "login", &code, &docs),
         (ContentKind::Text, "guide.txt", &docs, &code),
     ] {
         let before = target.requests.load(Ordering::Acquire);
@@ -625,7 +688,28 @@ async fn per_kind_models_select_the_destination_and_rank_groups_after_reopen() -
         .join("schema.json");
     engine.close();
 
+    verify_reclassified_code_consent(root, &combined)?;
     assert_mismatched_text_collection_rejected(root, &schema_path, combined, [&docs, &code]).await
+}
+
+fn verify_reclassified_code_consent(root: &Path, combined: &ContextOptions) -> TestResult {
+    use zg_engine::{api::index::options::ContentKind, authorization::query_authorizations};
+    let mut waiting_code = ContextOptions {
+        refresh: Some(RefreshPolicy::Wait),
+        target_kinds: vec![ContentKind::Code],
+        allow_remote: false,
+        ..combined.clone()
+    };
+    fs::write(root.join("login"), "Plain text instructions for login.")?;
+    let scopes = query_authorizations(&waiting_code)?;
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes[0].target.model, "qwen/qwen3.7-text-embedding");
+    assert!(scopes[0].workspace_content && !scopes[0].query_text);
+    waiting_code.authorize_once(&scopes[0]);
+    assert!(query_authorizations(&waiting_code)?.is_empty());
+    fs::remove_file(root.join("login"))?;
+    assert!(query_authorizations(&waiting_code)?.is_empty());
+    Ok(())
 }
 
 async fn assert_mismatched_text_collection_rejected(
@@ -661,7 +745,7 @@ async fn assert_mismatched_text_collection_rejected(
     query.target_kinds = vec![ContentKind::Code];
     assert_eq!(
         engine.context(query).await?.items[0].relative_path,
-        Path::new("login.rs")
+        Path::new("login")
     );
     engine.close();
     Ok(())

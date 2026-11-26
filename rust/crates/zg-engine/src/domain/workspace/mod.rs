@@ -173,10 +173,6 @@ impl Workspace {
         &self.index
     }
 
-    pub(crate) fn source_path(&self, relative: &SourcePath) -> PathBuf {
-        self.source_root().join(relative)
-    }
-
     pub(crate) fn index_enabled(&self) -> bool {
         matches!(self.index, IndexState::Enabled(_))
     }
@@ -401,7 +397,7 @@ mod tests {
 
     use super::{ScanRules, SourceRoot, Workspace, WorkspaceLayout};
     use crate::domain::{
-        ContentKind, FTS_CONFIG, FileFormat, IndexDescriptor, IndexState, SourcePath,
+        ContentKind, FTS_CONFIG, FileFormat, IndexDescriptor, IndexState,
         model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
     };
 
@@ -506,10 +502,7 @@ mod tests {
             saved
         );
         assert_eq!(
-            fs::read_to_string(
-                restored.source_path(&SourcePath::new("main.rs").expect("source path"))
-            )
-            .expect("read moved source"),
+            fs::read_to_string(restored.source_root().join("main.rs")).expect("read moved source"),
             "fn main() {}\n"
         );
         let ignore_files = restored.scan().resolve_ignore_files(restored.source_root());

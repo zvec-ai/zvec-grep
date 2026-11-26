@@ -212,6 +212,59 @@ fn request(root: &Path) -> CallToolRequestParams {
     )
 }
 
+#[tokio::test]
+async fn search_only_requests_workspace_consent_for_refreshes_the_provider_performs() {
+    let root = tempfile::tempdir().expect("workspace");
+    let engine = Arc::new(ZvecGrep::new());
+    engine
+        .index(IndexOptions {
+            root: Some(root.path().into()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "qwen/text-embedding-v4".into(),
+                endpoint: Some("https://example.test/v1".into()),
+                revision: None,
+                cache_dir: None,
+                device: zg_engine::api::index::options::Device::Auto,
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("empty remote index");
+    std::fs::write(root.path().join("README.md"), "needle").expect("pending source");
+
+    for (background, server) in [
+        (false, ZvecGrepMcpServer::agent_direct(engine.clone())),
+        (
+            true,
+            ZvecGrepMcpServer::agent_with_index_operations(
+                engine.clone(),
+                Arc::new(Jobs::default()),
+            ),
+        ),
+    ] {
+        let (server_io, client_io) = tokio::io::duplex(65536);
+        let mut info = ClientInfo::default();
+        info.protocol_version = ProtocolVersion::V_2026_07_28;
+        let (server, client) = tokio::join!(server.serve(server_io), info.serve(client_io));
+        let _server = server.expect("server");
+        let client = client.expect("client");
+        let response = client
+            .call_tool_once(request(root.path()))
+            .await
+            .expect("FTS search");
+        match (background, response) {
+            (false, CallToolResponse::Complete(result)) => {
+                assert_ne!(result.is_error, Some(true), "{result:?}");
+            }
+            (true, CallToolResponse::InputRequired(_)) => {}
+            (_, other) => {
+                panic!("unexpected response with background indexing {background}: {other:?}")
+            }
+        }
+        client.cancel().await.expect("close client");
+    }
+}
+
 fn answer(request: CallToolRequestParams, token: String, content: &Value) -> CallToolRequestParams {
     request.with_request_state(token).with_input_responses(
         serde_json::from_value(json!({
@@ -770,6 +823,7 @@ async fn http_setup_selects_and_authorizes_without_generic_credentials() {
         .await
         .expect("valid test fixture");
     let root = tempfile::tempdir().expect("valid test fixture");
+    std::fs::write(root.path().join("README.md"), "hello").expect("source");
     let (_, schema) = form(
         &Phase::Model {
             root: root.path().into(),
@@ -811,16 +865,18 @@ async fn http_setup_selects_and_authorizes_without_generic_credentials() {
         .expect("valid test fixture")
         .expect("valid test fixture");
     assert_eq!(target.endpoint, "http://127.0.0.1:8080/v1/embeddings");
-    let approved =
-        SetupState::approve(&engine, options, target, &json!({"decision": "allow_once"}))
-            .await
-            .expect("valid test fixture");
+    let approved = SetupState::approve(
+        &engine,
+        options,
+        target,
+        &json!({"decision": "allow_once"}),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("valid test fixture");
     assert_eq!(approved.authorized_remote.len(), 1);
     assert!(approved.api_key.is_none());
-    assert!(
-        authorization::index_authorization(&approved)
-            .expect("preflight")
-            .is_none()
-    );
+    let remaining = authorization::index_authorization(&approved).expect("preflight");
+    assert!(remaining.is_none());
     engine.close();
 }

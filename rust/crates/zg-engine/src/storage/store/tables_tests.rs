@@ -149,7 +149,9 @@ fn pdf_markdown_search_round_trip_keeps_pages_and_blocks() {
     store.write(|state| super::flush(state)).expect("flush");
     drop(store);
     let store = metadata_store(temporary.path());
-    let hits = store.search_fts(ContentKind::Text, "continuation", 10, None).expect("FTS");
+    let hits = store
+        .search_fts(ContentKind::Text, "continuation", 10, None)
+        .expect("FTS");
     assert!(!hits.is_empty());
     let loaded = store.load_search_hits(&hits).expect("load");
     let stored = &loaded.entities[entities[0].id()];
@@ -340,23 +342,24 @@ fn assert_projection(store: &IndexStore, entry: &IndexedFragment) {
 #[test]
 fn shared_model_keeps_text_and_code_separate_across_reopen() {
     let temporary = tempfile::tempdir().expect("temporary storage");
-    let indexes = vec![
-        ContentIndex {
-            kind: ContentKind::Text,
+    let kinds = [ContentKind::Text, ContentKind::Code];
+    let indexes = kinds
+        .map(|kind| ContentIndex {
+            kind,
             embedding: model(),
-        },
-        ContentIndex {
-            kind: ContentKind::Code,
-            embedding: model(),
-        },
-    ];
+        })
+        .to_vec();
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: temporary.path().to_owned(),
         indexes: indexes.clone(),
     })
     .expect("shared-model storage");
-    assert_eq!(store.count_fragments().expect("empty count"), 0);
+    let layout = IndexLayout::new(temporary.path());
+    assert!(store.populated_kinds(&[]).expect("empty store").is_empty());
+    for kind in kinds {
+        assert!(layout.content_dir(kind).is_dir());
+    }
 
     for (id, name, content) in [
         (0, "fixture", Content::Text as fn(_) -> _),
@@ -391,7 +394,7 @@ fn shared_model_keeps_text_and_code_separate_across_reopen() {
     })
     .expect("read-only storage");
     assert_eq!(reader.count_fragments().expect("persisted count"), 4);
-    for kind in [ContentKind::Text, ContentKind::Code] {
+    for kind in kinds {
         let keywords = reader
             .search_fts(kind, "orchard", 10, None)
             .expect("keyword search");
@@ -428,6 +431,13 @@ fn shared_model_keeps_text_and_code_separate_across_reopen() {
         .delete_file(FileId::new(1))
         .expect("delete second file");
     assert_eq!(store.count_fragments().expect("empty count"), 0);
+    assert!(
+        store
+            .populated_kinds(&[])
+            .expect("emptied store")
+            .is_empty()
+    );
+    assert!(layout.content_dir(ContentKind::Code).is_dir());
 }
 
 #[test]

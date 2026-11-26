@@ -85,72 +85,8 @@ fn configure_command(command: &mut Command, home: &Path, workspace: &Path) {
         .env_remove("ZG_HTTP_FIXTURE_KEY");
 }
 
-#[test]
-fn code_route_reuses_its_saved_http_model_and_consent_with_a_local_default()
--> Result<(), Box<dyn Error>> {
-    let _permit = server_test_permit();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
-    let home = TempDir::new()?;
-    let workspace = TempDir::new()?;
-    let embedding = HttpModelServer::start(false)?;
-    std::fs::write(
-        workspace.path().join("lib.rs"),
-        "pub fn authenticate() {}\n",
-    )?;
-    let config_dir = home.path().join(".zvec-grep");
-    std::fs::create_dir_all(&config_dir)?;
-    let config_path = config_dir.join("config.json");
-    std::fs::write(
-        &config_path,
-        serde_json::to_vec(&json!({"version": 1, "models": {"http/fixture": {
-            "endpoint": format!("http://{}/v1", embedding.server.address),
-            "model": "code-encoder", "dimension": 4, "maxInputTokens": 128,
-            "queryPrefix": "query: ", "documentPrefix": "document: ",
-            "auth": "bearer", "apiKeyEnv": "ZG_HTTP_FIXTURE_KEY"
-        }}}))?,
-    )?;
-    let configure = |command: &mut Command| {
-        configure_command(command, home.path(), workspace.path());
-        command.env("ZG_HTTP_FIXTURE_KEY", "code-route-key");
-    };
-    let run = |args: &[&str]| {
-        let mut command = Command::new(&binary);
-        configure(&mut command);
-        command.args(args).output()
-    };
-    assert_command_success(&run(&[
-        "--mode",
-        "direct",
-        "--index",
-        "--allow-remote",
-        "--embedding",
-        "local/potion-code-16m-v2",
-        "--embedding",
-        "code=http/fixture",
-    ])?);
-    assert_eq!(
-        embedding.last_authorization().as_deref(),
-        Some("Bearer code-route-key")
-    );
-    std::fs::remove_file(config_path)?;
-    let query = |mode| {
-        run(&[
-            "--mode",
-            mode,
-            "--vector",
-            "authentication",
-            "--kind",
-            "code",
-            "--refresh",
-            "off",
-        ])
-    };
-    let previous = embedding.request_count();
-    let denied = query("direct")?;
-    assert!(!denied.status.success());
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("http/fixture"));
-    assert_eq!(embedding.request_count(), previous);
-    assert_command_success(&run(&[
+fn grant_model(model: &str) -> [&str; 8] {
+    [
         "--auth",
         "grant",
         "--capability",
@@ -158,14 +94,170 @@ fn code_route_reuses_its_saved_http_model_and_consent_with_a_local_default()
         "--scope",
         "workspace",
         "--embedding",
-        "http/fixture",
+        model,
+    ]
+}
+
+fn write_routed_model_config(
+    home: &Path,
+    docs: &HttpModelServer,
+    code: &HttpModelServer,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let config_dir = home.join(".zvec-grep");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&json!({"version": 1, "models": {
+            "http/docs": {
+                "endpoint": format!("http://{}/v1", docs.server.address),
+                "model": "docs-encoder", "dimension": 4, "maxInputTokens": 128,
+                "queryPrefix": "query: ", "documentPrefix": "document: ", "auth": "none"
+            },
+            "http/fixture": {
+                "endpoint": format!("http://{}/v1", code.server.address),
+                "model": "code-encoder", "dimension": 4, "maxInputTokens": 128,
+                "queryPrefix": "query: ", "documentPrefix": "document: ",
+                "auth": "bearer", "apiKeyEnv": "ZG_HTTP_FIXTURE_KEY"
+            }
+        }}))?,
+    )?;
+    Ok(config_path)
+}
+
+#[test]
+fn code_route_reuses_its_saved_http_model_and_consent_with_a_local_default()
+-> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let docs = HttpModelServer::start(false)?;
+    let code = HttpModelServer::start(false)?;
+    let root = workspace.path();
+    std::fs::write(root.join("README.md"), "Use the authentication guide.\n")?;
+    let config_path = write_routed_model_config(home.path(), &docs, &code)?;
+    let configure = |command: &mut Command| configure_command(command, home.path(), root);
+    let run = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        configure(&mut command);
+        command.args(args).output()
+    };
+    let query = |mode, route, refresh| {
+        run(&[
+            "--mode",
+            mode,
+            route,
+            "authenticate",
+            "--kind",
+            "code",
+            "--refresh",
+            refresh,
+        ])
+    };
+    // Both endpoints are local fixtures. Only the text route has consent.
+    assert_command_success(&run(&grant_model("http/docs"))?);
+    assert_command_success(&run(&[
+        "--mode",
+        "direct",
+        "--index",
+        "--embedding",
+        "local/potion-code-16m-v2",
+        "--embedding",
+        "text=http/docs",
+        "--embedding",
+        "code=http/fixture",
     ])?);
+    assert!(docs.request_count() > 0);
+    assert!(root.join(".zvec-grep/index/text").is_dir());
+    let code_dir = root.join(".zvec-grep/index/code");
+    std::fs::remove_file(config_path)?;
+    // The index requires its configured code collection even before the first code file.
+    let hidden_code = code_dir.with_file_name("missing-code");
+    std::fs::rename(&code_dir, &hidden_code)?;
+    let damaged = query("direct", "--fts", "off")?;
+    assert!(!damaged.status.success());
+    assert!(
+        String::from_utf8_lossy(&damaged.stderr)
+            .contains("index collection code is missing; rebuild the index"),
+        "{damaged:?}"
+    );
+    std::fs::rename(hidden_code, &code_dir)?;
+
     let (mut daemon, _) = start_server(&binary, &home, "full", None, configure)?;
-    let result = query("server")?;
+    for mode in ["direct", "server"] {
+        for route in ["--vector", "--fts"] {
+            let result = query(mode, route, "off")?;
+            assert_command_success(&result);
+            assert_eq!(String::from_utf8(result.stdout)?, "No matches.\n");
+        }
+    }
+    assert_eq!(code.request_count(), 0);
+
+    std::fs::write(root.join("lib.rs"), "pub fn authenticate() {}\n")?;
+    verify_legacy_background_consent(home.path(), root)?;
+    assert_command_success(&daemon.stop()?);
+    let denied = query("direct", "--vector", "wait")?;
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("http/fixture"));
+    assert_eq!(code.request_count(), 0);
+    assert_command_success(&run(&grant_model("http/fixture"))?);
+    let (mut daemon, _) = start_server(&binary, &home, "full", None, |command| {
+        configure(command);
+        command.env("ZG_HTTP_FIXTURE_KEY", "code-route-key");
+    })?;
+    let result = query("server", "--vector", "wait")?;
     assert_command_success(&result);
     assert!(String::from_utf8_lossy(&result.stdout).contains("lib.rs"));
-    assert_eq!(embedding.request_count(), previous + 1);
+    assert!(code.request_count() >= 2, "document and query embeddings");
+    assert_eq!(
+        code.last_authorization().as_deref(),
+        Some("Bearer code-route-key")
+    );
+    let previous = code.request_count();
     assert_command_success(&daemon.stop()?);
+    assert_command_success(&run(&["--auth", "revoke"])?);
+    std::fs::remove_file(root.join("lib.rs"))?;
+    let result = query("direct", "--vector", "wait")?;
+    assert_command_success(&result);
+    assert_eq!(String::from_utf8(result.stdout)?, "No matches.\n");
+    assert_eq!(code.request_count(), previous);
+    assert!(code_dir.is_dir());
+    Ok(())
+}
+
+fn verify_legacy_background_consent(home: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
+    use zg_daemon_protocol::{DaemonCommand, DaemonReply};
+    use zg_engine::api::{
+        context::{
+            ContextOptions,
+            options::{ContextRoute, ContextRouteMode},
+        },
+        index::options::ContentKind,
+    };
+    let preflight = DaemonCommand::QueryAuthorization(ContextOptions {
+        root: Some(root.to_owned()),
+        target_kinds: vec![ContentKind::Code],
+        routes: vec![ContextRoute {
+            mode: ContextRouteMode::Vector,
+            query: "authenticate".into(),
+        }],
+        auto_update: true,
+        refresh: None,
+        ..ContextOptions::default()
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let DaemonReply::QueryAuthorization(grants) =
+        runtime.block_on(zg_daemon::execute_command(home, preflight))?
+    else {
+        panic!("expected query preflight response");
+    };
+    // A new code file needs a document embedding. The current index has no code to query.
+    assert_eq!(grants.len(), 1);
+    assert!(grants[0].workspace_content);
+    assert!(!grants[0].query_text);
     Ok(())
 }
 
@@ -218,16 +310,7 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("authorization required"));
     assert_eq!(embedding.request_count(), 0);
-    assert_command_success(&run(&[
-        "--auth",
-        "grant",
-        "--capability",
-        "embedding",
-        "--scope",
-        "workspace",
-        "--embedding",
-        "http/fixture",
-    ])?);
+    assert_command_success(&run(&grant_model("http/fixture"))?);
     assert_command_success(&run(&[
         "--index",
         "--mode",
@@ -268,6 +351,12 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
     assert_command_success(&run(&["--index", "--mode", "direct"])?);
     assert_command_success(&run(&["--auth", "revoke"])?);
     let previous = embedding.request_count();
+    assert_command_success(&run(&["--index", "--mode", "direct"])?);
+    assert_eq!(embedding.request_count(), previous);
+    std::fs::write(
+        workspace.path().join("sample.md"),
+        "# Authentication\n\nEach request needs an updated authentication token.\n",
+    )?;
     let denied = run(&["--index", "--mode", "direct"])?;
     assert!(!denied.status.success());
     let error = String::from_utf8_lossy(&denied.stderr);
@@ -285,6 +374,8 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
         "--scope",
         "workspace",
     ])?);
+    assert_command_success(&run(&["--index", "--mode", "direct"])?);
+    assert!(embedding.request_count() > previous);
     for mode in ["direct", "server", "server"] {
         let mut daemon = if mode == "server" {
             Some(start_server(&binary, &home, "full", None, configure)?.0)

@@ -1,7 +1,7 @@
 //! Index lifecycle and operations that span multiple tables.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
@@ -14,11 +14,11 @@ use crate::{
     EngineError, EngineResult,
     domain::{
         ContentIndex, ContentKind, Entity, EntityId, EntityMetadata, FileId, FileIndexStatus,
-        FileRecord, IndexLayout, Language, Range,
+        FileRecord, IndexLayout, Language, Range, WorkspaceLayout,
     },
     utils::{
         atomic_write as write_record, directory_exists, ensure_directory, file_exists,
-        reject_symlink, sync_directory,
+        sync_directory,
     },
 };
 
@@ -151,6 +151,65 @@ impl IndexStore {
     }
 
     pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
+        Self::open_with(options, false)
+    }
+
+    /// Read the published state for consent preflight without creating files or recovering WAL.
+    /// A busy index is inspected again by the operation holding workspace admission.
+    pub(crate) fn inspect_published<T>(
+        layout: &WorkspaceLayout,
+        inspect: impl FnOnce(&Self) -> EngineResult<T>,
+    ) -> EngineResult<Option<T>> {
+        let inspect_state = || {
+            let access = crate::workspace::lock::try_lock_existing_workspace_read(layout)?;
+            let storage = if access.is_some() {
+                if crate::workspace::index::needs_recovery(layout)? {
+                    return Ok(None);
+                }
+                Self::open_with(
+                    WorkspaceIndexStorageOptions::ReadOnly {
+                        storage_path: layout.index_dir().to_owned(),
+                        graph_enabled: false,
+                    },
+                    true,
+                )?
+            } else {
+                // A daemon writer can already own workspace admission. Borrow only its
+                // live store; never race it by opening native collections from disk.
+                let path = fs::canonicalize(layout.index_dir()).map_err(|error| {
+                    io_error("locate index directory", layout.index_dir(), &error)
+                })?;
+                let Some(shared) = registry()?
+                    .get(&path)
+                    .and_then(Weak::upgrade)
+                    .filter(|s| !s.read_only)
+                else {
+                    return Ok(None);
+                };
+                Self {
+                    shared: Mutex::new(Some(shared)),
+                    read_only: true,
+                }
+            };
+            inspect(&storage).map(Some)
+        };
+        match inspect_state() {
+            Err(error)
+                if matches!(
+                    error.code(),
+                    EngineError::NOT_FOUND
+                        | EngineError::RESOURCE_BUSY
+                        | EngineError::RESOURCE_CLOSED
+                        | WAL_RECOVERY_REQUIRED
+                ) =>
+            {
+                Ok(None)
+            }
+            result => result,
+        }
+    }
+
+    fn open_with(options: WorkspaceIndexStorageOptions, inspect_only: bool) -> EngineResult<Self> {
         let graph_enabled = options.graph_enabled();
         if let WorkspaceIndexStorageOptions::ReadWrite { indexes, .. } = &options {
             validate_indexes(indexes)?;
@@ -176,7 +235,9 @@ impl IndexStore {
             .map_err(|error| io_error("locate index directory", home, &error))?;
         let mut registry = registry()?;
         if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
-            if read_only && shared.read_only && graph_enabled == shared.graph_enabled {
+            if inspect_only
+                || (read_only && shared.read_only && graph_enabled == shared.graph_enabled)
+            {
                 return Ok(Self {
                     shared: Mutex::new(Some(shared)),
                     read_only,
@@ -187,37 +248,27 @@ impl IndexStore {
             ));
         }
         let layout = IndexLayout::new(&path);
-        let (mut lock, mut schema, new_storage) = prepare_storage(layout, options.clone())?;
+        let (mut lock, mut schema, new_storage) =
+            prepare_storage(layout, options.clone(), !inspect_only)?;
         let optimize_marker = layout.optimize_marker_path();
         let needs_optimize = file_exists(&optimize_marker)?;
-        let graph = if graph_enabled {
-            let mode = if read_only {
-                OpenMode::ReadOnly
-            } else if new_storage {
-                OpenMode::Create
-            } else {
-                OpenMode::ReadWrite
-            };
-            let graph = open_graph(&layout.graph_db_path(), mode);
-            if read_only {
-                // Graph failures do not prevent canonical text/vector reads.
-                graph
-            } else {
-                // Existing files will skip extraction when unchanged, so an empty
-                // replacement graph cannot restore their missing relationships.
-                let graph = graph?;
-                if new_storage {
-                    sync_directory(&layout.graph_dir())?;
-                }
-                Ok(graph)
-            }
-        } else {
+        let graph = if !graph_enabled {
             Err(graph_disabled())
+        } else if read_only {
+            // Graph failures do not prevent canonical text/vector reads.
+            open_graph(layout, OpenMode::ReadOnly)
+        } else if new_storage {
+            let graph = open_graph(layout, OpenMode::Create)?;
+            sync_directory(&layout.graph_dir())?;
+            Ok(graph)
+        } else {
+            // Unchanged files skip extraction and cannot restore a missing graph.
+            Ok(open_graph(layout, OpenMode::ReadWrite)?)
         }
         .map_err(EngineError::into_report);
         let tables = open_tables(layout, &schema, read_only);
         let (files, directories, entities, fragments) = match tables {
-            Err(error) if read_only && error.code() == WAL_RECOVERY_REQUIRED => {
+            Err(error) if read_only && !inspect_only && error.code() == WAL_RECOVERY_REQUIRED => {
                 // open_tables has dropped every partial native reader.
                 (lock, schema) = recover_wal(layout, options, lock)?;
                 open_tables(layout, &schema, true)?
@@ -226,8 +277,6 @@ impl IndexStore {
         };
         if !read_only {
             directories.load()?;
-        }
-        if !read_only {
             // Repeat the same range after failures that leave directories in place.
             sync_directory(&path)?;
             if let Some(outer) = outer {
@@ -250,7 +299,11 @@ impl IndexStore {
             graph_enabled,
             _lock: lock,
         });
-        registry.insert(path, Arc::downgrade(&shared));
+        // An inspection holds workspace read admission itself. Leaving this short-lived,
+        // graph-independent reader out of the registry lets normal readers open concurrently.
+        if !inspect_only {
+            registry.insert(path, Arc::downgrade(&shared));
+        }
         Ok(Self {
             shared: Mutex::new(Some(shared)),
             read_only,
@@ -270,7 +323,7 @@ impl IndexStore {
             ));
         }
         // The caller's workspace write lock prevents new opens while this inner lock is closed.
-        drop(acquire_storage_lock(IndexLayout::new(&path), false)?);
+        drop(acquire_storage_lock(IndexLayout::new(&path), false, true)?);
         fs::remove_dir_all(&path)
             .map_err(|error| io_error("delete workspace storage", &path, &error))?;
         if let Some(parent) = path.parent() {
@@ -321,6 +374,13 @@ impl IndexStore {
 
     pub(crate) fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
         self.read(|state| state.files.list())
+    }
+
+    pub(crate) fn populated_kinds(
+        &self,
+        excluded_files: &[FileId],
+    ) -> EngineResult<BTreeSet<ContentKind>> {
+        self.read(|state| state.fragments.populated_kinds(excluded_files))
     }
 
     pub(crate) fn count_fragments(&self) -> EngineResult<u64> {
@@ -616,14 +676,14 @@ fn recover_wal(
     // Keep the caller's workspace read lock to prevent publication, but release
     // shared storage access before taking the exclusive recovery lock.
     drop(shared_lock);
-    let recovery_lock = acquire_storage_lock(layout, false)?;
+    let recovery_lock = acquire_storage_lock(layout, false, true)?;
     let (schema, _) = load_schema(layout, options.clone())?;
     for path in collection_paths(layout, &schema) {
         recover_collection(&path)?;
     }
     drop(recovery_lock);
     // Do not retain an exclusive lock in a long-lived cached read session.
-    let (lock, schema, _) = prepare_storage(layout, options)?;
+    let (lock, schema, _) = prepare_storage(layout, options, true)?;
     Ok((lock, schema))
 }
 
@@ -747,14 +807,15 @@ fn graph_missing() -> EngineError {
     )
 }
 
-fn open_graph(path: &Path, mode: OpenMode) -> EngineResult<SqliteGraphStorage> {
+fn open_graph(layout: IndexLayout<'_>, mode: OpenMode) -> EngineResult<SqliteGraphStorage> {
+    let path = layout.graph_db_path();
     let graph = if mode == OpenMode::Create {
-        SqliteGraphStorage::open(path, mode).map_err(graph_error)
+        SqliteGraphStorage::open(&path, mode).map_err(graph_error)
     } else {
-        match fs::metadata(path) {
-            Ok(_) => SqliteGraphStorage::open(path, mode).map_err(graph_error),
+        match fs::metadata(&path) {
+            Ok(_) => SqliteGraphStorage::open(&path, mode).map_err(graph_error),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(graph_missing()),
-            Err(error) => Err(io_error("inspect workspace graph", path, &error)),
+            Err(error) => Err(io_error("inspect workspace graph", &path, &error)),
         }
     };
     graph.map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild --graph`."))
@@ -1002,20 +1063,21 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 fn prepare_storage(
     layout: IndexLayout<'_>,
     options: WorkspaceIndexStorageOptions,
+    create_lock: bool,
 ) -> EngineResult<(File, Vec<ContentIndex>, bool)> {
-    let lock = acquire_storage_lock(layout, options.is_read_only())?;
+    let lock = acquire_storage_lock(layout, options.is_read_only(), create_lock)?;
     let (schema, new_storage) = load_schema(layout, options)?;
     Ok((lock, schema, new_storage))
 }
 
-fn acquire_storage_lock(layout: IndexLayout<'_>, shared: bool) -> EngineResult<File> {
+fn acquire_storage_lock(layout: IndexLayout<'_>, shared: bool, create: bool) -> EngineResult<File> {
     let path = layout.lock_path();
-    reject_symlink(&path)?;
+    file_exists(&path)?;
     let file = OpenOptions::new()
-        .create(true)
+        .create(create)
         .truncate(false)
         .read(true)
-        .write(true)
+        .write(create)
         .open(&path)
         .map_err(|error| io_error("open storage lock", &path, &error))?;
     let result = if shared {

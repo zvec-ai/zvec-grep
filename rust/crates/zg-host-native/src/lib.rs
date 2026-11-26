@@ -13,5 +13,5 @@ pub use api::{
     WorkspaceWatchSessionPort, WorkspaceWatcherFactoryPort,
 };
 pub use error::{HostError, HostErrorSite};
-pub use scanner::NativeScanner;
+pub use scanner::{NativeScanner, discover_sync, read_batch_sync};
 pub use watcher::{NativeWatcherConfig, NativeWatcherFactory};

@@ -1,7 +1,7 @@
 //! Resolve the indexed workspace, refresh it when requested, and execute retrieval.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -84,13 +84,14 @@ pub(crate) async fn context(
         &wait,
         "context",
         allows_writer.then_some(&indexing.writers),
-        |writer| prepare_writer_context(models, options, &request, writer),
+        |writer| prepare_writer_context(options, &request, writer),
     )
     .await?
     {
         ReadSource::Writer { lease, context } => {
             return query_storage(
-                &context,
+                models,
+                context,
                 &lease.session.workspace,
                 &lease.session.storage,
                 options,
@@ -116,9 +117,16 @@ pub(crate) async fn context(
         )?,
         None => ReadSessionLease::open(workspace.layout().index_dir(), graph_enabled)?,
     };
-    let requests = query_model_requests(&workspace, storage.storage(), options, &request)?;
-    let acquired = acquire_query_models(models, &workspace, requests)?;
-    let result = query_storage(&acquired, &workspace, storage.storage(), options, &request).await;
+    let plan = query_plan(&workspace, storage.storage(), options, &request)?;
+    let result = query_storage(
+        models,
+        plan,
+        &workspace,
+        storage.storage(),
+        options,
+        &request,
+    )
+    .await;
     let close = storage.close();
     let result = result?;
     close?;
@@ -154,21 +162,19 @@ fn read_ready_workspace(
 }
 
 fn prepare_writer_context(
-    models: &ModelRuntimeManager,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
     writer: &super::writer::WriterSession,
-) -> Result<Option<Vec<ModelRuntimeLease>>, EngineError> {
-    let requests = query_model_requests(&writer.workspace, &writer.storage, options, request)?;
-    if requests.iter().any(|request| {
-        !writer
-            .models
-            .iter()
-            .any(|model| model.matches_query_request(request))
-    }) {
+) -> Result<Option<QueryPlan>, EngineError> {
+    let plan = query_plan(&writer.workspace, &writer.storage, options, request)?;
+    if plan
+        .requests
+        .iter()
+        .any(|request| !writer.matches_query_request(request))
+    {
         return Ok(None);
     }
-    acquire_query_models(models, &writer.workspace, requests).map(Some)
+    Ok(Some(plan))
 }
 
 pub(super) fn uses_vectors(request: &super::context::NormalizedContextRequest) -> bool {
@@ -191,7 +197,7 @@ pub(crate) fn validate_existing_targets(
     Ok(())
 }
 
-/// Resolve physical target tables in stable order for execution and consent preflight.
+/// Resolve configured targets in stable order, including kinds that have no fragments yet.
 pub(crate) fn query_targets(
     descriptor: &IndexDescriptor,
     options: &ContextOptions,
@@ -217,12 +223,19 @@ pub(crate) fn query_targets(
         .collect())
 }
 
-fn query_model_requests(
+/// Capture the same populated kinds for runtime acquisition and retrieval. An
+/// incremental writer may publish its first fragment while a query is in flight.
+struct QueryPlan {
+    populated_kinds: BTreeSet<ContentKind>,
+    requests: Vec<ModelRuntimeRequest>,
+}
+
+fn query_plan(
     workspace: &Workspace,
     storage: &IndexStore,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
-) -> crate::EngineResult<Vec<ModelRuntimeRequest>> {
+) -> crate::EngineResult<QueryPlan> {
     let descriptor = workspace.index().descriptor().ok_or_else(|| {
         workspace_index_unavailable(
             workspace.source_root(),
@@ -230,8 +243,12 @@ fn query_model_requests(
         )
     })?;
     let targets = query_targets(descriptor, options)?;
+    let mut plan = QueryPlan {
+        populated_kinds: storage.populated_kinds(&[])?,
+        requests: Vec::new(),
+    };
     if !uses_vectors(request) {
-        return Ok(Vec::new());
+        return Ok(plan);
     }
     storage.validate_vector_targets(&targets)?;
     if options.device.is_some()
@@ -244,12 +261,14 @@ fn query_model_requests(
         ));
     }
     let mut seen = HashSet::new();
-    targets
+    plan.requests = targets
         .iter()
+        .filter(|target| plan.populated_kinds.contains(&target.kind))
         .map(|table| &table.embedding)
         .filter(|schema| seen.insert(schema.model().reference()))
         .map(|schema| search_model_request(workspace, schema, options))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok(plan)
 }
 
 fn acquire_query_models(
@@ -270,12 +289,14 @@ fn acquire_query_models(
 }
 
 async fn query_storage(
-    acquired: &[ModelRuntimeLease],
+    models: &ModelRuntimeManager,
+    plan: QueryPlan,
     workspace: &Workspace,
     storage: &IndexStore,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
 ) -> Result<ContextResult, EngineError> {
+    let acquired = acquire_query_models(models, workspace, plan.requests)?;
     let runtimes = acquired
         .iter()
         .map(|model| RequestEmbeddingRuntime {
@@ -288,9 +309,9 @@ async fn query_storage(
         .map(|runtime| runtime as &dyn SearchEmbeddingRuntime)
         .collect::<Vec<_>>();
     context_from_index(
-        workspace.source_root(),
         workspace,
         storage,
+        &plan.populated_kinds,
         &embedding_models,
         options,
         request,
@@ -310,7 +331,7 @@ pub(in crate::pipelines) fn refresh_options(
         on_progress: options.on_progress.clone(),
         signal: options.signal.clone(),
         allow_remote: options.allow_remote,
-        authorized_remote: options.authorized_remote.clone(),
+        authorized_remote: options.refresh_authorizations().to_vec(),
         embedding_concurrency: options.embedding_concurrency,
         lock_timeout_ms: options.lock_timeout_ms,
         runtime_device: options.device,

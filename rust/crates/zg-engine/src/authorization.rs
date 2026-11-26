@@ -7,10 +7,11 @@
 use crate::{
     EngineError,
     domain::{
-        Workspace, WorkspaceLayout,
+        ContentKind, IndexDescriptor, Workspace, WorkspaceLayout,
         model::{EncryptedApiKey, ModelConfig},
     },
     models::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
+    storage::IndexStore,
     utils::{
         atomic_write, current_username, ensure_directory, file_exists, reject_symlink,
         resolve_directory, sync_directory,
@@ -22,6 +23,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -86,7 +88,7 @@ fn authorizations_for_manifest(
         || "local/potion-code-16m-v2".to_owned(),
         |selection| selection.model,
     );
-    let requests = embedding_requests(existing, options, &default_ref)?;
+    let (descriptor, requests) = embedding_requests(existing, options, &default_ref)?;
     if options.allow_remote {
         return Ok(Vec::new());
     }
@@ -115,7 +117,56 @@ fn authorizations_for_manifest(
             targets.push(target);
         }
     }
+    if !targets.is_empty() {
+        let wanted = kinds_for_destinations(&descriptor, targets.iter());
+        let stored =
+            match existing.filter(|workspace| workspace.index_enabled() && !options.rebuild) {
+                Some(workspace) => {
+                    IndexStore::inspect_published(workspace.layout(), IndexStore::list_files)?
+                }
+                None => None,
+            }
+            .unwrap_or_default();
+        let mut options = options.clone();
+        let scan =
+            crate::pipelines::indexing::service::indexing_scan(root, existing, &mut options)?;
+        let pending = crate::pipelines::indexing::pipeline::pending_embeddings(
+            root,
+            &scan,
+            &options.changes,
+            &stored,
+            &wanted,
+            false,
+            options.signal.clone(),
+        )?;
+        targets.retain(|target| model_used_by(&descriptor, &target.model, &pending.kinds));
+    }
     Ok(targets)
+}
+
+fn kinds_for_destinations<'a>(
+    descriptor: &IndexDescriptor,
+    targets: impl Iterator<Item = &'a IndexAuthorization>,
+) -> BTreeSet<ContentKind> {
+    let models: BTreeSet<_> = targets.map(|target| target.model.as_str()).collect();
+    descriptor
+        .content_indexes()
+        .into_iter()
+        .filter(|index| models.contains(index.embedding.model().reference().as_str()))
+        .map(|index| index.kind)
+        .collect()
+}
+
+fn model_used_by(
+    descriptor: &IndexDescriptor,
+    reference: &str,
+    kinds: &BTreeSet<ContentKind>,
+) -> bool {
+    kinds.iter().any(|kind| {
+        descriptor
+            .model_for(*kind)
+            .is_some_and(|model| model.model().reference() == reference)
+    })
 }
 
 fn authorization_for_model(
@@ -211,6 +262,11 @@ pub fn query_authorizations(
         } else {
             continue;
         };
+        let approved = if sends_query {
+            options.authorized_remote.as_slice()
+        } else {
+            options.refresh_authorizations()
+        };
         let mut seen = std::collections::BTreeSet::new();
         for table in targets {
             let model = table.embedding.model().reference();
@@ -226,9 +282,7 @@ pub fn query_authorizations(
                 index.embedding_configs().get(&model),
                 requested,
             )?;
-            if let Some(target) =
-                authorization_for_model(&root, &model, endpoint, &options.authorized_remote)?
-            {
+            if let Some(target) = authorization_for_model(&root, &model, endpoint, approved)? {
                 if let Some(previous) = authorizations.iter_mut().find(|item| item.target == target)
                 {
                     previous.query_text |= sends_query;
@@ -243,7 +297,69 @@ pub fn query_authorizations(
             }
         }
     }
+    if !authorizations.is_empty() {
+        retain_used_destinations(
+            &manifest,
+            index,
+            options,
+            workspace_content,
+            &mut authorizations,
+        )?;
+    }
     Ok(authorizations)
+}
+
+fn retain_used_destinations(
+    manifest: &Workspace,
+    index: &IndexDescriptor,
+    options: &crate::api::context::ContextOptions,
+    workspace_content: bool,
+    authorizations: &mut Vec<QueryAuthorization>,
+) -> Result<(), EngineError> {
+    let wanted = kinds_for_destinations(index, authorizations.iter().map(|auth| &auth.target));
+    let wait = options.refresh.map_or(options.auto_update, |policy| {
+        policy == crate::api::context::options::RefreshPolicy::Wait
+    });
+    let needs_query_consent = authorizations.iter().any(|auth| auth.query_text);
+    let pending = if workspace_content {
+        let stored = IndexStore::inspect_published(manifest.layout(), IndexStore::list_files)?
+            .unwrap_or_default();
+        crate::pipelines::indexing::pipeline::pending_embeddings(
+            manifest.source_root(),
+            manifest.scan(),
+            &[],
+            &stored,
+            &wanted,
+            wait && needs_query_consent,
+            options.signal.clone(),
+        )?
+    } else {
+        crate::pipelines::indexing::pipeline::PendingEmbeddings::default()
+    };
+    let mut query_kinds = BTreeSet::new();
+    if needs_query_consent {
+        // Waiting queries see replacements and deletions. Background queries see the published rows.
+        let excluded = if wait {
+            pending.replaced_files.as_slice()
+        } else {
+            &[]
+        };
+        query_kinds = IndexStore::inspect_published(manifest.layout(), |store| {
+            store.populated_kinds(excluded)
+        })?
+        .unwrap_or(wanted); // Execution checks the destination again if the index is busy.
+        if wait {
+            query_kinds.extend(&pending.kinds);
+        }
+        query_kinds
+            .retain(|kind| options.target_kinds.is_empty() || options.target_kinds.contains(kind));
+    }
+    authorizations.retain_mut(|auth| {
+        auth.query_text &= model_used_by(index, &auth.target.model, &query_kinds);
+        auth.workspace_content &= model_used_by(index, &auth.target.model, &pending.kinds);
+        auth.query_text || auth.workspace_content
+    });
+    Ok(())
 }
 
 /// Resolve the same destination for query consent and execution, including the
@@ -1059,6 +1175,7 @@ mod tests {
     #[test]
     fn single_model_discloses_one_remote_destination() {
         let directory = tempfile::tempdir().expect("workspace");
+        fs::write(directory.path().join("README.md"), "hello").expect("source");
         let spec = |reference: &str, endpoint: &str| EmbeddingModelSpec {
             reference: reference.into(),
             revision: None,
@@ -1195,16 +1312,23 @@ mod tests {
         let child = directory.path().join("docs");
         fs::create_dir(&child).expect("child directory");
         let mut request = ContextOptions {
-            root: Some(child),
+            root: Some(child.clone()),
             query: Some("bookstore".into()),
             refresh: Some(RefreshPolicy::Off),
             ..ContextOptions::default()
         };
+        assert!(
+            query_authorization(&request)
+                .expect("empty query")
+                .is_none()
+        );
+        fs::write(child.join("new.md"), "bookstore").expect("pending text");
         assert_local_query_scope(&request);
+        request.refresh = Some(RefreshPolicy::Wait);
         let plan = query_authorization(&request)
             .expect("preflight")
             .expect("consent");
-        assert!(plan.query_text && !plan.workspace_content);
+        assert!(plan.query_text && plan.workspace_content);
         assert_eq!(
             plan.target.root,
             fs::canonicalize(directory.path()).expect("root")
@@ -1218,12 +1342,11 @@ mod tests {
                 .exists()
         );
         request.refresh = Some(RefreshPolicy::Background);
-        assert!(
-            query_authorization(&request)
-                .expect("background")
-                .expect("consent")
-                .workspace_content
-        );
+        let background = query_authorization(&request)
+            .expect("background")
+            .expect("consent");
+        assert!(background.workspace_content && !background.query_text);
+        request.refresh = Some(RefreshPolicy::Wait);
         request.endpoint = Some("https://temporary.test/embeddings".into());
         let plans = query_authorizations(&request).expect("separate query and refresh consent");
         assert_eq!(plans.len(), 2);
@@ -1263,7 +1386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_preflight_does_not_read_ignore_dependencies() {
+    async fn index_preflight_respects_saved_and_requested_ignore_rules() {
         let directory = tempfile::tempdir().expect("fixture");
         let root = directory.path().join("source");
         fs::create_dir(&root).expect("source");
@@ -1288,19 +1411,24 @@ mod tests {
         engine.close();
         let manifest = root.join(".zvec-grep/manifest.json");
         let before = fs::read(&manifest).expect("manifest");
-        fs::remove_file(&ignored).expect("remove external dependency");
+        fs::write(&ignored, "README.md\n").expect("update external ignore");
+        fs::write(root.join("README.md"), "guide").expect("new source");
         let mut request = IndexOptions {
             root: Some(root.clone()),
             ..IndexOptions::default()
         };
-        let plans = index_authorizations(&request).expect("metadata does not read ignore files");
+        assert!(
+            index_authorizations(&request)
+                .expect("ignored source")
+                .is_empty()
+        );
+        request.changes = vec![crate::api::index::options::WorkspaceChange::Upsert(
+            "elsewhere.rs".into(),
+        )];
+        request.reset_paths = true;
+        let plans = index_authorizations(&request).expect("reset preflight");
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].endpoint_host, "provider.test");
-        request.reset_paths = true;
-        assert_eq!(
-            index_authorizations(&request).expect("reset preflight"),
-            plans
-        );
         request.reset_paths = false;
         let replacement = root.join("new.ignore");
         fs::write(&replacement, "*.tmp\n").expect("replacement");
@@ -1380,6 +1508,7 @@ mod tests {
         grant(&original, Some("qwen/text-embedding-v4"), Some(endpoint)).expect("original consent");
         let moved = directory.join("moved");
         fs::rename(original, &moved).expect("move source and storage");
+        fs::write(moved.join("README.md"), "hello").expect("new source");
         let layout = WorkspaceLayout::new(moved.join(".zvec-grep")).expect("moved layout");
         let before = fs::read(layout.authorization_path()).expect("carried consent");
 
@@ -1423,6 +1552,7 @@ mod tests {
         write_workspace_manifest(active.layout().manifest_path(), &active).expect("write active");
         let target = remote_workspace(layout, "https://staging.test/embeddings");
         prepare_build(&target).expect("staged build");
+        fs::write(directory.path().join("README.md"), "hello").expect("pending source");
         let index = index_authorization(&IndexOptions {
             root: Some(directory.path().into()),
             ..IndexOptions::default()
@@ -1459,6 +1589,7 @@ mod tests {
     #[test]
     fn index_disclosure_matches_destination_without_creating_state() {
         let directory = tempfile::tempdir().expect("workspace");
+        fs::write(directory.path().join("README.md"), "hello").expect("source");
         let mut options = IndexOptions {
             root: Some(directory.path().into()),
             embedding: Some(EmbeddingModelSpec {
@@ -1488,7 +1619,10 @@ mod tests {
         options.allow_remote = true;
         assert!(index_authorization(&options).expect("once").is_none());
         options.allow_remote = false;
-        options.embedding.as_mut().expect("model").reference = "local/potion-code-16m-v2".into();
+        options.endpoint = None;
+        let spec = options.embedding.as_mut().expect("model");
+        spec.reference = "local/potion-code-16m-v2".into();
+        spec.endpoint = None;
         assert!(index_authorization(&options).expect("local").is_none());
     }
 
@@ -1499,6 +1633,7 @@ mod tests {
         ) else {
             return;
         };
+        fs::write(root.join("README.md"), "hello").expect("source");
         for (endpoint, expected) in [
             ("https://provider.test/v1/embeddings", "provider.test"),
             ("https://provider.test:443/v1/embeddings", "provider.test"),
@@ -1558,6 +1693,7 @@ mod tests {
         engine.close();
         let parent_manifest = root.join(".zvec-grep/manifest.json");
         let before = fs::read(&parent_manifest).expect("parent manifest");
+        fs::write(root.join("README.md"), "hello").expect("pending parent source");
         let mut unapproved = parent_options;
         unapproved.allow_remote = false;
         let parent_target = index_authorization(&unapproved)
@@ -1567,6 +1703,7 @@ mod tests {
 
         let child = root.join("sub");
         fs::create_dir(&child).expect("child directory");
+        fs::write(child.join("README.md"), "hello").expect("pending child source");
         let mut options = IndexOptions {
             root: Some(child.clone()),
             ..unapproved.clone()

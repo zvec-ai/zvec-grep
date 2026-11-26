@@ -232,6 +232,7 @@ pub struct IndexRuntimeSnapshot {
 
 #[async_trait]
 pub trait IndexOperationProvider: Send + Sync {
+    /// Whether setup and eventual searches can schedule background indexing.
     fn supports_background_indexing(&self) -> bool {
         false
     }
@@ -495,7 +496,7 @@ impl ZvecGrepMcpServer {
     ) -> Result<CallToolResponse, ErrorData> {
         let preview = input.preview;
         let mut request = input
-            .into_request()
+            .into_provider_request(self.index_operations.supports_background_indexing())
             .map_err(|message| ErrorData::invalid_params(message, None))?;
         if setup::SetupState::is_continuation(&context) {
             return self
@@ -803,7 +804,15 @@ impl ServerHandler for ZvecGrepMcpServer {
             }
             context.extensions.insert(setup::SetupCall(request.clone()));
             if !setup::is_setup_state(&request) {
-                match self.consent_state.prepare(&request, &mut context) {
+                match self
+                    .consent_state
+                    .prepare(
+                        &request,
+                        &mut context,
+                        self.index_operations.supports_background_indexing(),
+                    )
+                    .await
+                {
                     Ok(Some(result)) => return Ok(result),
                     Ok(None) => {}
                     Err(error) => return Err(error),
@@ -1732,6 +1741,14 @@ impl RelationshipInput {
 }
 
 impl SearchInput {
+    fn into_provider_request(
+        mut self,
+        supports_background_indexing: bool,
+    ) -> Result<ContextOptions, String> {
+        self.auto_update &= supports_background_indexing;
+        self.into_request()
+    }
+
     fn into_request(self) -> Result<ContextOptions, String> {
         let root = absolute_root(&self.root)?;
         if self.embedding_concurrency == Some(0) {
@@ -2954,7 +2971,7 @@ mod tests {
         let mut search = input();
         search.freshness = FreshnessInput::WaitForFresh;
         search.auto_update = false;
-        let request = search.into_request().expect("search input should map");
+        let request = search.into_provider_request(false).expect("direct search");
         let value = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(value["refresh"], "wait");
     }

@@ -25,12 +25,17 @@ pub(super) fn document_error(e: impl std::fmt::Display) -> PdfExtractionError {
     EngineError::invalid_argument(format!("Cannot extract PDF: {e}")).into()
 }
 
-pub(super) fn produce(
+/// Read the complete native document before either previewing its searchable text
+/// or rendering pages for layout inference. The `PDFium` handles stay on this thread.
+fn with_native_pages<T>(
     bytes: &[u8],
-    sender: &Sender<RenderedPage>,
     signal: &CancellationToken,
-    layout_disabled: &AtomicBool,
-) -> Result<Vec<OutlineTarget>, PdfExtractionError> {
+    consume: impl FnOnce(
+        &stages::Document<'_>,
+        Vec<Page>,
+        Vec<OutlineTarget>,
+    ) -> Result<T, PdfExtractionError>,
+) -> Result<T, PdfExtractionError> {
     check(signal)?;
     let parser = assembly::parser();
     let library = zg_pdfium::acquire().map_err(|error| {
@@ -52,9 +57,43 @@ pub(super) fn produce(
         return Err(document_error("incomplete page extraction"));
     }
     check(signal)?;
-    let mut native_pages = extracted.pages.clone();
+    consume(&document, extracted.pages, outline)
+}
+
+pub(super) fn native_text(
+    bytes: &[u8],
+    path: crate::domain::SourcePath,
+    signal: &CancellationToken,
+) -> Result<super::PdfMarkdownSource, PdfExtractionError> {
+    let (pages, outline) =
+        with_native_pages(bytes, signal, |_, pages, outline| Ok((pages, outline)))?;
+    Ok(assembly::finish(pages, outline, path, signal)?)
+}
+
+pub(super) fn produce(
+    bytes: &[u8],
+    sender: &Sender<RenderedPage>,
+    signal: &CancellationToken,
+    layout_disabled: &AtomicBool,
+) -> Result<Vec<OutlineTarget>, PdfExtractionError> {
+    with_native_pages(bytes, signal, |document, pages, outline| {
+        send_pages(document, pages, &outline, sender, signal, layout_disabled)?;
+        Ok(outline)
+    })
+}
+
+fn send_pages(
+    document: &stages::Document<'_>,
+    pages: Vec<Page>,
+    outline: &[OutlineTarget],
+    sender: &Sender<RenderedPage>,
+    signal: &CancellationToken,
+    layout_disabled: &AtomicBool,
+) -> Result<(), PdfExtractionError> {
+    let parser = assembly::parser();
+    let mut native_pages = pages.clone();
     stages::apply_content_filters(&mut native_pages, &parser.content_filters());
-    let native = parser.parse_from_pages(native_pages, outline.clone());
+    let native = parser.parse_from_pages(native_pages, outline.to_vec());
     let mut guards: HashMap<_, Vec<_>> = native
         .pages
         .into_iter()
@@ -71,7 +110,7 @@ pub(super) fn produce(
             (page.page_number, tables)
         })
         .collect();
-    for page in extracted.pages {
+    for page in pages {
         check(signal)?;
         let width = f64::from(page.page_width);
         let height = f64::from(page.page_height);
@@ -109,5 +148,5 @@ pub(super) fn produce(
             })
             .map_err(|_| EngineError::cancelled("PDF extraction consumer closed"))?;
     }
-    Ok(outline)
+    Ok(())
 }

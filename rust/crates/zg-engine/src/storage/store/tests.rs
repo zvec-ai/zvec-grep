@@ -922,7 +922,12 @@ fn deletion_rejects_an_external_storage_lock_and_succeeds_after_release() {
     let record = home.join("record");
     fs::write(&record, b"preserve while locked").expect("stored record");
 
-    let reader = acquire_storage_lock(IndexLayout::new(&home), true).expect("external reader lock");
+    let layout = IndexLayout::new(&home);
+    fs::create_dir(layout.lock_path()).expect("invalid lock entry");
+    let error = acquire_storage_lock(layout, true, false).expect_err("reject non-file lock");
+    assert!(error.message().contains("expected a regular file"));
+    fs::remove_dir(layout.lock_path()).expect("clear invalid lock");
+    let reader = acquire_storage_lock(layout, true, true).expect("external reader lock");
     let error = IndexStore::delete(&home).expect_err("active reader prevents deletion");
     assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
     assert_eq!(
@@ -1908,38 +1913,65 @@ fn native_path_schema_requires_rebuild_without_mutating_collections() {
 }
 
 #[test]
-fn missing_or_malformed_collections_are_not_recreated() {
+fn preflight_inspects_the_live_writer_without_creating_storage() {
     let root = tempfile::tempdir().expect("workspace");
-    open(root.path(), false).close().expect("create index");
-    let missing = root.path().join("directories");
-    fs::remove_dir_all(&missing).expect("remove collection");
-    for malformed in [false, true] {
-        if malformed {
-            fs::write(&missing, b"not a directory").expect("invalid collection entry");
-        }
-        for options in [
-            WorkspaceIndexStorageOptions::ReadOnly {
-                graph_enabled: true,
-                storage_path: root.path().to_owned(),
-            },
-            WorkspaceIndexStorageOptions::ReadWrite {
-                graph_enabled: false,
-                storage_path: root.path().to_owned(),
-                indexes: vec![text_index()],
-            },
-        ] {
-            let error = IndexStore::open(options)
-                .err()
-                .expect("reject incomplete storage");
+    let workspace = WorkspaceLayout::new(root.path().join(".zvec-grep")).expect("layout");
+    let layout = IndexLayout::new(workspace.index_dir());
+    assert!(
+        IndexStore::inspect_published(&workspace, |store| store.populated_kinds(&[]))
+            .expect("empty workspace")
+            .is_none()
+    );
+    assert!(!layout.lock_path().exists());
+    fs::create_dir_all(layout.root()).expect("index root");
+    let store = open(layout.root(), false);
+    let (file, entry) = file_at(&store, "doc.txt");
+    store
+        .replace_fixture_file(&file, &[entry])
+        .expect("index document");
+    assert_eq!(
+        IndexStore::inspect_published(&workspace, |store| store.populated_kinds(&[]))
+            .expect("inspect writer"),
+        Some(BTreeSet::from([ContentKind::Text]))
+    );
+    store.close().expect("close writer");
+}
+
+#[test]
+fn missing_or_malformed_collections_are_not_recreated() {
+    for collection in ["directories", "text"] {
+        let root = tempfile::tempdir().expect("workspace");
+        open(root.path(), false).close().expect("create index");
+        let missing = root.path().join(collection);
+        fs::remove_dir_all(&missing).expect("remove collection");
+        for malformed in [false, true] {
             if malformed {
-                assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
-                assert_eq!(
-                    fs::read(&missing).expect("unchanged entry"),
-                    b"not a directory"
-                );
-            } else {
-                assert!(error.message().contains("rebuild the index"));
-                assert!(!missing.exists());
+                fs::write(&missing, b"not a directory").expect("invalid collection entry");
+            }
+            for options in [
+                WorkspaceIndexStorageOptions::ReadOnly {
+                    graph_enabled: true,
+                    storage_path: root.path().to_owned(),
+                },
+                WorkspaceIndexStorageOptions::ReadWrite {
+                    graph_enabled: false,
+                    storage_path: root.path().to_owned(),
+                    indexes: vec![text_index()],
+                },
+            ] {
+                let error = IndexStore::open(options)
+                    .err()
+                    .expect("reject incomplete storage");
+                if malformed {
+                    assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
+                    assert_eq!(
+                        fs::read(&missing).expect("unchanged entry"),
+                        b"not a directory"
+                    );
+                } else {
+                    assert!(error.message().contains("rebuild the index"));
+                    assert!(!missing.exists());
+                }
             }
         }
     }

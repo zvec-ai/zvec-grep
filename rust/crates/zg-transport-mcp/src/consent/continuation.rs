@@ -17,10 +17,11 @@ pub(super) struct ContinuationApproval {
 }
 
 impl ContinuationState {
-    pub(crate) fn prepare(
+    pub(crate) async fn prepare(
         &self,
         request: &rmcp::model::CallToolRequestParams,
         context: &mut RequestContext<RoleServer>,
+        supports_background_indexing: bool,
     ) -> Result<Option<rmcp::model::CallToolResponse>, rmcp::ErrorData> {
         use rmcp::model::ProtocolVersion;
         let invalid = || rmcp::ErrorData::invalid_params("Invalid or expired requestState", None);
@@ -45,9 +46,11 @@ impl ContinuationState {
             "zvec_grep_search" => {
                 let input: crate::SearchInput =
                     serde_json::from_value(arguments.clone()).map_err(parse_error)?;
-                let options = input.into_request().map_err(mapping_error)?;
+                let options = input
+                    .into_provider_request(supports_background_indexing)
+                    .map_err(mapping_error)?;
                 (
-                    match authorization::query_authorizations(&options) {
+                    match super::query_targets(&options, &context.ct).await {
                         Ok(targets) => targets,
                         Err(error) => return Ok(Some(crate::error_result(&error).into())),
                     },
@@ -59,7 +62,7 @@ impl ContinuationState {
                     serde_json::from_value(arguments.clone()).map_err(parse_error)?;
                 match input.into_request().map_err(mapping_error)? {
                     crate::IndexToolRequest::Index { options, .. } => (
-                        match authorization::index_authorizations(&options) {
+                        match super::index_targets(&options, &context.ct).await {
                             Ok(targets) => targets,
                             Err(error) => return Ok(Some(crate::error_result(&error).into())),
                         }
@@ -309,7 +312,7 @@ mod tests {
                     .into_parts();
                 context.extensions.insert(parts);
             }
-            if let Some(required) = self.0.prepare(&request, &mut context)? {
+            if let Some(required) = self.0.prepare(&request, &mut context, true).await? {
                 return Ok(required);
             }
             let input: crate::IndexInput = serde_json::from_value(serde_json::Value::Object(
@@ -336,6 +339,7 @@ mod tests {
     async fn wire_continuation_accepts_object_reordering_but_rejects_value_and_array_changes() {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             let root = tempfile::tempdir().expect("workspace");
+            std::fs::write(root.path().join("lib.rs"), "pub fn sample() {}").expect("source file");
             let (server_io, client_io) = tokio::io::duplex(65536);
             let task = tokio::spawn(async move {
                 Server(Arc::new(ContinuationState::default()))
@@ -439,6 +443,16 @@ mod tests {
             let request = CallToolRequestParams::new("zvec_grep_index").with_arguments(serde_json::json!({
                 "root": root.path(), "embedding": "qwen/text-embedding-v4", "endpoint": "https://embedding.example.test/v1"
             }).as_object().expect("valid consent test fixture").clone());
+            let CallToolResponse::Complete(empty) =
+                client.call_tool_once(request.clone()).await.expect("empty workspace")
+            else {
+                panic!("empty workspace should not require consent");
+            };
+            let ContentBlock::Text(text) = &empty.content[0] else {
+                panic!("authorized target JSON");
+            };
+            assert_eq!(text.text, "[]");
+            std::fs::write(root.path().join("README.md"), "Workspace content").expect("source file");
             let CallToolResponse::InputRequired(required) = client.call_tool_once(request.clone()).await.expect("valid consent test fixture") else { panic!("consent required"); };
             let disclosed = disclosed_targets(&required);
             let canonical_root = root.path().canonicalize().expect("canonical workspace root");

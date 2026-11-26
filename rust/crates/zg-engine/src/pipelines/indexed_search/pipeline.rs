@@ -222,7 +222,7 @@ async fn search_with_stage_trace(
     let filter_started = Instant::now();
     let filter = search_plan_to_storage_filter(workspace_root, &plan, storage)?;
     let filter_duration = filter_started.elapsed();
-    let has_searchable_files = !filter_matches_no_files(filter.as_ref());
+    let has_searchable_files = !plan.kinds.is_empty() && !filter_matches_no_files(filter.as_ref());
 
     let embedding_started = Instant::now();
     let vectors = if has_searchable_files
@@ -1295,12 +1295,31 @@ mod tests {
         storage
     }
 
+    async fn search_text_and_code(
+        storage: &FixtureStorage,
+        workspace: &crate::domain::Workspace,
+        options: &crate::api::context::ContextOptions,
+        models: &[&dyn SearchEmbeddingRuntime],
+    ) -> crate::api::context::ContextResult {
+        use crate::pipelines::indexed_search::context::{
+            context_from_index, normalize_context_request,
+        };
+        let request = normalize_context_request(options).expect("valid input");
+        context_from_index(
+            workspace,
+            storage,
+            &[ContentKind::Text, ContentKind::Code].into(),
+            models,
+            options,
+            &request,
+        )
+        .await
+        .expect("search")
+    }
+
     #[tokio::test]
     async fn independent_queries_keep_their_own_limits_and_score_spaces() {
-        use crate::{
-            api::context::ContextOptions,
-            pipelines::indexed_search::context::{context_from_index, normalize_context_request},
-        };
+        use crate::api::context::ContextOptions;
         let dir = tempfile::tempdir().expect("workspace");
         let mut storage = kind_storage();
         let code = storage
@@ -1329,20 +1348,8 @@ mod tests {
             limit: Some(1),
             ..ContextOptions::default()
         };
-        let search = async |options: &ContextOptions| {
-            let request = normalize_context_request(options).expect("request");
-            context_from_index(
-                dir.path(),
-                &workspace,
-                &storage,
-                &[&text_model, &code_model],
-                options,
-                &request,
-            )
-            .await
-            .expect("search")
-        };
-        let result = search(&options).await;
+        let models: &[&dyn SearchEmbeddingRuntime] = &[&text_model, &code_model];
+        let result = search_text_and_code(&storage, &workspace, &options, models).await;
         assert_eq!(result.items.len(), 2);
         let lexical = &result.group_results[0];
         assert_eq!(lexical.items.len(), 1);
@@ -1366,18 +1373,14 @@ mod tests {
         );
 
         options.fuse = true;
-        let fused = search(&options).await;
+        let fused = search_text_and_code(&storage, &workspace, &options, models).await;
         assert_eq!(fused.group_results.len(), 1);
         assert_eq!(fused.items.len(), 1);
     }
 
     #[tokio::test]
     async fn search_pools_compatible_tables_before_cutoff_and_separates_model_spaces() {
-        use crate::{
-            api::context::ContextOptions,
-            domain::Workspace,
-            pipelines::indexed_search::context::{context_from_index, normalize_context_request},
-        };
+        use crate::api::context::ContextOptions;
         let dir = tempfile::tempdir().expect("workspace root");
         let root = dir.path();
         let storage = kind_storage();
@@ -1396,16 +1399,8 @@ mod tests {
             trace: true,
             ..ContextOptions::default()
         };
-        let search = async |workspace: &Workspace,
-                            options: &ContextOptions,
-                            models: &[&dyn SearchEmbeddingRuntime]| {
-            let request = normalize_context_request(options).expect("valid input");
-            context_from_index(root, workspace, &storage, models, options, &request)
-                .await
-                .expect("search")
-        };
         let mixed = routed_workspace(root, &shared, None);
-        let result = search(&mixed, &options, &[&shared]).await;
+        let result = search_text_and_code(&storage, &mixed, &options, &[&shared]).await;
         assert_eq!(
             result.items[0].relative_path,
             Path::new("main.rs"),
@@ -1421,7 +1416,7 @@ mod tests {
 
         let separate = routed_workspace(root, &shared, Some(&alternative));
         let models: &[&dyn SearchEmbeddingRuntime] = &[&shared, &alternative];
-        let result = search(&separate, &options, models).await;
+        let result = search_text_and_code(&storage, &separate, &options, models).await;
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].relative_path, Path::new("guide.txt"));
         let groups = result.diagnostics.index.expect("index").result_groups;
@@ -1440,7 +1435,8 @@ mod tests {
         metadata["model"]["name"] = "other".into();
         other.info = serde_json::from_value(metadata).expect("same dimension but distinct model");
         let same_dimension = routed_workspace(root, &shared, Some(&other));
-        let result = search(&same_dimension, &options, &[&shared, &other]).await;
+        let result =
+            search_text_and_code(&storage, &same_dimension, &options, &[&shared, &other]).await;
         assert_eq!(
             result.diagnostics.index.expect("index").result_groups.len(),
             2
@@ -1450,12 +1446,23 @@ mod tests {
             target_kinds: vec![ContentKind::Code],
             ..options.clone()
         };
-        let result = search(&separate, &targeted, &[&alternative]).await;
+        let result = search_text_and_code(&storage, &separate, &targeted, &[&alternative]).await;
         assert_eq!(result.items[0].relative_path, Path::new("main.rs"));
         assert_eq!(
             result.diagnostics.index.expect("index").result_groups[0].kinds,
             vec![ContentKind::Code]
         );
+
+        let empty = ContextOptions {
+            target_kinds: vec![ContentKind::Image],
+            ..options.clone()
+        };
+        let result = search_text_and_code(&storage, &separate, &empty, &[]).await;
+        assert!(result.items.is_empty());
+        let diagnostics = result.diagnostics.index.expect("index");
+        assert_eq!(diagnostics.result_groups[0].kinds, [ContentKind::Image]);
+        assert_eq!(diagnostics.result_groups[0].item_count, 0);
+        assert_eq!(diagnostics.routes.len(), 1);
 
         let lexical = ContextOptions {
             routes: vec![SearchRoute {
@@ -1465,7 +1472,7 @@ mod tests {
             limit: Some(2),
             ..options
         };
-        let result = search(&separate, &lexical, &[]).await;
+        let result = search_text_and_code(&storage, &separate, &lexical, &[]).await;
         let groups = result.diagnostics.index.expect("index").result_groups;
         assert_eq!(result.items.len(), 2);
         assert_eq!(

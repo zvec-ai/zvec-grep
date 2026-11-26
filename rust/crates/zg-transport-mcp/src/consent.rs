@@ -9,6 +9,7 @@ use rmcp::{
     model::{ElicitRequestParams, ElicitResult, ElicitationAction},
     service::RequestContext,
 };
+use tokio_util::sync::CancellationToken;
 use zg_engine::{
     EngineError,
     api::{context::ContextOptions, index::IndexOptions},
@@ -22,11 +23,56 @@ enum Decision {
     FtsOnly,
 }
 
+/// Discovering remote work can scan and extract changed files.
+async fn preflight<T: Send + 'static>(
+    signal: &CancellationToken,
+    resolve: impl FnOnce(CancellationToken) -> Result<T, EngineError> + Send + 'static,
+) -> Result<T, EngineError> {
+    let child = signal.child_token();
+    let _guard = child.clone().drop_guard();
+    let worker = async move {
+        tokio::task::spawn_blocking(move || resolve(child))
+            .await
+            .map_err(|error| {
+                EngineError::internal(format!("Authorization worker failed: {error}"))
+            })?
+    };
+    tokio::select! {
+        biased;
+        () = signal.cancelled() => Err(EngineError::cancelled("MCP authorization was cancelled")),
+        result = worker => result,
+    }
+}
+
+pub(crate) async fn index_targets(
+    options: &IndexOptions,
+    signal: &CancellationToken,
+) -> Result<Vec<IndexAuthorization>, EngineError> {
+    let mut options = options.clone();
+    preflight(signal, move |child| {
+        options.signal = Some(child);
+        authorization::index_authorizations(&options)
+    })
+    .await
+}
+
+async fn query_targets(
+    options: &ContextOptions,
+    signal: &CancellationToken,
+) -> Result<Vec<authorization::QueryAuthorization>, EngineError> {
+    let mut options = options.clone();
+    preflight(signal, move |child| {
+        options.signal = Some(child);
+        authorization::query_authorizations(&options)
+    })
+    .await
+}
+
 pub(crate) async fn index(
     options: &mut IndexOptions,
     context: &RequestContext<RoleServer>,
 ) -> Result<(), EngineError> {
-    let targets = authorization::index_authorizations(options)?;
+    let targets = index_targets(options, &context.ct).await?;
     if targets.is_empty() {
         return Ok(());
     }
@@ -34,7 +80,7 @@ pub(crate) async fn index(
     for target in &targets {
         decisions.push(ask(target, false, true, false, context).await?);
     }
-    if authorization::index_authorizations(options)? != targets {
+    if index_targets(options, &context.ct).await? != targets {
         return Err(EngineError::permission_denied(
             "Workspace authorization scope changed while awaiting consent; retry to review all destinations",
         ));
@@ -50,7 +96,7 @@ pub(crate) async fn search(
     options: &mut ContextOptions,
     context: &RequestContext<RoleServer>,
 ) -> Result<(), EngineError> {
-    let targets = authorization::query_authorizations(options)?;
+    let targets = query_targets(options, &context.ct).await?;
     if targets.is_empty() {
         return Ok(());
     }
@@ -70,13 +116,17 @@ pub(crate) async fn search(
         }
         decisions.push(decision);
     }
-    if authorization::query_authorizations(options)? != targets {
+    if query_targets(options, &context.ct).await? != targets {
         return Err(EngineError::permission_denied(
             "Workspace authorization scope changed while awaiting consent; retry to review all destinations",
         ));
     }
     for (required, decision) in targets.iter().zip(decisions) {
-        apply(decision, &required.target, &mut options.authorized_remote)?;
+        match decision {
+            Decision::Once => options.authorize_once(required),
+            Decision::Workspace => authorization::grant_index(&required.target)?,
+            Decision::FtsOnly => unreachable!("FTS-only returns before applying grants"),
+        }
     }
     Ok(())
 }

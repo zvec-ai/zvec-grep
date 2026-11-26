@@ -505,6 +505,8 @@ fn switching_endpoints_requires_a_key_for_the_new_destination() {
         "--endpoint",
         "https://example.test/updated",
     ];
+    let source = fixture.root.path().join("sample.md");
+    fs::write(&source, "documentation for the new destination").expect("source file");
     let without_key = fixture.run(&change_endpoint);
     assert!(!without_key.status.success());
     assert!(String::from_utf8_lossy(&without_key.stderr).contains("requires an API key"));
@@ -512,6 +514,7 @@ fn switching_endpoints_requires_a_key_for_the_new_destination() {
         fixture.manifest()["index"]["descriptor"]["embeddingConfigs"],
         manifest["index"]["descriptor"]["embeddingConfigs"]
     );
+    fs::remove_file(source).expect("remove source from the workspace");
     let with_key = fixture
         .command(&change_endpoint)
         .env("ZVEC_GREP_API_KEY", "temporary-provider-key")
@@ -598,6 +601,8 @@ fn explicit_device_overrides_environment_and_saved_preferences_do_not() {
         "defaults": {"embedding": "local/potion-code-16m-v2"},
         "models": {"local/potion-code-16m-v2": {"device": "cpu"}}
     }));
+    let source = fixture.root.path().join("sample.md");
+    fs::write(&source, "use the configured model").expect("source file");
     let invalid = fixture
         .command(&["--index", "--mode", "direct"])
         .env("ZVEC_GREP_DEVICE", "invalid")
@@ -612,6 +617,19 @@ fn explicit_device_overrides_environment_and_saved_preferences_do_not() {
             .join(".zvec-grep/manifest.json")
             .exists()
     );
+    // A regular file blocks preparation before an explicit device can trigger a download.
+    let blocked_cache = fixture.user.path().join("model-cache");
+    fs::write(&blocked_cache, "").expect("blocked cache");
+    let active = fixture
+        .command(&["--index", "--mode", "direct", "--device", "cpu"])
+        .env("ZVEC_GREP_DEVICE", "invalid")
+        .env("ZVEC_GREP_MODEL_CACHE", &blocked_cache)
+        .output()
+        .expect("explicit device with a pending file");
+    assert!(!active.status.success());
+    assert!(String::from_utf8_lossy(&active.stderr).contains("Unable to prepare embedding model"));
+
+    fs::remove_file(&source).expect("empty workspace");
     let explicit = fixture
         .command(&["--index", "--mode", "direct", "--device", "cpu"])
         .env("ZVEC_GREP_DEVICE", "invalid")
@@ -622,6 +640,7 @@ fn explicit_device_overrides_environment_and_saved_preferences_do_not() {
         "{}",
         String::from_utf8_lossy(&explicit.stderr)
     );
+    fs::write(&source, "use the saved model").expect("source file");
     let invalid = fixture
         .command(&["--index", "--mode", "direct"])
         .env("ZVEC_GREP_DEVICE", "invalid")

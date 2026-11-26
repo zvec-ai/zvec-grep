@@ -1,17 +1,18 @@
 //! Queries may lease an active incremental writer until it retires for publication.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicUsize, Ordering},
     },
 };
 use tokio::sync::Notify;
 
 use crate::{
-    domain::Workspace, models::ModelRuntimeLease, storage::IndexStore, workspace::lock::LockGuard,
+    api::index::IndexOptions, domain::Workspace, models::ModelRuntimeLease, storage::IndexStore,
+    workspace::lock::LockGuard,
 };
 
 #[derive(Clone, Default)]
@@ -22,7 +23,7 @@ pub(crate) struct WriterContexts {
 pub(crate) struct WriterSession {
     // Borrowers retain all resources, including the home lock, if indexing is aborted.
     pub(crate) storage: IndexStore,
-    pub(crate) models: Vec<ModelRuntimeLease>,
+    pub(crate) models: BTreeMap<String, (IndexOptions, OnceLock<ModelRuntimeLease>)>,
     pub(crate) workspace: Workspace,
     active: AtomicUsize,
     drained: Notify,
@@ -41,13 +42,16 @@ pub(crate) struct WriterLease {
 impl WriterSession {
     pub(crate) fn new(
         storage: IndexStore,
-        models: Vec<ModelRuntimeLease>,
+        requests: impl IntoIterator<Item = (String, IndexOptions)>,
         workspace: Workspace,
         home_lock: Arc<LockGuard>,
     ) -> Self {
         Self {
             storage,
-            models,
+            models: requests
+                .into_iter()
+                .map(|(reference, options)| (reference, (options, OnceLock::new())))
+                .collect(),
             workspace,
             active: AtomicUsize::new(0),
             drained: Notify::new(),

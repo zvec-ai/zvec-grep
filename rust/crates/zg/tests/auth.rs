@@ -167,6 +167,7 @@ fn malformed_grants_can_be_revoked_without_claiming_a_record_count() {
 #[test]
 fn remembered_model_grants_coexist_and_remain_scoped_to_each_destination() {
     let fixture = Fixture::new();
+    fs::write(fixture.root.path().join("note.txt"), "searchable text").expect("source");
     fixture.grant();
     fixture.success(&[
         "--auth",
@@ -204,6 +205,7 @@ fn remembered_model_grants_coexist_and_remain_scoped_to_each_destination() {
 #[test]
 fn indexing_requires_matching_consent_before_credentials_or_network() {
     let fixture = Fixture::new();
+    fs::write(fixture.root.path().join("note.txt"), "searchable text").expect("source");
     let args = [
         "--index",
         "--mode",
@@ -303,36 +305,19 @@ fn resident_server_observes_grant_and_revoke_without_restart() {
         "server",
         "--embedding",
         "qwen/text-embedding-v4",
-        "--api-key",
-        "test-key",
     ];
-    assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("authorization required"));
-    fixture.grant();
-    // An empty workspace initializes the remote runtime without sending content.
     fixture.success(&args);
     let search = ["--mode", "server", "--vector", "needle", "--refresh", "off"];
-    fixture.success(&["--index", "--mode", "server"]);
+    assert_eq!(fixture.success(&search), "No matches.\n");
+
+    fs::write(fixture.root.path().join("note.txt"), "needle").expect("new source");
+    assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("authorization required"));
+    fixture.grant();
+    // Without a key, the authorization check succeeds and the provider receives no requests.
+    assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("requires an API key"));
     fixture.success(&["--auth", "revoke"]);
-    assert!(
-        String::from_utf8_lossy(&fixture.run(&search).stderr).contains("authorization required")
-    );
     assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("authorization required"));
-    fixture.success(&[
-        "--index",
-        "--mode",
-        "server",
-        "--embedding",
-        "qwen/text-embedding-v4",
-        "--api-key",
-        "test-key",
-        "--allow-remote",
-    ]);
-    assert!(
-        fixture
-            .success(&["--auth", "status"])
-            .contains("not authorized")
-    );
-    assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("authorization required"));
+    assert_eq!(fixture.success(&search), "No matches.\n");
 }
 
 #[test]
@@ -369,7 +354,7 @@ fn api_base_url_grants_match_resolved_index_endpoints() {
         .expect("grant list");
         assert_eq!(grant[0]["endpoint"], endpoint);
 
-        // Empty workspaces resolve and persist the runtime without network I/O.
+        // Empty workspaces persist the route without acquiring a runtime.
         // Both spellings must reuse the grant for the actual request URL.
         for requested in [base, endpoint] {
             fixture.success(&[
@@ -472,6 +457,7 @@ fn matching_path_and_username_reuse_grants_without_user_home_state() {
 #[test]
 fn missing_username_requires_explicit_single_request_authorization() {
     let fixture = Fixture::new();
+    fs::write(fixture.root.path().join("note.txt"), "searchable text").expect("source");
     fixture.grant();
     let grant_path = fixture.root.path().join(".zvec-grep/authorization.json");
     let original = fs::read(&grant_path).expect("original grant");

@@ -67,6 +67,11 @@ impl EmbeddingPlan {
             let spec = specs
                 .remove(&reference)
                 .unwrap_or_else(|| bare_spec(reference.clone()));
+            if reference.starts_with("local/") && spec.endpoint.is_some() {
+                return Err(EngineError::invalid_argument(
+                    "endpoint requires a remote model",
+                ));
+            }
             if spec.revision.is_some() {
                 return Err(EngineError::unsupported(
                     "embedding revision overrides are not supported by the catalog-backed runtime",
@@ -204,67 +209,18 @@ fn proposed_descriptor(
     IndexDescriptor::new(default_model, routes, configs, graph_indexing, FTS_CONFIG)
 }
 
-/// Resolve only effective cache paths. A workspace cache replaces all per-model
-/// cache settings, including when multiple content kinds share one model.
-pub(super) fn normalize_model_paths(options: &mut IndexOptions) -> Result<(), EngineError> {
-    let absolute = |path: &std::path::Path| {
-        std::path::absolute(path).map_err(|error| {
-            EngineError::from_io("failed to resolve model cache directory", &error)
-        })
-    };
-    if let Some(path) = &mut options.runtime_model_cache {
-        *path = absolute(path)?;
-    }
-    let paths = options.model_cache.iter().chain(
-        options
-            .embedding
-            .iter()
-            .chain(options.embedding_routes.values())
-            .filter_map(|spec| spec.cache_dir.as_ref()),
-    );
-    let mut shared: Option<std::path::PathBuf> = None;
-    for path in paths {
-        let path = absolute(path)?;
-        if path.to_str().is_none() {
-            return Err(EngineError::invalid_argument(format!(
-                "cannot save model cache directory '{}': path is not valid Unicode",
-                path.display(),
-            )));
-        }
-        if let Some(previous) = &shared
-            && previous != &path
-        {
-            return Err(EngineError::invalid_argument(format!(
-                "conflicting model cache directories '{}' and '{}': choose one directory for the workspace",
-                previous.display(),
-                path.display()
-            )));
-        }
-        shared = Some(path);
-    }
-    options.model_cache = shared;
-    for spec in options
-        .embedding
-        .iter_mut()
-        .chain(options.embedding_routes.values_mut())
-    {
-        spec.cache_dir = None;
-    }
-    Ok(())
-}
-
 /// Concrete destinations shared by indexing and remote authorization preflight.
 pub(crate) fn embedding_requests(
     existing: Option<&Workspace>,
     options: &IndexOptions,
     default_reference: &str,
-) -> Result<BTreeMap<String, IndexOptions>, EngineError> {
+) -> Result<(IndexDescriptor, BTreeMap<String, IndexOptions>), EngineError> {
     let mut options = options.clone();
-    normalize_model_paths(&mut options)?;
+    options.normalize_model_cache()?;
     let mut plan = EmbeddingPlan::new(existing, &options, default_reference)?;
     plan.requests
         .retain(|reference, _| plan.active.contains(reference));
-    Ok(plan.requests)
+    Ok((plan.proposed, plan.requests))
 }
 
 #[cfg(test)]
@@ -283,7 +239,7 @@ mod tests {
             embedding_routes: BTreeMap::from([(ContentKind::Code, code)]),
             ..Default::default()
         };
-        let requests = embedding_requests(None, &options, &reference).expect("shared runtime");
+        let (_, requests) = embedding_requests(None, &options, &reference).expect("shared runtime");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[&reference].endpoint, options.endpoint);
         options
@@ -311,7 +267,7 @@ mod tests {
             embedding_routes: BTreeMap::from([(ContentKind::Code, bare_spec(other.clone()))]),
             ..Default::default()
         };
-        let requests = embedding_requests(None, &options, &default).expect("distinct models");
+        let (_, requests) = embedding_requests(None, &options, &default).expect("distinct models");
         let request = &requests[&other];
         assert!(
             request.api_key.is_none()
@@ -332,7 +288,7 @@ mod tests {
                 runtime_device: Some(Device::Auto),
                 ..Default::default()
             };
-            let requests = embedding_requests(None, &options, default).expect("mixed routes");
+            let (_, requests) = embedding_requests(None, &options, default).expect("mixed routes");
             assert_eq!(requests[local].device, Some(Device::Cpu));
             assert_eq!(requests[local].runtime_device, Some(Device::Auto));
             assert_eq!(requests[remote].device, None);
@@ -380,7 +336,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let active = embedding_requests(None, &options, multimodal).expect("image default");
+        let (_, active) = embedding_requests(None, &options, multimodal).expect("image default");
         assert!(active.contains_key(multimodal));
         assert!(active.contains_key(local));
 

@@ -17,6 +17,7 @@ use rmcp::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use zg_engine::{
     EngineError, ZvecGrep,
     api::{
@@ -286,7 +287,11 @@ impl SetupState {
                         embedding_concurrency: request.embedding_concurrency,
                         ..Default::default()
                     };
-                    if let Some(target) = authorization::index_authorization(&options)? {
+                    if let Some(target) = consent::index_targets(&options, &context.ct)
+                        .await?
+                        .into_iter()
+                        .next()
+                    {
                         phase = Phase::Authorization {
                             options: Box::new(options),
                             target,
@@ -308,7 +313,8 @@ impl SetupState {
                         };
                         continue;
                     }
-                    let options = Self::approve(engine, *options, target, &answer).await?;
+                    let options =
+                        Self::approve(engine, *options, target, &answer, &context.ct).await?;
                     return self.submit(provider, options, context).await;
                 }
             }
@@ -320,11 +326,14 @@ impl SetupState {
         mut options: IndexOptions,
         target: IndexAuthorization,
         answer: &Value,
+        signal: &CancellationToken,
     ) -> Result<IndexOptions, EngineError> {
         match answer.get("decision").and_then(Value::as_str) {
             Some("allow_once") => options.authorized_remote.push(target.clone()),
             Some("allow_workspace") => {
-                if authorization::index_authorization(&options)?.as_ref() != Some(&target) {
+                if consent::index_targets(&options, signal).await?.as_slice()
+                    != std::slice::from_ref(&target)
+                {
                     return Err(EngineError::permission_denied(
                         "Remote destination changed; retry model setup",
                     ));
@@ -337,7 +346,7 @@ impl SetupState {
                 ));
             }
         }
-        if authorization::index_authorization(&options)?.is_some() {
+        if !consent::index_targets(&options, signal).await?.is_empty() {
             return Err(EngineError::permission_denied(
                 "Remote destination changed; retry model setup",
             ));

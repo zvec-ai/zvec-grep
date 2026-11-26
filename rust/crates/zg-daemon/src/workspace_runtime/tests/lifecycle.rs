@@ -337,6 +337,26 @@ async fn slow_retirement_does_not_block_reactivation_or_forget_its_new_jobs() {
 async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_indexes() {
     use zg_engine::api::index::options::EmbeddingModelSpec;
 
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("embedding listener");
+    let endpoint = format!(
+        "http://{}/embeddings",
+        listener.local_addr().expect("address")
+    );
+    let embeddings = axum::routing::post(|| async {
+        axum::Json(
+            serde_json::json!({ "data": [{ "index": 0, "embedding": vec![1.0_f32; 1024] }] }),
+        )
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route("/embeddings", embeddings),
+        )
+        .await
+        .expect("serve embeddings");
+    });
     let first = tempdir().expect("first workspace");
     let second = tempdir().expect("second workspace");
     let first_root = first.path().canonicalize().expect("first root");
@@ -351,6 +371,7 @@ async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_ind
         SchedulerConfig::default(),
     );
     for root in [&first_root, &second_root] {
+        std::fs::write(root.join("sample.txt"), "Some indexed text.").expect("write sample");
         manager
             .submit_index(
                 IndexOptions {
@@ -362,7 +383,7 @@ async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_ind
                         endpoint: None,
                         device: zg_engine::api::index::options::Device::Cpu,
                     }),
-                    endpoint: Some("http://127.0.0.1:1/unused-empty-workspace".into()),
+                    endpoint: Some(endpoint.clone()),
                     api_key: Some("fixture-key".into()),
                     allow_remote: true,
                     ..IndexOptions::default()
@@ -370,7 +391,7 @@ async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_ind
                 true,
             )
             .await
-            .expect("empty index needs no remote embedding");
+            .expect("index sample");
     }
     drain_runtime_callbacks().await;
     assert_eq!(engine.runtime_snapshot().loaded_models, 1);
@@ -401,4 +422,5 @@ async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_ind
     drop(active);
     manager.shutdown_all().await.expect("shutdown");
     engine.close();
+    server.abort();
 }

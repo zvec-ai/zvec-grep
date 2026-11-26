@@ -1685,7 +1685,11 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     assert_eq!(prompts, 1);
     assert_eq!(fts["result"]["isError"], false, "{fts}");
     assert_eq!(embedding.requests.load(Ordering::SeqCst), indexed_requests);
-    let (persisted, prompts) = bridge.request_with_consent(&index(5), "workspace")?;
+    let (unchanged, prompts) = bridge.request_with_consent(&index(5), "cancel")?;
+    assert_eq!(prompts, 0);
+    assert_eq!(unchanged["result"]["isError"], false, "{unchanged}");
+    assert_eq!(embedding.requests.load(Ordering::SeqCst), indexed_requests);
+    let (persisted, prompts) = bridge.request_with_consent(&search(6), "workspace")?;
     assert_eq!(prompts, 1);
     assert_eq!(persisted["result"]["isError"], false, "{persisted}");
     let grants: serde_json::Value = serde_json::from_slice(&std::fs::read(&authorization)?)?;
@@ -1694,7 +1698,7 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     assert_eq!(grants[0]["username"], "consent-user");
     assert!(!home.path().join("authorization.key").exists());
     assert!(!home.path().join(".zvec-grep").exists());
-    let (queried, prompts) = bridge.request_with_consent(&search(6), "cancel")?;
+    let (queried, prompts) = bridge.request_with_consent(&search(7), "cancel")?;
     assert_eq!(prompts, 0, "valid workspace grants must skip elicitation");
     assert_eq!(queried["result"]["isError"], false, "{queried}");
     assert!(embedding.requests.load(Ordering::SeqCst) > indexed_requests);
@@ -1854,7 +1858,7 @@ impl EmbeddingServer {
             assert!(
                 Instant::now() < deadline,
                 "watcher did not submit the edited file: {stage}\n{}",
-                log_tail(&home.join("daemon/server.log"), 0)
+                log_tail(&home.join("daemon/logs/server.log"), 0)
             );
             std::thread::sleep(Duration::from_millis(10));
         }

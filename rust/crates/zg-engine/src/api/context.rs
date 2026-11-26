@@ -97,10 +97,12 @@ pub mod options {
         /// Allows remote embedding for this operation without persisting a grant.
         #[serde(default)]
         pub allow_remote: bool,
-        /// Exact destinations approved by interactive consent for this operation.
-        /// Separate from the explicit blanket `allow_remote` option.
+        /// Destinations approved for query text. Also applies to refreshes unless scoped below.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub authorized_remote: Vec<crate::authorization::IndexAuthorization>,
+        /// When present, only these one-time grants cover workspace content during refresh.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub authorized_refresh: Option<Vec<crate::authorization::IndexAuthorization>>,
         #[serde(default)]
         pub api_key: Option<String>,
         #[serde(default)]
@@ -118,6 +120,27 @@ pub mod options {
     }
 
     impl ContextOptions {
+        /// Approve exactly the destination and data categories shown by the consent prompt.
+        pub fn authorize_once(&mut self, scope: &crate::authorization::QueryAuthorization) {
+            let refresh = self
+                .authorized_refresh
+                .get_or_insert_with(|| self.authorized_remote.clone());
+            if scope.workspace_content && !refresh.contains(&scope.target) {
+                refresh.push(scope.target.clone());
+            }
+            if scope.query_text && !self.authorized_remote.contains(&scope.target) {
+                self.authorized_remote.push(scope.target.clone());
+            }
+        }
+
+        /// Destinations authorized to receive file contents during this query's refresh.
+        #[must_use]
+        pub fn refresh_authorizations(&self) -> &[crate::authorization::IndexAuthorization] {
+            self.authorized_refresh
+                .as_deref()
+                .unwrap_or(&self.authorized_remote)
+        }
+
         /// Check an explicit target before a caller schedules indexing or asks for consent.
         /// A missing index is left to the caller's normal setup flow.
         ///
@@ -207,6 +230,7 @@ pub mod options {
                 lock_timeout_ms: None,
                 allow_remote: false,
                 authorized_remote: Vec::new(),
+                authorized_refresh: None,
                 api_key: None,
                 endpoint: None,
                 device: None,

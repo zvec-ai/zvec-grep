@@ -260,6 +260,18 @@ impl WorkspaceWatcherFactoryPort for EngineWatcherFactory {
     }
 }
 
+/// Older daemon clients express background refresh with the auto-update flag.
+pub(crate) fn normalize_query_refresh(request: &mut ContextOptions) -> RefreshPolicy {
+    let policy = request.refresh.unwrap_or(if request.auto_update {
+        RefreshPolicy::Background
+    } else {
+        RefreshPolicy::Off
+    });
+    request.auto_update = false;
+    request.refresh = Some(policy);
+    policy
+}
+
 impl WorkspaceRuntimeManager {
     #[cfg(test)]
     pub(crate) fn native(engine: Arc<ZvecGrep>) -> Self {
@@ -336,6 +348,7 @@ impl WorkspaceRuntimeManager {
             // A submitted background job outlives the request that created it.
             options.signal = None;
         }
+        options.normalize_model_cache()?;
         let canonical_root = canonical_root(options.root.as_deref())?;
         options.root = Some(canonical_root.clone());
         let runtime = self.runtime(canonical_root, &options)?;
@@ -1004,19 +1017,13 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .as_ref()
             .map(|runtime| runtime.search_freshness())
             .unwrap_or_default();
-        let policy = request.refresh.unwrap_or(if request.auto_update {
-            RefreshPolicy::Background
-        } else {
-            RefreshPolicy::Off
-        });
-        request.auto_update = false;
-        request.refresh = Some(policy);
+        let policy = normalize_query_refresh(&mut request);
         let options = IndexOptions {
             root: request.root.clone(),
             on_progress: request.on_progress.clone(),
             signal: request.signal.clone(),
             allow_remote: request.allow_remote,
-            authorized_remote: request.authorized_remote.clone(),
+            authorized_remote: request.refresh_authorizations().to_vec(),
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
             runtime_device: request.device,
@@ -2448,6 +2455,7 @@ mod tests {
             assert_eq!(error.code(), EngineError::RESOURCE_CLOSED);
         }
     }
+
     #[tokio::test]
     async fn manual_updates_replace_the_watcher_once_without_replaying_configuration() {
         use zg_engine::api::index::options::ScanRulesUpdate;

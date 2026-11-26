@@ -34,6 +34,67 @@ fn fixture(
     )
 }
 
+#[tokio::test]
+async fn queued_requests_share_the_latest_workspace_cache() {
+    use zg_engine::api::index::options::ContentKind;
+
+    let workspace = tempdir().expect("workspace");
+    let options = IndexOptions {
+        root: Some(workspace.path().to_owned()),
+        ..IndexOptions::default()
+    };
+    let old = workspace.path().join("old-cache");
+    let new = workspace.path().join("new-cache");
+    let mut routed = options.clone();
+    routed.embedding_routes.insert(
+        ContentKind::Code,
+        EmbeddingModelSpec {
+            reference: "local/potion-code-16m-v2".into(),
+            revision: None,
+            cache_dir: Some(old),
+            endpoint: None,
+            device: Device::Auto,
+        },
+    );
+    let executor = Arc::new(RecordingExecutor::default());
+    let (manager, _sender) = fixture(executor.clone());
+
+    let first = manager
+        .submit_index(routed.clone(), false)
+        .await
+        .expect("queue route");
+    routed.model_cache = Some(new.clone());
+    let error = manager
+        .submit_index(routed, false)
+        .await
+        .expect_err("conflicting paths in one request");
+    assert_eq!(
+        error.into_engine_error().code(),
+        EngineError::INVALID_ARGUMENT
+    );
+    let latest = manager
+        .submit_index(
+            IndexOptions {
+                model_cache: Some(new.clone()),
+                ..options
+            },
+            true,
+        )
+        .await
+        .expect("update workspace cache");
+    assert_eq!(first.job.id, latest.job.id);
+    {
+        let calls = executor.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].model_cache.as_deref(), Some(new.as_path()));
+        assert_eq!(
+            calls[0].embedding_routes[&ContentKind::Code].cache_dir,
+            None
+        );
+    }
+    manager.shutdown_all().await.expect("shutdown");
+}
+
 async fn deliver(
     manager: &WorkspaceRuntimeManager,
     sender: &mpsc::Sender<WorkspaceChangeBatch>,

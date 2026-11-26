@@ -27,8 +27,8 @@ pub(super) const CODE_MODEL: &str = "local/potion-code-16m-v2";
 const TEXT_MODEL: &str = "local/bekko-256-int8";
 const FILE_WEIGHT_LIMIT: u64 = 64 * 1024;
 
-/// Remote-consent checks only need configured destinations: automatic choices
-/// are always local, so preflight never needs to scan the workspace.
+/// Automatic choices are local, so consent can resolve configured destinations
+/// without running automatic model selection.
 pub(crate) fn configured_selection(
     existing: Option<&Workspace>,
     options: &IndexOptions,

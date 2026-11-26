@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -49,7 +49,7 @@ use crate::{
         ModelRuntimeLease,
     },
     storage::types::IndexedFragment,
-    utils::{collapse_whitespace, sha256_hex},
+    utils::{collapse_whitespace, decode_index_text, sha256_hex},
 };
 
 use super::{
@@ -140,13 +140,17 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
     }
 }
 
+pub(super) trait IndexModelProvider: Sync {
+    fn acquire(&self, reference: &str) -> Result<&dyn IndexEmbeddingRuntime, EngineError>;
+}
+
 #[derive(Clone)]
 pub(crate) struct IndexingContext<'context> {
     pub workspace: &'context Workspace,
     pub storage: &'context dyn IndexStorage,
     pub scanner: &'context dyn WorkspaceScannerPort,
     pub extractor: &'context dyn ExtractionPort,
-    pub embedding_models: &'context [&'context dyn IndexEmbeddingRuntime],
+    pub(super) models: &'context dyn IndexModelProvider,
     pub embedding_concurrency: Option<usize>,
     pub on_progress: Option<IndexProgressReporter>,
     pub signal: Option<CancellationToken>,
@@ -681,7 +685,7 @@ async fn index_candidates(
 }
 
 async fn index_candidates_inner<'context>(
-    context: &'context IndexingContext<'context>,
+    context: &IndexingContext<'context>,
     control: &TaskControl,
     diff: &mut DiffPlan,
     timings: &mut TimingCollector,
@@ -689,17 +693,9 @@ async fn index_candidates_inner<'context>(
     model_prepared: &mut HashSet<String>,
     running: &mut FuturesUnordered<EmbeddingFuture<'context>>,
 ) -> Result<IndexWriteStats, EngineError> {
-    let mut batches = model_batches(context)?;
-    let task_limit = batches
-        .values()
-        .map(|batch| batch.scheduler.task_concurrency())
-        .max()
-        .unwrap_or(1);
+    let mut batches = ModelBatches::new(context)?;
     let mut stats = IndexWriteStats::default();
-    let initial_progress = batches
-        .first_key_value()
-        .map(|(_, batch)| batch.scheduler.snapshot());
-    report_indexing(context, &stats, diff, progress_base, None, initial_progress);
+    report_indexing(context, &stats, diff, progress_base, None, None);
 
     let candidates = std::mem::take(&mut diff.candidates);
     for mut candidate in candidates {
@@ -762,14 +758,14 @@ async fn index_candidates_inner<'context>(
 
         schedule_file(prepared, &mut batches, context, model_prepared, running).await?;
 
-        if running.len() >= task_limit
+        if running.len() >= batches.task_limit
             && let Some(outcome) = running.next().await
         {
             apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)?;
         }
     }
 
-    for batch in batches.values_mut() {
+    for batch in batches.active.values_mut() {
         batch.flush(context, model_prepared, running).await?;
     }
     while let Some(outcome) = running.next().await {
@@ -779,47 +775,78 @@ async fn index_candidates_inner<'context>(
     Ok(stats)
 }
 
-fn model_batches<'a>(
-    context: &IndexingContext<'a>,
-) -> Result<BTreeMap<String, ModelBatch<'a>>, EngineError> {
-    // A configured execution budget spans models. Without an override each
-    // backend keeps its own automatic parallelism and adaptive backoff.
-    let budget = if context.embedding_models.len() > 1 {
-        crate::models::resolve_index_concurrency(None, context.embedding_concurrency)
-            .map_err(ModelError::into_engine_error)?
-            .map(|limit| Arc::new(Semaphore::new(limit.min(Semaphore::MAX_PERMITS))))
-    } else {
-        None
-    };
-    let mut batches = BTreeMap::new();
-    for &model in context.embedding_models {
-        let policy = resolve_index_batch_policy(context.embedding_concurrency, model)?;
-        let workers = model.native_batch_workers();
-        batches.insert(
-            model.info().model().reference(),
-            ModelBatch {
-                model,
-                scheduler: Arc::new(EmbeddingScheduler::new(policy, budget.clone(), workers)),
-                files: Vec::new(),
-                fragments: 0,
-            },
-        );
+struct ModelBatches<'a> {
+    active: BTreeMap<String, ModelBatch<'a>>,
+    budget: Option<Arc<Semaphore>>,
+    task_limit: usize,
+}
+
+impl<'a> ModelBatches<'a> {
+    fn new(context: &IndexingContext<'_>) -> Result<Self, EngineError> {
+        let limit = crate::models::resolve_index_concurrency(None, context.embedding_concurrency)
+            .map_err(ModelError::into_engine_error)?;
+        let mut references = context
+            .workspace
+            .index()
+            .descriptor()
+            .expect("enabled index")
+            .content_indexes()
+            .into_iter()
+            .map(|index| index.embedding.model().reference());
+        let shared = references
+            .next()
+            .is_some_and(|first| references.any(|other| other != first));
+        Ok(Self {
+            active: BTreeMap::new(),
+            budget: limit
+                .filter(|_| shared)
+                .map(|limit| Arc::new(Semaphore::new(limit.min(Semaphore::MAX_PERMITS)))),
+            task_limit: 1,
+        })
     }
-    Ok(batches)
+
+    fn for_model(
+        &mut self,
+        context: &IndexingContext<'a>,
+        schema: &EmbeddingModelInfo,
+    ) -> Result<&mut ModelBatch<'a>, EngineError> {
+        let reference = schema.model().reference();
+        match self.active.entry(reference) {
+            std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let model = context.models.acquire(entry.key())?;
+                schema
+                    .ensure_index_compatible(model.info())
+                    .map_err(|error| {
+                        error.with_help("Rebuild the index with `zg --index --rebuild`.")
+                    })?;
+                let policy = resolve_index_batch_policy(context.embedding_concurrency, model)?;
+                let scheduler = EmbeddingScheduler::new(
+                    policy,
+                    self.budget.clone(),
+                    model.native_batch_workers(),
+                );
+                self.task_limit = self.task_limit.max(scheduler.task_concurrency());
+                Ok(entry.insert(ModelBatch {
+                    model,
+                    scheduler: Arc::new(scheduler),
+                    files: Vec::new(),
+                    fragments: 0,
+                }))
+            }
+        }
+    }
 }
 
 async fn schedule_file<'a>(
     file: PreparedFile,
-    batches: &mut BTreeMap<String, ModelBatch<'a>>,
-    context: &IndexingContext<'_>,
+    batches: &mut ModelBatches<'a>,
+    context: &IndexingContext<'a>,
     prepared: &mut HashSet<String>,
     running: &mut FuturesUnordered<EmbeddingFuture<'a>>,
 ) -> Result<(), EngineError> {
     let first_kind = file.fragments[0].kind;
-    let first = model_for_content(context, first_kind)?
-        .info()
-        .model()
-        .reference();
+    let first = model_for_content(context, first_kind)?;
     if file
         .fragments
         .iter()
@@ -829,18 +856,19 @@ async fn schedule_file<'a>(
         for (ordinal, fragment) in file.fragments.iter().enumerate() {
             by_kind.entry(fragment.kind).or_default().push(ordinal);
         }
-        let mut by_model = BTreeMap::<String, Vec<usize>>::new();
+        let mut by_model = BTreeMap::new();
         for (kind, ordinals) in by_kind {
             let model = model_for_content(context, kind)?;
             by_model
-                .entry(model.info().model().reference())
-                .or_default()
+                .entry(model.model().reference())
+                .or_insert_with(|| (model, Vec::new()))
+                .1
                 .extend(ordinals);
         }
         if by_model.len() > 1 {
             let mut groups = Vec::new();
-            for (reference, ordinals) in by_model {
-                let batch = &batches[&reference];
+            for (model, ordinals) in by_model.into_values() {
+                let batch = batches.for_model(context, model)?;
                 batch.prepare(context, prepared).await?;
                 groups.push((batch.model, Arc::clone(&batch.scheduler), ordinals));
             }
@@ -853,7 +881,7 @@ async fn schedule_file<'a>(
             return Ok(());
         }
     }
-    let batch = batches.get_mut(&first).expect("validated runtime");
+    let batch = batches.for_model(context, first)?;
     let maximum = batch.model.info().model().max_batch_size();
     if !batch.files.is_empty() && batch.fragments + file.fragments.len() > maximum {
         batch.flush(context, prepared, running).await?;
@@ -1062,7 +1090,7 @@ async fn extract_candidate(
                 .map(model_progress::for_extraction),
         })
         .await?;
-    let options = index_chunk_options(model.info().max_input_tokens(), Some(source.text()));
+    let options = index_chunk_options(model.max_input_tokens(), Some(source.text()));
     let graph = context
         .workspace
         .index()
@@ -1107,11 +1135,7 @@ async fn prepare_candidate(
         .formats
         .as_ref()
         .ok_or_else(|| EngineError::internal("index candidate must have a detected format"))?;
-    let kind = if crate::extraction::is_code_source(formats) {
-        ContentKind::Code
-    } else {
-        ContentKind::Text
-    };
+    let kind = text_content_kind(formats);
     let (extracted, chunk_options) = extract_candidate(
         context,
         control,
@@ -1177,7 +1201,7 @@ fn prepare_extracted_entities(
                 Content::Text(text) | Content::Code(text) => Some(text.as_str()),
                 Content::Image(_) => None,
             };
-            let budget = index_chunk_options(model.info().max_input_tokens(), text);
+            let budget = index_chunk_options(model.max_input_tokens(), text);
             crate::extraction::limit_entity_fragments(entity, budget)?;
             limits.push(budget.max_chunk_chars);
         }
@@ -1212,30 +1236,20 @@ fn graph_language(formats: &[FileFormat]) -> FileFormat {
 }
 
 fn model_for_content<'a>(
-    context: &'a IndexingContext<'_>,
+    context: &IndexingContext<'a>,
     kind: ContentKind,
-) -> Result<&'a dyn IndexEmbeddingRuntime, EngineError> {
-    let index =
-        context.workspace.index().descriptor().ok_or_else(|| {
-            EngineError::invalid_argument("indexing requires an enabled workspace")
-        })?;
-    let reference = index
+) -> Result<&'a EmbeddingModelInfo, EngineError> {
+    context
+        .workspace
+        .index()
+        .descriptor()
+        .expect("enabled index")
         .model_for(kind)
         .ok_or_else(|| {
             EngineError::unsupported(format!(
                 "no embedding model configured for {} content",
                 kind.as_str(),
             ))
-        })?
-        .model()
-        .reference();
-    context
-        .embedding_models
-        .iter()
-        .copied()
-        .find(|model| model.info().model().reference() == reference)
-        .ok_or_else(|| {
-            EngineError::invalid_argument(format!("embedding runtime is missing for {reference}"))
         })
 }
 
@@ -2125,34 +2139,8 @@ fn validate_context(context: &IndexingContext<'_>) -> Result<(), EngineError> {
             "indexing requires an enabled workspace",
         ));
     }
-    let index = context
-        .workspace
-        .index()
-        .descriptor()
-        .expect("enabled workspace");
-    let mut schemas = index
-        .content_indexes()
-        .into_iter()
-        .map(|table| (table.embedding.model().reference(), table.embedding))
-        .collect::<BTreeMap<_, _>>();
-    if schemas.is_empty() || context.embedding_models.len() != schemas.len() {
-        return Err(EngineError::invalid_argument(
-            "runtime models differ from workspace content indexes",
-        ));
-    }
-    for model in context.embedding_models {
-        let schema = schemas
-            .remove(&model.info().model().reference())
-            .ok_or_else(|| {
-                EngineError::invalid_argument(
-                    "runtime model is missing or duplicated in workspace content indexes",
-                )
-            })?;
-        schema
-            .ensure_index_compatible(model.info())
-            .map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild`."))?;
-        let _ = resolve_index_batch_policy(context.embedding_concurrency, *model)?;
-    }
+    crate::models::resolve_index_concurrency(None, context.embedding_concurrency)
+        .map_err(ModelError::into_engine_error)?;
     Ok(())
 }
 
@@ -2171,15 +2159,167 @@ async fn classify_files(
     let signal = control.cancellation.clone();
     tokio::task::spawn_blocking(move || {
         let mut skipped = Vec::new();
-        let files = scanned_files(&workspace, files, &stored, &mut skipped, &signal)?;
+        let files = scanned_files(
+            workspace.source_root(),
+            workspace.scan().max_file_size_bytes(),
+            files,
+            &stored,
+            &mut skipped,
+            &signal,
+        )?;
         Ok((files, skipped))
     })
     .await
     .map_err(|error| EngineError::internal(format!("file classification worker failed: {error}")))?
 }
 
+fn text_content_kind(formats: &[FileFormat]) -> ContentKind {
+    if crate::extraction::is_code_source(formats) {
+        ContentKind::Code
+    } else {
+        ContentKind::Text
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PendingEmbeddings {
+    pub(crate) kinds: BTreeSet<ContentKind>,
+    pub(crate) replaced_files: Vec<FileId>,
+}
+
+/// Discover which outstanding files would actually produce fragments for an unapproved
+/// destination. Execution checks consent again before acquiring the model.
+pub(crate) fn pending_embeddings(
+    root: &Path,
+    scan: &crate::domain::ScanRules,
+    changes: &[WorkspaceChange],
+    stored: &[FileRecord],
+    wanted: &BTreeSet<ContentKind>,
+    track_replacements: bool,
+    signal: Option<CancellationToken>,
+) -> Result<PendingEmbeddings, EngineError> {
+    let control = task_control(signal);
+    let mut scope = ChangeScope::from_changes(root, changes)?;
+    scope.include_unfinished(root, stored);
+    let snapshot = zg_host_native::discover_sync(
+        &ScanRequest {
+            roots: vec![ScanPolicy::root_spec(root, scan)?],
+            scope_paths: scope.scan_paths(),
+        },
+        &control,
+    )
+    .map_err(map_host_error)?;
+    let files = scanned_files(
+        root,
+        scan.max_file_size_bytes(),
+        snapshot.files,
+        stored,
+        &mut Vec::new(),
+        &control.cancellation,
+    )?;
+    let pending = compute_diff(
+        scope.filter_scanned(root, files),
+        &scope.filter_stored(root, stored),
+    );
+    let mut kinds = BTreeSet::new();
+    let mut replaced_files: Vec<_> = pending.deleted.iter().map(FileRecord::id).collect();
+    for candidate in pending.candidates {
+        throw_if_cancelled(Some(&control.cancellation))?;
+        let previous = candidate.existing.as_ref().map(FileRecord::id);
+        let Some(formats) = candidate.scanned.formats else {
+            replaced_files.extend(previous);
+            continue;
+        };
+        let kind = text_content_kind(&formats);
+        let needs_fragments = wanted.contains(&kind) && !kinds.contains(&kind);
+        // A script can become plain text at the same path. A waiting query must
+        // account for the old fragments even when the new kind is already approved.
+        if !(needs_fragments || track_replacements && previous.is_some()) {
+            continue;
+        }
+        let Some(source) = preview_source(&candidate.scanned.discovered, &control)? else {
+            replaced_files.extend(previous);
+            continue;
+        };
+        if candidate.kind == CandidateKind::Modified
+            && candidate
+                .existing
+                .as_ref()
+                .and_then(|record| record.snapshot().content_hash.as_deref())
+                == Some(&sha256_hex(&source.bytes))
+        {
+            continue;
+        }
+        replaced_files.extend(previous);
+        if !needs_fragments {
+            continue;
+        }
+        if source_kind(&formats) == Some(SourceKind::Pdf) {
+            match crate::extraction::pdf::has_native_fragments(
+                &source.bytes,
+                candidate.scanned.relative_path,
+                &control.cancellation,
+            ) {
+                Ok(true) => {
+                    kinds.insert(ContentKind::Text);
+                }
+                Err(error) if error.code() == EngineError::CANCELLED => return Err(error),
+                // Unreadable documents are recorded as failed by the indexing pass.
+                Ok(false) | Err(_) => {}
+            }
+        } else if let Some(text) = decode_index_text(&formats, &source.bytes) {
+            let source = crate::extraction::TextSource {
+                relative_path: candidate.scanned.relative_path,
+                text: text.into_owned(),
+                formats,
+            };
+            if let Ok(entities) =
+                crate::extraction::extract(&source, crate::extraction::ChunkOptions::default())
+            {
+                kinds.extend(
+                    entities
+                        .into_iter()
+                        .filter(|entity| {
+                            !entity.fragments.is_empty() && wanted.contains(&entity.content.kind())
+                        })
+                        .map(|entity| entity.content.kind()),
+                );
+            }
+        }
+        if &kinds == wanted {
+            break;
+        }
+    }
+    Ok(PendingEmbeddings {
+        kinds,
+        replaced_files,
+    })
+}
+
+fn preview_source(
+    file: &DiscoveredFile,
+    control: &TaskControl,
+) -> Result<Option<HostSource>, EngineError> {
+    match zg_host_native::read_batch_sync(
+        &ReadBatchRequest {
+            files: vec![file.clone()],
+        },
+        control,
+    )
+    .map_err(map_host_error)
+    .and_then(|batch| checked_source(batch, file))
+    {
+        Ok(source) => Ok(Some(source)),
+        Err(error) if [EngineError::CANCELLED, EngineError::INTERNAL].contains(&error.code()) => {
+            Err(error)
+        }
+        Err(_) => Ok(None), // Indexing records a failed file and removes its old fragments.
+    }
+}
+
 fn scanned_files(
-    workspace: &Workspace,
+    root: &Path,
+    max_file_size: Option<u64>,
     files: Vec<DiscoveredFile>,
     stored: &[FileRecord],
     skipped: &mut Vec<SkippedFile>,
@@ -2193,21 +2333,18 @@ fn scanned_files(
     throw_if_cancelled(Some(signal))?;
     for discovered in files {
         throw_if_cancelled(Some(signal))?;
-        if discovered.root.as_path() != workspace.source_root() {
+        if discovered.root.as_path() != root {
             return Err(EngineError::invalid_argument(
                 "discovered file must belong to the workspace root",
             ));
         }
         let relative_path = SourcePath::new(discovered.relative_path.clone())?;
         let id = existing.get(&relative_path).map(|file| file.id());
-        let absolute_path = workspace.source_path(&relative_path);
+        let absolute_path = root.join(&relative_path);
         // A saved successful index proves support, but larger files still need
         // classification when their limit depends on the format. This also
         // handles returning from an explicit size limit to the default limits.
-        let known_limit = workspace
-            .scan()
-            .max_file_size_bytes()
-            .unwrap_or(MIN_DEFAULT_FILE_SIZE_BYTES);
+        let known_limit = max_file_size.unwrap_or(MIN_DEFAULT_FILE_SIZE_BYTES);
         if discovered.size_bytes <= known_limit
             && existing
                 .get(&relative_path)
@@ -2235,8 +2372,7 @@ fn scanned_files(
                 continue;
             }
         };
-        let explicit_maximum = workspace.scan().max_file_size_bytes();
-        let maximum = explicit_maximum.unwrap_or_else(|| default_file_size_limit(&formats));
+        let maximum = max_file_size.unwrap_or_else(|| default_file_size_limit(&formats));
         let reason = match source_kind(&formats) {
             None | Some(SourceKind::Image(_)) => Some(
                 if formats
@@ -2295,7 +2431,7 @@ async fn read_source(
     control: &TaskControl,
     file: &DiscoveredFile,
 ) -> Result<HostSource, EngineError> {
-    let mut sources = scanner
+    let sources = scanner
         .read_batch(
             &ReadBatchRequest {
                 files: vec![file.clone()],
@@ -2304,6 +2440,13 @@ async fn read_source(
         )
         .await
         .map_err(map_host_error)?;
+    checked_source(sources, file)
+}
+
+fn checked_source(
+    mut sources: Vec<HostSource>,
+    file: &DiscoveredFile,
+) -> Result<HostSource, EngineError> {
     if sources.len() != 1 {
         return Err(EngineError::internal(format!(
             "native scanner returned {} sources for one requested file",
@@ -2835,6 +2978,18 @@ mod tests {
         );
     }
 
+    struct TestModels<'a>(&'a [&'a dyn IndexEmbeddingRuntime]);
+
+    impl IndexModelProvider for TestModels<'_> {
+        fn acquire(&self, reference: &str) -> Result<&dyn IndexEmbeddingRuntime, EngineError> {
+            self.0
+                .iter()
+                .copied()
+                .find(|model| model.info().model().reference() == reference)
+                .ok_or_else(|| EngineError::invalid_argument("missing test model"))
+        }
+    }
+
     async fn index_once(
         workspace: &Workspace,
         storage: &MemoryStorage,
@@ -2845,7 +3000,7 @@ mod tests {
             storage,
             scanner: &RecordingScanner::new(),
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[model],
+            models: &TestModels(&[model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -2933,10 +3088,9 @@ mod tests {
         let directory = tempdir().expect("valid test fixture");
         let path = directory.path().join("manual.pdf");
         std::fs::write(&path, b"%PDF-1.7\nfixture").expect("valid test fixture");
-        let workspace = workspace(directory.path());
+        let (workspace, text, code) = routed_workspace(directory.path());
         let storage = MemoryStorage::default();
         let scanner = RecordingScanner::new();
-        let model = ConcurrentModel::new();
         let pdf = FixturePdf {
             calls: Arc::new(AtomicUsize::new(0)),
             fail: Arc::new(AtomicBool::new(false)),
@@ -2947,7 +3101,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &extractor,
-            embedding_models: &[&model],
+            models: &TestModels(&[&text, &code]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -2963,8 +3117,11 @@ mod tests {
                 .expect("valid test fixture")
                 .values()
                 .flatten()
-                .any(|entry| entry.fts_text.contains("Wait five minutes"))
+                .any(|entry| entry.kind == ContentKind::Text
+                    && entry.fts_text.contains("Wait five minutes"))
         );
+        assert_eq!(text.prepare_calls.load(Ordering::Acquire), 1);
+        assert_eq!(code.prepare_calls.load(Ordering::Acquire), 0);
         let again = index_workspace(&context).await.expect("valid test fixture");
         assert_eq!(again.entities_created, 0);
         assert_eq!(pdf.calls.load(Ordering::Acquire), 1);
@@ -2975,7 +3132,30 @@ mod tests {
         let stored = storage.list_files().expect("valid test fixture");
         assert_eq!(
             stored[0].snapshot().content_hash.as_deref(),
-            Some(sha256_hex(&std::fs::read(path).expect("valid test fixture")).as_str())
+            Some(sha256_hex(&std::fs::read(&path).expect("valid test fixture")).as_str())
+        );
+
+        std::fs::write(path, b"%PDF-1.7\nno-native-text").expect("scan-only PDF");
+        let empty = index_workspace(&IndexingContext {
+            models: &TestModels(&[]),
+            ..context
+        })
+        .await
+        .expect("empty PDFs require no embedding model");
+        assert_eq!((empty.entities_created, empty.files_failed), (0, 0));
+        assert!(
+            empty
+                .warnings
+                .iter()
+                .any(|w| w.contains("no searchable native text"))
+        );
+        assert!(
+            storage
+                .entries
+                .lock()
+                .expect("stored fragments")
+                .values()
+                .all(Vec::is_empty)
         );
     }
 
@@ -3000,7 +3180,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &extractor,
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -3053,7 +3233,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &extractor,
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -3855,7 +4035,7 @@ mod tests {
                 storage: &storage,
                 scanner: &scanner,
                 extractor: &crate::extraction::ExtractionService::default(),
-                embedding_models: &[&model],
+                models: &TestModels(&[&model]),
                 embedding_concurrency: None,
                 on_progress: None,
                 signal: None,
@@ -3896,7 +4076,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -3937,7 +4117,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -3983,7 +4163,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4019,7 +4199,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: Some(2),
             on_progress: None,
             signal: None,
@@ -4097,7 +4277,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: Some(2),
             on_progress: None,
             signal: None,
@@ -4182,7 +4362,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4221,7 +4401,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4261,7 +4441,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: Some(signal),
@@ -4289,7 +4469,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4337,7 +4517,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4373,7 +4553,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4504,7 +4684,7 @@ mod tests {
         };
 
         let dir = tempdir().expect("workspace");
-        let workspace = workspace(dir.path());
+        let (workspace, _, _) = routed_workspace(dir.path());
         let storage = MemoryStorage::default();
         let scanner = RecordingScanner::new();
         let models = ModelRuntimeManager::new();
@@ -4531,15 +4711,25 @@ mod tests {
                 storage: &storage,
                 scanner: &scanner,
                 extractor: &crate::extraction::ExtractionService::default(),
-                embedding_models: &[&llama, &remote],
+                models: &TestModels(&[&llama, &remote]),
                 embedding_concurrency: Some(limit),
                 on_progress: None,
                 signal: None,
                 changes: &[],
             };
-            let batches = model_batches(&context).expect("batches");
-            let native = &batches[&llama.info().model().reference()].scheduler;
-            let http = &batches[&remote.info().model().reference()].scheduler;
+            let mut batches = ModelBatches::new(&context).expect("shared operation budget");
+            let native = Arc::clone(
+                &batches
+                    .for_model(&context, llama.info())
+                    .expect("llama batch")
+                    .scheduler,
+            );
+            let http = Arc::clone(
+                &batches
+                    .for_model(&context, remote.info())
+                    .expect("remote batch")
+                    .scheduler,
+            );
             let native_permit = native.acquire(2, None).await.expect("native batch");
             let signal = CancellationToken::new();
             let waiting = http.acquire(1, Some(&signal));
@@ -4576,7 +4766,7 @@ mod tests {
                 storage: &storage,
                 scanner: &scanner,
                 extractor: &crate::extraction::ExtractionService::default(),
-                embedding_models: &models,
+                models: &TestModels(&models),
                 embedding_concurrency: None,
                 on_progress: None,
                 signal: None,
@@ -4589,7 +4779,7 @@ mod tests {
                 .iter()
                 .map(|f| (f.fragment_id.clone(), f.kind))
                 .collect::<Vec<_>>();
-            let mut batches = model_batches(&context).expect("model batches");
+            let mut batches = ModelBatches::new(&context).expect("model batches");
             let mut running = FuturesUnordered::new();
             schedule_file(
                 file,
@@ -4665,7 +4855,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&code, &text],
+            models: &TestModels(&[&code, &text]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4700,34 +4890,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_or_duplicate_runtimes_fail_before_embedding_or_storage_writes() {
+    async fn an_unused_code_route_never_requests_its_runtime() {
         let directory = tempdir().expect("workspace");
         std::fs::write(directory.path().join("note.txt"), "text").expect("source");
-        let (workspace, first, second) = routed_workspace(directory.path());
+        let (workspace, text, _code) = routed_workspace(directory.path());
         let storage = MemoryStorage::default();
         let scanner = NativeScanner::default();
-        let missing: &[&dyn IndexEmbeddingRuntime] = &[&first];
-        let duplicate: &[&dyn IndexEmbeddingRuntime] = &[&second, &second];
-        for models in [missing, duplicate] {
-            let context = IndexingContext {
-                workspace: &workspace,
-                storage: &storage,
-                scanner: &scanner,
-                extractor: &crate::extraction::ExtractionService::default(),
-                embedding_models: models,
-                embedding_concurrency: None,
-                on_progress: None,
-                signal: None,
-                changes: &[],
-            };
-            index_workspace(&context)
-                .await
-                .expect_err("runtimes must match configured models");
-            assert_eq!(first.calls.load(Ordering::Acquire), 0);
-            assert_eq!(second.calls.load(Ordering::Acquire), 0);
-            assert!(storage.entries.lock().expect("entries").is_empty());
-            assert!(storage.list_files().expect("files").is_empty());
-        }
+        let context = IndexingContext {
+            workspace: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
+            models: &TestModels(&[&text]),
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        index_workspace(&context).await.expect("unused code route");
+        assert!(text.calls.load(Ordering::Acquire) > 0);
+        std::fs::write(directory.path().join("lib.rs"), "pub fn north() {}").expect("source");
+        let error = index_workspace(&context)
+            .await
+            .expect_err("first code needs its model");
+        assert_eq!(error.message(), "missing test model");
     }
 
     #[tokio::test]
@@ -4750,7 +4936,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4873,7 +5059,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -4940,7 +5126,7 @@ mod tests {
             storage: storage.as_ref(),
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: Some(2),
             on_progress: Some(reporter),
             signal: None,
@@ -5007,7 +5193,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: Some(2),
             on_progress: None,
             signal: None,
@@ -5024,7 +5210,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: Some(2),
             on_progress: None,
             signal: None,
@@ -5083,7 +5269,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -5132,7 +5318,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -5224,7 +5410,7 @@ mod tests {
             storage: &storage,
             scanner: &scanner,
             extractor: &crate::extraction::ExtractionService::default(),
-            embedding_models: &[&model],
+            models: &TestModels(&[&model]),
             embedding_concurrency: Some(1),
             on_progress: None,
             signal: None,

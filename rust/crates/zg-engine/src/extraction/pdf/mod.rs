@@ -26,6 +26,19 @@ pub(crate) struct PdfMarkdownSource {
     pub warnings: Vec<String>,
 }
 
+/// Inspect native PDF content for consent without rendering pages or loading a layout model.
+pub(crate) fn has_native_fragments(
+    bytes: &[u8],
+    path: crate::domain::SourcePath,
+    signal: &tokio_util::sync::CancellationToken,
+) -> Result<bool, EngineError> {
+    let native = render::native_text(bytes, path, signal)
+        .map_err(service::PdfExtractionError::into_engine_error)?;
+    Ok(extract(&native, ChunkOptions::default())?
+        .iter()
+        .any(|entity| !entity.fragments.is_empty()))
+}
+
 pub(super) fn extract(
     source: &PdfMarkdownSource,
     options: ChunkOptions,

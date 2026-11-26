@@ -2,7 +2,7 @@ use super::storage::SearchStorage;
 use crate::pipelines::freshness::file_freshness_status;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
@@ -19,7 +19,7 @@ use crate::{
             IndexRouteDiagnostics, MatchedBy,
         },
     },
-    domain::{Content, ContentIndex, Range, Workspace},
+    domain::{Content, ContentIndex, ContentKind, Range, Workspace},
 };
 
 use super::pipeline::{
@@ -133,9 +133,9 @@ pub(crate) fn normalize_context_request(
 }
 
 pub(crate) async fn context_from_index(
-    root: &Path,
     workspace: &Workspace,
     storage: &dyn SearchStorage,
+    populated_kinds: &BTreeSet<ContentKind>,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
     request: &NormalizedContextRequest,
@@ -172,7 +172,13 @@ pub(crate) async fn context_from_index(
             .any(|route| route.mode == ContextRouteMode::Vector);
         let mut searches = Vec::new();
         for pool in ranking_groups(&targets, vector) {
-            let runtime = if vector {
+            let kinds: Vec<_> = pool
+                .kinds
+                .iter()
+                .copied()
+                .filter(|kind| populated_kinds.contains(kind))
+                .collect();
+            let runtime = if vector && !kinds.is_empty() {
                 Some(
                     embedding_models
                         .iter()
@@ -191,7 +197,7 @@ pub(crate) async fn context_from_index(
             let search = search_workspace_index(
                 workspace.source_root(),
                 SearchPlan {
-                    kinds: pool.kinds.clone(),
+                    kinds,
                     routes: query.routes.clone(),
                     limit: Some(per_query),
                     trace: options.trace,
@@ -208,7 +214,7 @@ pub(crate) async fn context_from_index(
     }
     let summary_groups = ranking_groups(&targets, super::service::uses_vectors(request));
     build_context_result(
-        root,
+        workspace.source_root(),
         workspace,
         request,
         &groups,

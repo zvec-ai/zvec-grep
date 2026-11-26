@@ -2213,6 +2213,7 @@ mod tests {
             device: Device::Auto,
         };
         let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("guide.md"), "hello").expect("source");
         let default = IndexOptions {
             root: Some(workspace.path().to_owned()),
             embedding: Some(model.clone()),
@@ -2514,6 +2515,7 @@ mod tests {
         };
 
         let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("guide.md"), "hello").expect("source");
         let options = IndexOptions {
             root: Some(workspace.path().to_owned()),
             embedding: Some(EmbeddingModelSpec {

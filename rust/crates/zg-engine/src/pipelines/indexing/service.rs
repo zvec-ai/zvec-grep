@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use zg_host_native::NativeScanner;
 
+use crate::pipelines::indexed_search::writer::WriterSession;
 use crate::{
     EngineError,
     api::{
@@ -55,9 +56,10 @@ use super::{
     embedding_policy,
     input_budget::embedding_input_budget,
     pipeline::{
-        IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
+        IndexEmbeddingRuntime, IndexModelProvider, IndexingContext, get_workspace_index_status,
+        index_workspace,
     },
-    routing::{EmbeddingPlan, normalize_model_paths},
+    routing::EmbeddingPlan,
 };
 
 #[derive(Clone)]
@@ -95,7 +97,7 @@ impl WorkspaceIndexService {
         models: &ModelRuntimeManager,
         mut options: IndexOptions,
     ) -> Result<IndexResult, EngineError> {
-        normalize_model_paths(&mut options)?;
+        options.normalize_model_cache()?;
         let requested_root = resolve_directory(options.root.as_deref())?;
         let layout = WorkspaceLayout::new(requested_root.join(".zvec-grep"))?;
         options.root = Some(requested_root.clone());
@@ -119,8 +121,7 @@ impl WorkspaceIndexService {
         // Check the on-disk version before any recovery or storage mutation.
         let existing = load_index_workspace(&requested_root, &layout, &options)?;
         // Validate selection before recovery, storage, or model mutations.
-        options.scan.normalize_ignore_paths(&requested_root)?;
-        let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
+        let scan = indexing_scan(&requested_root, existing.as_ref(), &mut options)?;
         crate::file_selection::ScanPolicy::new(&requested_root, &scan)?;
         if options.rebuild {
             recover_build_for_rebuild(&layout)?;
@@ -129,12 +130,6 @@ impl WorkspaceIndexService {
         }
         let rebuilding =
             options.rebuild || !existing.as_ref().is_some_and(Workspace::index_enabled);
-        if options.reset_paths
-            || options.scan != crate::api::index::options::ScanRulesUpdate::default()
-        {
-            // A changed selection can admit files outside a watcher's narrow change scope.
-            options.changes.clear();
-        }
         let selection =
             embedding_policy::select(&requested_root, &scan, existing.as_ref(), &options).await?;
         if options.embedding.is_none() {
@@ -167,11 +162,12 @@ impl WorkspaceIndexService {
                 device: Device::Auto,
             });
         }
-        // Extraction models are local even when embeddings use an HTTP backend.
-        let extraction_cache =
-            index_model_cache(&crate::config::read()?, existing.as_ref(), &options);
-        let acquired = acquire_index_models(models, existing.as_ref(), &options)?;
-        let descriptor = &acquired.descriptor;
+        let plan = EmbeddingPlan::new(
+            existing.as_ref(),
+            &options,
+            &embedding_reference(existing.as_ref(), &options)?,
+        )?;
+        let descriptor = &plan.proposed;
         if !rebuilding
             && let Some(previous) = existing
                 .as_ref()
@@ -187,22 +183,20 @@ impl WorkspaceIndexService {
             &requested_root,
             &layout,
             existing.as_ref(),
-            &acquired,
+            &plan,
             &options,
             scan,
             rebuilding,
         )?;
         if rebuilding {
-            options.changes.clear();
             prepare_build(&workspace)?;
         }
-        let extractor = crate::extraction::ExtractionService::new(models.clone(), extraction_cache);
         let result = self
             .run_index(
                 &workspace,
                 rebuilding,
-                acquired.runtimes,
-                extractor,
+                models,
+                plan.requests,
                 &options,
                 Arc::clone(&home_lock),
             )
@@ -232,11 +226,14 @@ impl WorkspaceIndexService {
         &self,
         workspace: &Workspace,
         rebuilding: bool,
-        models: Vec<ModelRuntimeLease>,
-        extractor: crate::extraction::ExtractionService,
+        models: &ModelRuntimeManager,
+        requests: BTreeMap<String, IndexOptions>,
         options: &IndexOptions,
         home_lock: Arc<LockGuard>,
     ) -> Result<(IndexResult, Option<IndexProgress>), EngineError> {
+        // PDF extraction can use local models even when embeddings are remote.
+        let cache = index_model_cache(&crate::config::read()?, Some(workspace), options);
+        let extractor = crate::extraction::ExtractionService::new(models.clone(), cache);
         let storage_path = if rebuilding {
             workspace.layout().staged_index_dir()
         } else {
@@ -265,20 +262,9 @@ impl WorkspaceIndexService {
             error.with_workspace_root(workspace.source_root())
         })?;
         let writer = self.writers.register(
-            crate::pipelines::indexed_search::writer::WriterSession::new(
-                storage,
-                models,
-                workspace.clone(),
-                home_lock,
-            ),
+            WriterSession::new(storage, requests, workspace.clone(), home_lock),
             !rebuilding,
         );
-        let embedding_models = writer
-            .session
-            .models
-            .iter()
-            .map(|model| model as &dyn IndexEmbeddingRuntime)
-            .collect::<Vec<_>>();
         let completion = Arc::new(Mutex::new(None));
         let pipeline_progress = options.on_progress.as_ref().map(|reporter| {
             let reporter = reporter.clone();
@@ -298,7 +284,10 @@ impl WorkspaceIndexService {
             storage: &writer.session.storage,
             scanner: &self.scanner,
             extractor: &extractor,
-            embedding_models: &embedding_models,
+            models: &IndexRuntimes {
+                manager: models,
+                writer: &writer.session,
+            },
             embedding_concurrency: options.embedding_concurrency,
             on_progress: pipeline_progress,
             signal: options.signal.clone(),
@@ -545,8 +534,7 @@ pub(crate) async fn resolve_index_embedding(
     let root = resolve_directory(options.root.as_deref())?;
     let layout = WorkspaceLayout::new(root.join(".zvec-grep"))?;
     let existing = load_index_workspace(&root, &layout, &options)?;
-    options.scan.normalize_ignore_paths(&root)?;
-    let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
+    let scan = indexing_scan(&root, existing.as_ref(), &mut options)?;
     crate::file_selection::ScanPolicy::new(&root, &scan)?;
     embedding_policy::select(&root, &scan, existing.as_ref(), &options).await
 }
@@ -575,7 +563,7 @@ fn index_workspace_state(
     source_root: &Path,
     layout: &WorkspaceLayout,
     active: Option<&Workspace>,
-    models: &IndexModels,
+    plan: &EmbeddingPlan,
     options: &IndexOptions,
     scan: crate::domain::ScanRules,
     rebuilding: bool,
@@ -589,14 +577,10 @@ fn index_workspace_state(
             .to_owned()
     };
     let now = epoch_millis();
-    let configs = models
+    let configs = plan
         .requests
         .iter()
         .map(|(reference, options)| {
-            let runtime = models
-                .runtimes
-                .iter()
-                .find(|model| model.info().model().reference() == *reference);
             Ok((
                 reference.clone(),
                 saved_embedding_config(
@@ -604,9 +588,8 @@ fn index_workspace_state(
                     active,
                     options,
                     reference,
-                    runtime.and_then(ModelRuntimeLease::configured_endpoint),
-                    models
-                        .descriptor
+                    plan.active.contains(reference),
+                    plan.proposed
                         .embedding_configs()
                         .get(reference)
                         .and_then(|config| config.http.as_ref()),
@@ -614,7 +597,7 @@ fn index_workspace_state(
             ))
         })
         .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
-    let descriptor = &models.descriptor;
+    let descriptor = &plan.proposed;
     let descriptor = IndexDescriptor::new(
         descriptor.default_embedding_model().clone(),
         descriptor.embedding_routes().clone(),
@@ -656,10 +639,59 @@ impl fmt::Debug for WorkspaceIndexService {
     }
 }
 
-struct IndexModels {
-    requests: BTreeMap<String, IndexOptions>,
-    runtimes: Vec<ModelRuntimeLease>,
-    descriptor: IndexDescriptor,
+struct IndexRuntimes<'a> {
+    manager: &'a ModelRuntimeManager,
+    writer: &'a WriterSession,
+}
+
+impl IndexModelProvider for IndexRuntimes<'_> {
+    fn acquire(&self, reference: &str) -> Result<&dyn IndexEmbeddingRuntime, EngineError> {
+        let (options, slot) = &self.writer.models[reference];
+        if let Some(lease) = slot.get() {
+            return Ok(lease);
+        }
+        let lease = acquire_model(
+            self.manager,
+            Some(&self.writer.workspace),
+            options,
+            self.writer.http_config(reference),
+        )?;
+        Ok(slot.get_or_init(|| lease))
+    }
+}
+
+impl WriterSession {
+    fn http_config(&self, reference: &str) -> Option<&HttpEmbeddingConfig> {
+        self.workspace
+            .index()
+            .descriptor()?
+            .embedding_configs()
+            .get(reference)?
+            .http
+            .as_ref()
+    }
+
+    pub(in crate::pipelines) fn matches_query_request(
+        &self,
+        request: &ModelRuntimeRequest,
+    ) -> bool {
+        let reference = request.reference();
+        let Some((options, lease)) = self.models.get(reference) else {
+            return false;
+        };
+        if let Some(lease) = lease.get() {
+            return lease.matches_query_request(request);
+        }
+        // A writer may only update text while an existing code route serves queries.
+        // Comparing its planned configuration neither loads it nor uploads documents.
+        index_model_request(
+            Some(&self.workspace),
+            options,
+            self.http_config(reference),
+            |_, _| Ok(()),
+        )
+        .is_ok_and(|planned| planned.matches_query_request(request))
+    }
 }
 
 fn index_model_cache(
@@ -679,60 +711,33 @@ fn index_model_cache(
     )
 }
 
-fn acquire_index_models(
-    models: &ModelRuntimeManager,
-    existing: Option<&Workspace>,
-    options: &IndexOptions,
-) -> Result<IndexModels, EngineError> {
-    let plan = EmbeddingPlan::new(existing, options, &embedding_reference(existing, options)?)?;
-    let runtimes = plan
-        .requests
-        .iter()
-        .filter(|(reference, _)| plan.active.contains(*reference))
-        .map(|(reference, request)| {
-            let http = plan
-                .proposed
-                .embedding_configs()
-                .get(reference)
-                .and_then(|c| c.http.as_ref());
-            acquire_model(models, existing, request, http)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let metadata = |planned: &EmbeddingModelInfo| {
-        let reference = planned.model().reference();
-        runtimes
-            .iter()
-            .map(ModelRuntimeLease::info)
-            .find(|model| model.model().reference() == reference)
-            .unwrap_or(planned)
-            .clone()
-    };
-    let overrides = plan
-        .proposed
-        .embedding_routes()
-        .iter()
-        .map(|(&kind, model)| (kind, metadata(model)))
-        .collect();
-    let descriptor = IndexDescriptor::new(
-        metadata(plan.proposed.default_embedding_model()),
-        overrides,
-        plan.proposed.embedding_configs().clone(),
-        plan.proposed.graph_indexing(),
-        plan.proposed.fts(),
-    )?;
-    Ok(IndexModels {
-        requests: plan.requests,
-        runtimes,
-        descriptor,
-    })
-}
-
 fn acquire_model(
     models: &ModelRuntimeManager,
     existing: Option<&Workspace>,
     options: &IndexOptions,
     http: Option<&HttpEmbeddingConfig>,
 ) -> Result<ModelRuntimeLease, EngineError> {
+    let request = index_model_request(existing, options, http, |reference, endpoint| {
+        let root = resolve_directory(options.root.as_deref())?;
+        crate::authorization::require_with_targets(
+            &root,
+            reference,
+            endpoint,
+            options.allow_remote,
+            &options.authorized_remote,
+        )
+    })?;
+    models
+        .acquire(request)
+        .map_err(ModelError::into_engine_error)
+}
+
+fn index_model_request(
+    existing: Option<&Workspace>,
+    options: &IndexOptions,
+    http: Option<&HttpEmbeddingConfig>,
+    check_remote: impl FnOnce(&str, &str) -> Result<(), EngineError>,
+) -> Result<ModelRuntimeRequest, EngineError> {
     let reference = embedding_reference(existing, options)?;
     let concurrency = resolve_index_concurrency(Some(&reference), options.embedding_concurrency)
         .map_err(ModelError::into_engine_error)?;
@@ -761,14 +766,7 @@ fn acquire_model(
         endpoint.map(str::to_owned)
     } else {
         let endpoint = crate::authorization::remote_endpoint(&reference, endpoint)?;
-        let root = resolve_directory(options.root.as_deref())?;
-        crate::authorization::require_with_targets(
-            &root,
-            &reference,
-            &endpoint,
-            options.allow_remote,
-            &options.authorized_remote,
-        )?;
+        check_remote(&reference, &endpoint)?;
         Some(endpoint)
     };
     let requested_key = options
@@ -805,19 +803,17 @@ fn acquire_model(
     } else {
         index_model_cache(&config, existing, options)
     };
-    models
-        .acquire(ModelRuntimeRequest::new(
-            reference,
-            ModelConfig {
-                http: http.cloned(),
-                api_key,
-                endpoint,
-                cache_dir,
-                device,
-            },
-            concurrency,
-        ))
-        .map_err(ModelError::into_engine_error)
+    Ok(ModelRuntimeRequest::new(
+        reference,
+        ModelConfig {
+            http: http.cloned(),
+            api_key,
+            endpoint,
+            cache_dir,
+            device,
+        },
+        concurrency,
+    ))
 }
 
 fn embedding_reference(
@@ -876,7 +872,7 @@ pub(super) fn environment_api_key() -> Option<String> {
 
 pub(in crate::pipelines) fn assert_embedding_compatible(
     existing: Option<&IndexDescriptor>,
-    model: &crate::domain::EmbeddingModelInfo,
+    model: &EmbeddingModelInfo,
 ) -> Result<(), EngineError> {
     let Some(existing) = existing else {
         return Ok(());
@@ -893,6 +889,23 @@ pub(in crate::pipelines) fn assert_embedding_compatible(
     schema
         .ensure_index_compatible(model)
         .map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild`."))
+}
+
+/// Use the same selection for consent and execution, including full scans after rule changes.
+pub(crate) fn indexing_scan(
+    root: &Path,
+    existing: Option<&Workspace>,
+    options: &mut IndexOptions,
+) -> Result<crate::domain::ScanRules, EngineError> {
+    options.scan.normalize_ignore_paths(root)?;
+    if options.rebuild
+        || !existing.is_some_and(Workspace::index_enabled)
+        || options.reset_paths
+        || options.scan != crate::api::index::options::ScanRulesUpdate::default()
+    {
+        options.changes.clear();
+    }
+    resolve_scan(existing.map(Workspace::scan), options)
 }
 
 fn resolve_scan(
@@ -944,7 +957,7 @@ fn saved_embedding_config(
     existing: Option<&Workspace>,
     options: &IndexOptions,
     reference: &str,
-    configured_endpoint: Option<&str>,
+    routed: bool,
     http: Option<&HttpEmbeddingConfig>,
 ) -> Result<ModelConfig<EncryptedApiKey>, EngineError> {
     let mut stored = existing
@@ -988,16 +1001,12 @@ fn saved_embedding_config(
                 .and_then(|spec| spec.endpoint.as_deref())
         })
         .or(stored.endpoint.as_deref());
-    let endpoint = match configured_endpoint {
-        Some(endpoint) => endpoint.to_owned(),
-        None if save_key.is_some() || stored.api_key.is_some() => {
-            crate::authorization::remote_endpoint(reference, requested_endpoint)?
-        }
-        None => {
-            stored.endpoint = requested_endpoint.map(str::to_owned);
-            return Ok(stored);
-        }
-    };
+    // Save the configured destination even when this pass has no fragments for the route.
+    if !routed && save_key.is_none() && stored.api_key.is_none() {
+        stored.endpoint = requested_endpoint.map(str::to_owned);
+        return Ok(stored);
+    }
+    let endpoint = crate::authorization::remote_endpoint(reference, requested_endpoint)?;
     if let Some(key) = save_key {
         stored.api_key = Some(encrypt_api_key(layout, reference, key)?);
     } else if stored.api_key.is_some()
@@ -1140,7 +1149,9 @@ mod tests {
             }),
             ..IndexOptions::default()
         };
-        super::normalize_model_paths(&mut options).expect("normalize cache paths");
+        options
+            .normalize_model_cache()
+            .expect("normalize cache paths");
         assert_eq!(
             options.runtime_model_cache,
             Some(std::path::absolute("temporary-models").expect("absolute temporary cache"))
@@ -1162,14 +1173,15 @@ mod tests {
                 ..default.clone()
             },
         );
-        let preflight = super::super::embedding_requests(None, &options, &reference)
+        let (_, preflight) = super::super::embedding_requests(None, &options, &reference)
             .expect("single routed cache applies to both models");
         let expected = Some(std::path::absolute("saved-models").expect("absolute shared cache"));
         assert_eq!(preflight[&reference].model_cache, expected);
         assert_eq!(preflight[other].model_cache, expected);
         options.embedding.as_mut().expect("default model").cache_dir = Some("another-cache".into());
-        let error =
-            super::normalize_model_paths(&mut options).expect_err("distinct model cache paths");
+        let error = options
+            .normalize_model_cache()
+            .expect_err("distinct model cache paths");
         assert!(
             error
                 .message()
@@ -1178,15 +1190,18 @@ mod tests {
 
         options.embedding.as_mut().expect("default model").cache_dir = None;
         options.model_cache = Some("another-cache".into());
-        let error =
-            super::normalize_model_paths(&mut options).expect_err("workspace and route disagree");
+        let error = options
+            .normalize_model_cache()
+            .expect_err("workspace and route disagree");
         assert!(
             error
                 .message()
                 .contains("conflicting model cache directories")
         );
         options.model_cache.clone_from(&expected);
-        super::normalize_model_paths(&mut options).expect("matching workspace and route paths");
+        options
+            .normalize_model_cache()
+            .expect("matching workspace and route paths");
     }
 
     #[cfg(unix)]
@@ -1212,7 +1227,9 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let error = super::normalize_model_paths(&mut options).expect_err("saved cache path");
+            let error = options
+                .normalize_model_cache()
+                .expect_err("saved cache path");
             assert!(
                 error
                     .message()
@@ -1225,7 +1242,9 @@ mod tests {
             runtime_model_cache: Some(cache_dir.clone()),
             ..Default::default()
         };
-        super::normalize_model_paths(&mut temporary).expect("temporary native path");
+        temporary
+            .normalize_model_cache()
+            .expect("temporary native path");
         assert_eq!(
             temporary.runtime_model_cache,
             Some(std::path::absolute(&cache_dir).expect("absolute native path"))
@@ -1236,7 +1255,9 @@ mod tests {
             embedding: Some(embedding),
             ..Default::default()
         };
-        super::normalize_model_paths(&mut overridden).expect_err("all saved paths must be valid");
+        overridden
+            .normalize_model_cache()
+            .expect_err("all saved paths must be valid");
     }
 
     fn build_target(active: &Workspace) -> Workspace {
@@ -1297,13 +1318,21 @@ mod tests {
             allow_remote: true,
             ..IndexOptions::default()
         };
-        let acquired =
-            super::acquire_index_models(&models, None, &options).expect("model metadata");
+        let plan = super::EmbeddingPlan::new(
+            None,
+            &options,
+            &options
+                .embedding
+                .as_ref()
+                .expect("explicit model")
+                .reference,
+        )
+        .expect("model metadata");
         let workspace = super::index_workspace_state(
             directory.path(),
             &layout,
             None,
-            &acquired,
+            &plan,
             &options,
             crate::domain::ScanRules::default(),
             true,
@@ -1350,7 +1379,7 @@ mod tests {
             Some(&loaded),
             &request,
             &model.info().model().reference(),
-            model.configured_endpoint(),
+            true,
             None,
         )
         .expect("runtime key preserves saved settings");
@@ -1447,8 +1476,8 @@ mod tests {
             ),
             (IndexOptions::default(), Some(&replacement)),
         ] {
-            let plan = super::IndexModels {
-                descriptor: descriptor.clone(),
+            let plan = super::EmbeddingPlan {
+                proposed: descriptor.clone(),
                 requests: std::collections::BTreeMap::from([(
                     reference.clone(),
                     IndexOptions {
@@ -1456,7 +1485,7 @@ mod tests {
                         ..options.clone()
                     },
                 )]),
-                runtimes: Vec::new(),
+                active: std::collections::BTreeSet::from([reference.clone()]),
             };
             let updated = super::index_workspace_state(
                 directory.path(),
@@ -1500,13 +1529,13 @@ mod tests {
         let layout = loaded.layout();
         let new_endpoint = "https://new.example.test/v1/embeddings";
         let reference = "qwen/text-embedding-v4";
-        for runtime_endpoint in [Some(new_endpoint), None] {
+        for active in [true, false] {
             let changed = super::saved_embedding_config(
                 layout,
                 Some(loaded),
                 &request,
                 reference,
-                runtime_endpoint,
+                active,
                 None,
             )
             .expect("change destination");
@@ -1515,7 +1544,7 @@ mod tests {
         }
         request.api_key = Some("replacement-key".into());
         let changed =
-            super::saved_embedding_config(layout, Some(loaded), &request, reference, None, None)
+            super::saved_embedding_config(layout, Some(loaded), &request, reference, false, None)
                 .expect("save explicit replacement for inactive model");
         assert_eq!(changed.endpoint.as_deref(), Some(new_endpoint));
         assert_eq!(
@@ -1608,7 +1637,7 @@ mod tests {
             allow_remote: true,
             ..IndexOptions::default()
         };
-        let lease =
+        let _lease =
             super::acquire_model(&models, Some(&workspace), &request, Some(http)).expect("lease");
         let save = |request: &IndexOptions| {
             super::saved_embedding_config(
@@ -1616,7 +1645,7 @@ mod tests {
                 Some(&workspace),
                 request,
                 "http/private",
-                lease.configured_endpoint(),
+                true,
                 Some(http),
             )
             .expect("save HTTP configuration")
@@ -2118,21 +2147,39 @@ mod tests {
                     Some(&rebuilt),
                     &IndexOptions::default()
                 ),
-                Some(expected),
+                Some(expected.clone()),
             );
             assert_eq!(rebuilt.model_cache_dir(), Some(cache.as_path()));
             let serialized = serde_json::to_value(&rebuilt).expect("manifest");
             assert_eq!(serialized["modelCacheDir"], serde_json::json!(cache));
             assert!(!serialized.to_string().contains("\"cacheDir\""));
-            let cached_runtimes = models.snapshot().cached_runtimes;
-            let query = crate::pipelines::indexed_search::service::acquire_search_model(
+            let acquire = crate::pipelines::indexed_search::service::acquire_search_model;
+            assert_eq!(
+                models.snapshot().cached_runtimes,
+                0,
+                "empty indexes defer embedding"
+            );
+            let explicit = acquire(
+                &models,
+                &rebuilt,
+                &crate::api::context::ContextOptions {
+                    model_cache: Some(expected),
+                    ..Default::default()
+                },
+            )
+            .expect("query with explicit cache");
+            let query = acquire(
                 &models,
                 &rebuilt,
                 &crate::api::context::ContextOptions::default(),
             )
             .expect("query uses shared cache");
-            assert_eq!(models.snapshot().cached_runtimes, cached_runtimes);
-            drop(query);
+            assert_eq!(
+                models.snapshot().cached_runtimes,
+                1,
+                "same runtime for saved cache"
+            );
+            drop((explicit, query));
             models.close();
         }
     }
@@ -2585,7 +2632,6 @@ mod tests {
     fn fully_overridden_default_uses_no_remote_runtime_or_credentials() {
         use crate::domain::ContentKind;
         let dir = tempdir().expect("workspace");
-        let models = ModelRuntimeManager::new();
         let workspace = bearer_http_workspace(dir.path());
         // A missing encryption key catches any attempt to read the dormant credential.
         std::fs::remove_file(workspace.layout().credentials_key_path()).expect("remove key");
@@ -2601,27 +2647,19 @@ mod tests {
             for kind in [ContentKind::Text, ContentKind::Code] {
                 options.embedding_routes.insert(kind, local.clone());
             }
-            let acquired =
-                super::acquire_index_models(&models, existing, &options).expect("local routes");
+            let plan =
+                super::EmbeddingPlan::new(existing, &options, reference).expect("local routes");
             assert_eq!(
-                acquired
-                    .descriptor
-                    .default_embedding_model()
-                    .model()
-                    .reference(),
+                plan.proposed.default_embedding_model().model().reference(),
                 reference
             );
-            assert_eq!(acquired.runtimes.len(), 1);
-            assert_eq!(
-                acquired.runtimes[0].info().model().reference(),
-                local.reference
-            );
+            assert_eq!(plan.active.iter().collect::<Vec<_>>(), [&local.reference]);
             if let Some(existing) = existing {
                 let updated = super::index_workspace_state(
                     dir.path(),
                     existing.layout(),
                     Some(existing),
-                    &acquired,
+                    &plan,
                     &options,
                     existing.scan().clone(),
                     true,

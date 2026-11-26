@@ -1403,6 +1403,11 @@ fn cancelling_model_selection_exits_without_error_or_index() {
 #[test]
 fn remote_authorization_can_return_to_model_selection_without_sending_data() {
     let fixture = Fixture::new();
+    fs::write(
+        fixture.root.path().join("needle.txt"),
+        "needle workspace documentation",
+    )
+    .expect("source file");
     fixture.success(&[
         "--config",
         "model",
@@ -1412,7 +1417,7 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
         "--endpoint",
         "http://127.0.0.1:1/no-requests",
     ]);
-    let output = success(terminal::run(
+    let output = terminal::run(
         fixture.command(&[
             "--mode",
             "direct",
@@ -1429,21 +1434,14 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
             ("Enter Continue", b"\r"),
             ("Back to model selection", b"\x1b[B\x1b[B\r"),
             ("Enter Continue", b"\x1b[D"),
-            ("Enter Build", b"\r"),
+            ("Enter Build", b"\x1b"),
         ],
-    ));
-    fixture.assert_model("direct", "local/potion-code-16m-v2");
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
-    )
-    .expect("manifest JSON");
-    assert!(
-        manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"]
-            .get("device")
-            .is_none()
     );
+    assert_eq!(output.status.code(), Some(130));
+    assert!(output.stdout.is_empty());
+    assert!(!fixture.root.path().join(".zvec-grep").exists());
+    assert!(!fixture.user.path().join("models").exists());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1648,6 +1646,11 @@ fn cancelling_missing_credential_input_does_not_save_or_build() {
 #[test]
 fn escaping_remote_authorization_leaves_no_index_or_grant() {
     let fixture = Fixture::new();
+    fs::write(
+        fixture.root.path().join("needle.txt"),
+        "needle workspace documentation",
+    )
+    .expect("source file");
     fixture.success(&[
         "--config",
         "model",
@@ -1670,7 +1673,7 @@ fn escaping_remote_authorization_leaves_no_index_or_grant() {
         ]),
         &[("Enter Continue", b"\r"), ("Enter Confirm", b"\x1b")],
     );
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(130));
     assert!(output.stdout.is_empty());
     assert!(!fixture.root.path().join(".zvec-grep").exists());
     assert!(!fixture.user.path().join("models").exists());

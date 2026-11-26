@@ -71,6 +71,20 @@ impl Fragments {
         Ok(Self { indexes })
     }
 
+    pub(super) fn populated_kinds(
+        &self,
+        excluded_files: &[FileId],
+    ) -> EngineResult<BTreeSet<ContentKind>> {
+        let excluded: HashSet<_> = excluded_files.iter().copied().collect();
+        let mut kinds = BTreeSet::new();
+        for (&kind, collection) in &self.indexes {
+            if has_documents(collection, &excluded)? {
+                kinds.insert(kind);
+            }
+        }
+        Ok(kinds)
+    }
+
     /// Encode the entire replacement before any stored rows are changed.
     pub(super) fn prepare(
         file: &FileRecord,
@@ -325,6 +339,20 @@ fn retrieval_schema(name: &str) -> EngineResult<CollectionSchema> {
         }
     }
     Ok(schema)
+}
+
+fn has_documents(collection: &Collection, excluded: &HashSet<FileId>) -> EngineResult<bool> {
+    let docs = native(
+        collection.iter_with_options(Some(&["file_id"]), false),
+        "inspect fragment collection",
+    )?;
+    for doc in docs {
+        let doc = native(doc, "read fragment owner")?;
+        if excluded.is_empty() || !excluded.contains(&FileId::new(u32_field(&doc, "file_id")?)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<CollectionSchema> {

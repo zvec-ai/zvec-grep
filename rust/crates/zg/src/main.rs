@@ -979,7 +979,7 @@ async fn authorize_query_with_io(
     for (authorization, decision) in targets.iter().zip(decisions) {
         match decision {
             QueryAuthorizationDecision::Once => {
-                request.authorized_remote.push(authorization.target.clone());
+                request.authorize_once(authorization);
             }
             QueryAuthorizationDecision::Workspace => {
                 grant_authorization(&authorization.target, server_home.as_deref()).await?;
@@ -1770,10 +1770,11 @@ mod query_authorization_tests {
             })
             .await
             .expect("empty remote index without network");
+        std::fs::write(root.join("README.md"), "A bookstore").expect("pending text");
         let make = || ContextOptions {
             root: Some(root.clone()),
             query: Some("bookstore".into()),
-            refresh: Some(zg_engine::api::context::options::RefreshPolicy::Off),
+            refresh: Some(zg_engine::api::context::options::RefreshPolicy::Wait),
             ..ContextOptions::default()
         };
         let mut once = make();
@@ -1795,7 +1796,7 @@ mod query_authorization_tests {
         assert!(
             String::from_utf8(prompt)
                 .expect("prompt")
-                .contains("Send query text?")
+                .contains("Send query text and selected workspace files?")
         );
         let mut cancelled = make();
         assert!(

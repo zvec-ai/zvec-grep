@@ -114,6 +114,59 @@ pub mod options {
         pub signal: Option<CancellationToken>,
     }
 
+    impl IndexOptions {
+        /// The extractor and all embedding models share one cache directory. A caller
+        /// may supply it at the workspace or model level; every saved path must agree.
+        ///
+        /// # Errors
+        /// Returns an error if saved paths disagree or cannot be persisted.
+        pub fn normalize_model_cache(&mut self) -> crate::EngineResult<()> {
+            let absolute = |path: &Path| {
+                std::path::absolute(path).map_err(|error| {
+                    crate::EngineError::from_io("failed to resolve model cache directory", &error)
+                })
+            };
+            if let Some(path) = &mut self.runtime_model_cache {
+                *path = absolute(path)?;
+            }
+            let paths = self.model_cache.iter().chain(
+                self.embedding
+                    .iter()
+                    .chain(self.embedding_routes.values())
+                    .filter_map(|spec| spec.cache_dir.as_ref()),
+            );
+            let mut shared: Option<PathBuf> = None;
+            for path in paths {
+                let path = absolute(path)?;
+                if path.to_str().is_none() {
+                    return Err(crate::EngineError::invalid_argument(format!(
+                        "cannot save model cache directory '{}': path is not valid Unicode",
+                        path.display(),
+                    )));
+                }
+                if let Some(previous) = &shared
+                    && previous != &path
+                {
+                    return Err(crate::EngineError::invalid_argument(format!(
+                        "conflicting model cache directories '{}' and '{}': choose one directory for the workspace",
+                        previous.display(),
+                        path.display()
+                    )));
+                }
+                shared = Some(path);
+            }
+            self.model_cache = shared;
+            for spec in self
+                .embedding
+                .iter_mut()
+                .chain(self.embedding_routes.values_mut())
+            {
+                spec.cache_dir = None;
+            }
+            Ok(())
+        }
+    }
+
     pub use crate::domain::{ContentKind, FileFormat, GlobRule, ScanRules};
 
     /// Changes to filesystem scanning. `null` clears an optional limit.
@@ -287,6 +340,7 @@ pub mod options {
     pub struct EmbeddingModelSpec {
         pub reference: String,
         pub revision: Option<String>,
+        /// Shared workspace model cache. Explicit paths on other routes must agree.
         pub cache_dir: Option<PathBuf>,
         pub endpoint: Option<String>,
         pub device: Device,
