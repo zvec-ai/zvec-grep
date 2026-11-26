@@ -98,7 +98,7 @@ impl SqliteGraphStorage {
     /// Propagates SQLite errors and invalid stored metadata.
     pub(crate) fn import_references(&self, file_id: u32) -> Result<Vec<ImportReference>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT reference_name, metadata FROM edges
+            "SELECT reference_name, metadata, source, line, col FROM edges
              WHERE file_id = ?1 AND kind = 'imports' ORDER BY id",
         )?;
         let rows = statement.query_map([file_id], |row| {
@@ -106,6 +106,8 @@ impl SqliteGraphStorage {
             let metadata = decode_metadata(&row.get::<_, String>(1)?)?;
             let raw_text = metadata.get("rawText").and_then(Value::as_str);
             Ok(ImportReference {
+                owner_id: row.get(2)?,
+                position: (row.get(3)?, row.get(4)?),
                 specifier,
                 raw_text: raw_text.map(str::to_owned),
             })
@@ -145,6 +147,13 @@ impl SqliteGraphStorage {
             Ok(DeclaredBinding {
                 name,
                 bound_type: bound_type.to_owned(),
+                type_origin: metadata
+                    .get("type_origin")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                raw_text: metadata
+                    .get("rawText")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 line: u32::try_from(line).unwrap_or_default(),
                 until,
                 column: u32::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),

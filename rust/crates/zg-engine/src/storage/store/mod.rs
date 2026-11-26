@@ -672,7 +672,10 @@ fn replace_file(
         .fetch(&[file.id()])?
         .remove(&file.id())
         .is_some_and(|previous| previous.index_status().is_indexed());
-    let paths_changed = previous_indexed != file.index_status().is_indexed();
+    // A rewritten Python package can redirect an import to a different file
+    // even when neither the consumer nor its old target changed.
+    let paths_changed = previous_indexed != file.index_status().is_indexed()
+        || file.relative_path().as_path().ends_with("__init__.py");
     state.needs_optimize = true;
     let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.

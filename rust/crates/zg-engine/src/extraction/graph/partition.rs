@@ -44,7 +44,7 @@ pub(crate) struct ResolvedNameEdge {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingNameRef {
     pub ref_kind: GraphEdgeKind,
-    /// Entity ordinal owning the reference; [`FILE_SCOPE_INDEX`] for imports.
+    /// Entity ordinal owning the reference; [`FILE_SCOPE_INDEX`] at module scope.
     pub owner_index: usize,
     pub ref_name: String,
     pub receiver_name: Option<String>,
@@ -54,6 +54,9 @@ pub(crate) struct PendingNameRef {
     pub bound_type: Option<String>,
     /// Last line the bound name stays in effect, for a loop-scoped binding.
     pub bound_until: Option<usize>,
+    /// The call starts with an explicitly imported, lexically unshadowed Python name.
+    pub python_import_call: bool,
+    pub type_origin: Option<(usize, usize)>,
     /// Exclusive end of a branch/loop-local binding, in source coordinates.
     pub scope_end: Option<(usize, usize)>,
     pub arity: Option<usize>,
@@ -115,7 +118,7 @@ fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), Vec<NameEdge
 fn alias_at<'a>(
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     edge: &NameEdge,
-) -> Option<&'a str> {
+) -> Option<&'a NameEdge> {
     let position = (edge.line, edge.column);
     let local = aliases
         .get(&(edge.owner_index, edge.ref_name.clone()))
@@ -125,13 +128,11 @@ fn alias_at<'a>(
                     && binding.scope_end.is_none_or(|end| position < end)
             })
         });
-    local
-        .or_else(|| {
-            aliases
-                .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
-                .and_then(|bindings| bindings.last())
-        })
-        .and_then(|binding| binding.bound_type.as_deref())
+    local.or_else(|| {
+        aliases
+            .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
+            .and_then(|bindings| bindings.last())
+    })
 }
 
 /// Whether a binding states a value this file can place. `?` marks a
@@ -172,27 +173,14 @@ type RefSite = (GraphEdgeKind, usize, Option<String>, String, Option<usize>);
 /// `receiver.method` pair would be coincidental, so they stay pending.
 /// Imports never resolve in-file: their target is another file by definition.
 pub(crate) fn partition_walk(
-    context: WalkContext,
+    mut context: WalkContext,
     head_fragment_indices: Vec<usize>,
 ) -> PartitionedGraph {
-    let WalkContext {
-        resolved_edges,
-        name_edges,
-        symbols,
-        file_symbols,
-        rust_scopes,
-        shadowed_names,
-        borrowed_names,
-        value_aliases,
-        preprocessor,
-        ..
-    } = context;
     let mut partitioned = PartitionedGraph {
-        contains: resolved_edges,
-        resolved: Vec::new(),
-        pending: Vec::new(),
+        contains: std::mem::take(&mut context.resolved_edges),
+        directives: std::mem::take(&mut context.preprocessor),
         head_fragment_indices,
-        directives: preprocessor,
+        ..PartitionedGraph::default()
     };
     // Containment is the only record of which entity sits inside which, so it
     // is what lets a call read the using-declarations of the classes above it.
@@ -201,6 +189,7 @@ pub(crate) fn partition_walk(
         .iter()
         .map(|edge| (edge.target_index, edge.source_index))
         .collect::<HashMap<usize, usize>>();
+    let name_edges = std::mem::take(&mut context.name_edges);
     let aliases = alias_table(&name_edges);
     let mut collapsed: HashSet<RefSite> = HashSet::new();
     for edge in name_edges {
@@ -221,18 +210,28 @@ pub(crate) fn partition_walk(
                 continue;
             }
         }
-        let resolved_target = in_file_target(
-            &edge,
-            shadowed_at_site(&edge, &enclosing, &shadowed_names, &borrowed_names),
-            InFileTables {
-                symbols: &symbols,
-                rust: &rust_scopes,
-                file_symbols: &file_symbols,
-                aliases: &aliases,
-                value_aliases: &value_aliases,
-                enclosing: &enclosing,
-            },
-        );
+        let python_import_call = context.is_python_import_call(&edge, &enclosing);
+        let resolved_target = if python_import_call {
+            InFileTarget::Pending
+        } else {
+            in_file_target(
+                &edge,
+                shadowed_at_site(
+                    &edge,
+                    &enclosing,
+                    &context.shadowed_names,
+                    &context.borrowed_names,
+                ),
+                InFileTables {
+                    symbols: &context.symbols,
+                    rust: &context.rust_scopes,
+                    file_symbols: &context.file_symbols,
+                    aliases: &aliases,
+                    value_aliases: &context.value_aliases,
+                    enclosing: &enclosing,
+                },
+            )
+        };
         match resolved_target {
             InFileTarget::Bound(target_index) => partitioned.resolved.push(ResolvedNameEdge {
                 ref_kind: edge.ref_kind,
@@ -252,6 +251,8 @@ pub(crate) fn partition_walk(
                 ref_name: edge.ref_name,
                 receiver_name: edge.receiver_name,
                 raw_text: edge.raw_text,
+                python_import_call,
+                type_origin: edge.type_origin,
                 bound_type: edge.bound_type,
                 bound_until: edge.bound_until,
                 scope_end: edge.scope_end,
@@ -266,6 +267,46 @@ pub(crate) fn partition_walk(
         }
     }
     partitioned
+}
+
+impl WalkContext {
+    fn is_python_import_call(&self, edge: &NameEdge, enclosing: &HashMap<usize, usize>) -> bool {
+        if self.python_import_names.is_empty() || edge.ref_kind != GraphEdgeKind::Calls {
+            return false;
+        }
+        let Some(root) = edge
+            .raw_text
+            .as_deref()
+            .and_then(|text| text.split('.').next())
+        else {
+            return false;
+        };
+        let Some(import_owners) = self.python_import_names.get(root) else {
+            return false;
+        };
+        for owner in std::iter::successors(Some(edge.owner_index), |owner| {
+            enclosing.get(owner).copied()
+        }) {
+            if self
+                .shadowed_names
+                .get(&owner)
+                .is_some_and(|names| names.contains(root))
+            {
+                return false;
+            }
+            if import_owners.contains(&owner) {
+                return true;
+            }
+            if self
+                .scoped_symbols()
+                .get(&owner)
+                .is_some_and(|symbols| symbols.contains_key(root))
+            {
+                return false;
+            }
+        }
+        import_owners.contains(&super::FILE_SCOPE_INDEX)
+    }
 }
 
 /// Whether the name a call spells is already taken nearer than the file's own
@@ -539,7 +580,11 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // reference stays pending for the cross-file resolver, which also
         // weighs imports.
         GraphEdgeKind::Calls => {
-            if let Some(bound) = alias_at(aliases, edge) {
+            if let Some(binding) = alias_at(aliases, edge) {
+                if binding.receiver_only {
+                    return InFileTarget::Pending;
+                }
+                let bound = binding.bound_type.as_deref().unwrap_or("?");
                 // A Python body that rebinds a name states it holds no type
                 // the index can place (`client = clients[0]`), but a copy of
                 // another name is evidence of its own: `alias = target` still
@@ -676,7 +721,7 @@ mod tests {
     #[test]
     fn imports_and_missing_names_stay_pending() {
         let mut context = context_with_entities(1);
-        context.add_import_edge("./utils.js", None, 1, 0);
+        context.add_import_edge(FILE_SCOPE_INDEX, "./utils.js", None, 1, 0);
         context.add_call_edge(0, "nowhere", None, None, None, 3, 8);
         let graph = partition_walk(context, vec![0]);
         assert!(graph.resolved.is_empty());

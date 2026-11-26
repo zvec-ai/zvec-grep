@@ -5,7 +5,634 @@ mod support;
 use serde_json::{Value, json};
 use std::fs;
 use support::{EmbeddingServer, configure_remote_model, index_options};
-use zg_engine::{ZvecGrep, api::relationships::RelationshipOptions};
+use zg_engine::{
+    ZvecGrep,
+    api::{index::options::WorkspaceChange, relationships::RelationshipOptions},
+};
+
+#[tokio::test]
+async fn python_parameter_reassignment_replaces_annotation_evidence() {
+    check_case(Case {
+        name: "python_parameter_reassignment_replaces_annotation_evidence",
+        files: vec![
+            SourceFile { path: "other.py", source: "class OtherIndex:\n    def create_variables(self): pass\n" },
+            SourceFile { path: "use.py", source: "import other as api\nfrom other import OtherIndex\nclass Index:\n    def create_variables(self): pass\ndef cleared(index: Index):\n    index = None\n    return index.create_variables()\ndef qualified(index: Index):\n    index = api.OtherIndex()\n    return index.create_variables()\ndef replaced(index: Index):\n    index = OtherIndex()\n    return index.create_variables()\ndef before_after(index: Index):\n    index.create_variables()\n    index = None\n    index.create_variables()\n" },
+        ],
+        queries: vec![
+            Query { operation: "callers", symbol: "Index::create_variables", expected: json!([
+                {"name":"Index::create_variables","edges":[{"symbol":{"name":"before_after"},"line":15}]}
+            ]), ..Query::default() },
+            Query { operation: "callers", symbol: "OtherIndex::create_variables", expected: json!([
+                {"name":"OtherIndex::create_variables","edges":[
+                    {"symbol":{"name":"qualified"},"line":10},
+                    {"symbol":{"name":"replaced"},"line":13}
+                ]}
+            ]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn python_parameter_annotations_are_not_callable_aliases() {
+    check_case(Case {
+        name: "python_parameter_annotations_are_not_callable_aliases",
+        files: vec![SourceFile { path: "use.py", source: "class Handler:\n    def __call__(self): pass\ndef invoke(handler: Handler):\n    return handler()\ndef construct():\n    return Handler()\ndef original(): pass\ndef alias():\n    callback = original\n    return callback()\ndef copied(handler: Handler):\n    callback = handler\n    return callback()\ndef annotated(handler):\n    callback: Handler = handler\n    return callback()\n" }],
+        queries: vec![
+            Query { operation: "callees", symbol: "invoke", expected: json!([
+                {"name":"invoke","edges":[]}
+            ]), ..Query::default() },
+            Query { operation: "callers", symbol: "Handler", expected: json!([
+                {"name":"Handler","edges":[{"symbol":{"name":"construct"},"line":6}]}
+            ]), ..Query::default() },
+            Query { operation: "callees", symbol: "alias", expected: json!([
+                {"name":"alias","edges":[{"symbol":{"name":"original"},"line":10}]}
+            ]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn python_annotation_names_respect_lexical_import_visibility() {
+    check_case(Case {
+        name: "python_annotation_names_respect_lexical_import_visibility",
+        files: vec![
+            SourceFile { path: "other.py", source: "class Index:\n    def create_variables(self): pass\nclass Foreign:\n    def create_variables(self): pass\n" },
+            SourceFile { path: "use.py", source: "class Index:\n    def create_variables(self): pass\ndef helper():\n    from other import Index\ndef local(index: Index):\n    return index.create_variables()\ndef missing(index: 'Foreign'):\n    return index.create_variables()\ndef body_import(index: Index):\n    from other import Index\n    return index.create_variables()\ndef outer():\n    from other import Index as Contract\n    def nested(index: Contract):\n        return index.create_variables()\n    return nested\n" },
+        ],
+        queries: vec![
+            Query { operation: "callers", symbol: "Index::create_variables", file: Some("use.py"), expected: json!([
+                {"name":"Index::create_variables","edges":[
+                    {"symbol":{"name":"local"},"line":6},
+                    {"symbol":{"name":"body_import"},"line":11}
+                ]}
+            ]) },
+            Query { operation: "callees", symbol: "missing", expected: json!([
+                {"name":"missing","edges":[]}
+            ]), ..Query::default() },
+            Query { operation: "callees", symbol: "outer::nested", expected: json!([
+                {"name":"outer::nested","edges":[{"symbol":{"name":"Index::create_variables","filePath":"other.py"},"line":15}]}
+            ]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn python_annotations_use_the_last_visible_class_or_import() {
+    let index = "class Index:\n    def run(self): pass\n";
+    let files = vec![
+        SourceFile {
+            path: "a.py",
+            source: index,
+        },
+        SourceFile {
+            path: "b.py",
+            source: index,
+        },
+        SourceFile {
+            path: "ordered.py",
+            source: "\
+class Index:
+    def run(self): pass
+def before(x: Index): return x.run()
+from a import Index
+def first(x: Index): return x.run()
+from b import Index
+def second(x: Index): return x.run()
+from missing import Index
+def unknown(x: Index): return x.run()
+",
+        },
+        SourceFile {
+            path: "local.py",
+            source: "\
+from a import Index
+class Index:
+    def run(self): pass
+    def in_class(self, x: Index): return x.run()
+def local(x: Index): return x.run()
+def outer():
+    class Index:
+        def run(self): pass
+    def nested(x: Index): return x.run()
+class Container:
+    from b import Index
+    def method(self, x: Index): return x.run()
+    def factory(self):
+        def inner(x: Index): return x.run()
+",
+        },
+        SourceFile {
+            path: "forward.py",
+            source: "\
+def quoted(x: 'Index'): return x.run()
+from b import Index
+",
+        },
+        SourceFile {
+            path: "postponed.py",
+            source: "\
+from __future__ import annotations
+def postponed(x: Index): return x.run()
+from b import Index
+",
+        },
+    ];
+    let queries = [
+        ("before", Some(("ordered.py", "Index::run"))),
+        ("first", Some(("a.py", "Index::run"))),
+        ("second", Some(("b.py", "Index::run"))),
+        ("unknown", None),
+        ("local", Some(("local.py", "Index::run"))),
+        ("Index::in_class", Some(("a.py", "Index::run"))),
+        ("outer::nested", Some(("local.py", "outer::Index::run"))),
+        ("Container::method", Some(("b.py", "Index::run"))),
+        (
+            "Container::factory::inner",
+            Some(("local.py", "Index::run")),
+        ),
+        ("quoted", Some(("b.py", "Index::run"))),
+        ("postponed", Some(("b.py", "Index::run"))),
+    ]
+    .map(|(symbol, target)| {
+        let edges = target.map(|(path, name)| json!({"symbol": {"filePath": path, "name": name}}));
+        Query {
+            operation: "callees",
+            symbol,
+            expected: json!([{"name": symbol, "edges": edges.into_iter().collect::<Vec<_>>()}]),
+            ..Query::default()
+        }
+    });
+    check_case(Case {
+        name: "python_annotations_use_the_last_visible_class_or_import",
+        files,
+        queries: queries.into(),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_annotations_follow_non_first_module_imports() {
+    check_case(Case {
+        name: "python_annotations_follow_non_first_module_imports",
+        files: vec![
+            SourceFile { path: "contracts.py", source: "class Index:\n    def create_variables(self): pass\n" },
+            SourceFile { path: "unrelated.py", source: "class Index:\n    def create_variables(self): pass\n" },
+            SourceFile { path: "use.py", source: "import unrelated, contracts as api\ndef use(index: api.Index):\n    return index.create_variables()\n" },
+        ],
+        queries: vec![Query { operation: "callees", symbol: "use", expected: json!([
+            {"name":"use","edges":[{"symbol":{"name":"Index::create_variables","filePath":"contracts.py"},"line":3}]}
+        ]), ..Query::default() }],
+    }).await;
+}
+
+#[tokio::test]
+async fn python_call_targets_follow_package_exports_and_submodules() {
+    let files = vec![
+        SourceFile {
+            path: "pkg/__init__.py",
+            source: "from .foo import Foo, Foo as Public\nfrom . import foo as sub\n",
+        },
+        SourceFile {
+            path: "pkg/foo.py",
+            source: "class Foo:\n    def m(self): pass\n",
+        },
+        SourceFile {
+            path: "other.py",
+            source: "class Foo:\n    def m(self): pass\n",
+        },
+        SourceFile {
+            path: "facade/__init__.py",
+            source: "from pkg import Public as Exposed\nfrom cycle import Missing\n",
+        },
+        SourceFile {
+            path: "cycle/__init__.py",
+            source: "from facade import Missing\n",
+        },
+        SourceFile {
+            path: "consumer.py",
+            source: "\
+from pkg import Foo, Public, sub
+from facade import Exposed, Missing
+from pkg import foo as mod
+def annotated(x: Public): return x.m()
+def ordinary(x: Foo): return x.m()
+def forwarded(x: Exposed): return x.m()
+def cyclic(x: Missing): return x.m()
+def relative_submodule(): return sub.Foo()
+def shadowed(mod): return mod.Foo()
+def shadowed_alias(Public): return Public()
+def qualified(x: mod.Foo): return x.m()
+def construct(): return mod.Foo()
+def construct_export(): return Public()
+def assigned():
+    x = mod.Foo()
+    return x.m()
+",
+        },
+    ];
+    let queries = [
+        ("callers", "Foo::m", "pkg/foo.py", json!([
+            {"symbol":{"name":"annotated"}}, {"symbol":{"name":"ordinary"}}, {"symbol":{"name":"forwarded"}}, {"symbol":{"name":"qualified"}}, {"symbol":{"name":"assigned"}}
+        ])),
+        ("callers", "Foo", "pkg/foo.py", json!([
+            {"symbol":{"name":"construct"}}, {"symbol":{"name":"construct_export"}}, {"symbol":{"name":"relative_submodule"}}, {"symbol":{"name":"assigned"}}
+        ])),
+        ("callers", "Foo::m", "other.py", json!([])),
+        ("callers", "Foo", "other.py", json!([])),
+    ].map(|(operation, symbol, file, edges)| Query {
+        operation, symbol, file: Some(file), expected: json!([{"name": symbol, "edges": edges}])
+    });
+    check_case(Case {
+        name: "python_call_targets_follow_package_exports_and_submodules",
+        files,
+        queries: queries.into(),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_binding_sites_survive_imports_copies_and_rebindings() {
+    let files = vec![
+        SourceFile {
+            path: "a.py",
+            source: "class Index:\n    def run(self): pass\n",
+        },
+        SourceFile {
+            path: "pkg/sub.py",
+            source: "class Index:\n    def run(self): pass\ndef work(): pass\n",
+        },
+        SourceFile {
+            path: "pkg/__init__.py",
+            source: "from . import sub as api\nfrom .sub import Index\nclass sub: pass\n",
+        },
+        SourceFile {
+            path: "use.py",
+            source: r"from typing import Optional, Union
+from a import Index
+class Container:
+    from pkg import Index
+    def method(self, y: Index):
+        x = y
+        alias = x
+        return alias.run()
+def copied(y: Index):
+    from pkg import Index
+    x = y
+    return x.run()
+def sub(): pass
+def module_call():
+    from pkg import api as sub
+    return sub.Index()
+class Local: pass
+def local_import():
+    from pkg import Index as Local
+    return Local()
+def rebound(index: Index, values):
+    index, *meta = values
+    return index.run()
+def evaluated(index: Index):
+    index, rest = index.run()
+    return index.run()
+def loop(index: Index, values):
+    for index in values:
+        index.run()
+    return index.run()
+def multi(x: Optional['Later']): return x.run()
+def union(x: Union['Later', None]): return x.run()
+from pkg \
+    import (
+    Index
+    as Later,
+)
+def multiline(x: Later): return x.run()
+def via_function():
+    from pkg.sub import work
+    return work()
+",
+        },
+        SourceFile {
+            path: "order.py",
+            source: "class Index: pass\nfrom pkg import Index\ndef module_import(): return Index()\nfrom pkg import Index as Last\nclass Last: pass\ndef local_wins(): return Last()\n",
+        },
+    ];
+    let queries = [
+        ("Container::method", Some(("pkg/sub.py", "Index::run"))),
+        ("copied", Some(("a.py", "Index::run"))),
+        ("module_call", Some(("pkg/sub.py", "Index"))),
+        ("local_import", Some(("pkg/sub.py", "Index"))),
+        ("module_import", Some(("pkg/sub.py", "Index"))),
+        ("local_wins", Some(("order.py", "Last"))),
+        ("via_function", Some(("pkg/sub.py", "work"))),
+        ("multi", Some(("pkg/sub.py", "Index::run"))),
+        ("union", Some(("pkg/sub.py", "Index::run"))),
+        ("multiline", Some(("pkg/sub.py", "Index::run"))),
+        ("evaluated", Some(("a.py", "Index::run"))),
+        ("rebound", None),
+        ("loop", None),
+    ]
+    .map(|(symbol, target)| {
+        let edges: Vec<_> = target
+            .into_iter()
+            .map(|(path, name)| {
+                let path: std::path::PathBuf = path.split('/').collect();
+                json!({"symbol":{"name":name,"filePath":path}})
+            })
+            .collect();
+        Query {
+            operation: "callees",
+            symbol,
+            expected: json!([{"name":symbol,"edges":edges}]),
+            ..Query::default()
+        }
+    });
+    check_case(Case {
+        name: "python_binding_sites_survive_imports_copies_and_rebindings",
+        files,
+        queries: queries.into(),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_missing_export_retries_when_the_defining_module_changes() {
+    let dir = tempfile::tempdir().expect("source workspace");
+    let root = dir.path().canonicalize().expect("canonical workspace path");
+    let server = EmbeddingServer::start().expect("mock embedding server");
+    configure_remote_model(&root, server.address).expect("embedding configuration");
+    fs::create_dir(root.join("pkg")).expect("fixture package");
+    fs::write(
+        root.join("pkg/__init__.py"),
+        "from .leaf import Foo as Public\nfrom cycle import Missing\n",
+    )
+    .expect("package exports");
+    fs::create_dir(root.join("cycle")).expect("cycle package");
+    fs::write(root.join("cycle/__init__.py"), "from pkg import Missing\n")
+        .expect("cyclic re-export");
+    fs::write(
+        root.join("other.py"),
+        "class Public: pass\nclass Missing: pass\n",
+    )
+    .expect("unrelated classes");
+    fs::write(root.join("consumer.py"), "from pkg import Public, Missing\ndef create(): return Public()\ndef missing(): return Missing()\n").expect("import consumer");
+    for (step, (source, present)) in [
+        ("# empty module\n", false),
+        ("class Foo: pass\n", true),
+        ("# removed\n", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fs::write(root.join("pkg/leaf.py"), source).expect("defining module");
+        for &rebuild in if step == 0 {
+            &[true][..]
+        } else {
+            &[false, true][..]
+        } {
+            let engine = ZvecGrep::new();
+            let mut options = index_options(&root);
+            options.graph_indexing = Some(true);
+            options.rebuild = rebuild;
+            if !options.rebuild {
+                options.changes = vec![WorkspaceChange::Upsert("pkg/leaf.py".into())];
+            }
+            let indexed = engine.index(options).await.expect("index workspace");
+            engine.close();
+            assert_eq!(indexed.files_failed, 0);
+            let edges: Vec<_> = present
+                .then(|| json!({"symbol":{"name":"Foo","filePath":std::path::Path::new("pkg").join("leaf.py")}}))
+                .into_iter()
+                .collect();
+            check_queries(
+                &root,
+                "missing export after leaf update",
+                vec![
+                    Query {
+                        operation: "callees",
+                        symbol: "create",
+                        expected: json!([{"name":"create","edges":edges}]),
+                        ..Query::default()
+                    },
+                    Query {
+                        operation: "callees",
+                        symbol: "missing",
+                        expected: json!([{"name":"missing","edges":[]}]),
+                        ..Query::default()
+                    },
+                ],
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn python_receiver_assignment_uses_the_last_recorded_binding() {
+    check_case(Case {
+        name: "python_receiver_assignment_uses_the_last_recorded_binding",
+        files: vec![SourceFile {
+            path: "example.py",
+            source: "\
+class Foo:
+    def m(self): pass
+def annotated(y: Foo):
+    y.m()
+    x = y
+    x.m()
+def conditional(c):
+    if c: x = Foo()
+    else: x = None
+    x.m()
+def subscript(x: Foo, values):
+    x = values[0]
+    x.m()
+",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Foo::m",
+            expected: json!([{"name": "Foo::m", "edges": [
+                {"symbol":{"name":"annotated"},"line":4},
+                {"symbol":{"name":"annotated"},"line":6}
+            ]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_annotation_dependencies_refresh_like_a_rebuild() {
+    let directory = tempfile::tempdir().expect("source workspace");
+    let root = directory.path().canonicalize().expect("canonical root");
+    let server = EmbeddingServer::start().expect("local embedding server");
+    configure_remote_model(&root, server.address).expect("embedding configuration");
+    fs::write(root.join("bases.py"), "class First:\n    def create_variables(self): pass\nclass Second:\n    def create_variables(self): pass\n").expect("base types");
+    fs::write(root.join("consumer.py"), "from contracts import Index\ndef use(index: Index):\n    return index.create_variables()\n").expect("consumer");
+    let module = root.join("contracts.py");
+    let package = root.join("contracts/__init__.py");
+    fs::create_dir_all(package.parent().expect("package parent")).expect("package directory");
+    for (step, target) in [
+        (0, Some("First")),
+        (1, Some("Second")),
+        (2, None),
+        (3, Some("First")),
+        (4, Some("First")),
+        (5, Some("Second")),
+        (6, Some("Second")),
+    ] {
+        match step {
+            0 => fs::write(
+                &module,
+                "from bases import First\nclass Index(First): pass\n",
+            ),
+            1 => fs::write(
+                &module,
+                "from bases import Second\nclass Index(Second): pass\n",
+            ),
+            // A comment-only module has no definitions, and passes the source
+            // scanner's existing nonempty-file filter.
+            2 => fs::write(&package, "# package takes precedence\n"),
+            3 => fs::write(
+                &package,
+                "from bases import First\nclass Index(First): pass\n",
+            ),
+            4 => fs::write(&package, "from bases import First as Index\n"),
+            5 => fs::write(&package, "from bases import Second as Index\n"),
+            _ => fs::remove_file(&package),
+        }
+        .expect("change dependency");
+        for rebuild in [false, true] {
+            let engine = ZvecGrep::new();
+            let mut options = index_options(&root);
+            options.graph_indexing = Some(true);
+            options.rebuild = rebuild || step == 0;
+            if !options.rebuild {
+                options.changes = vec![match step {
+                    1 => WorkspaceChange::Upsert("contracts.py".into()),
+                    6 => WorkspaceChange::Delete("contracts/__init__.py".into()),
+                    _ => WorkspaceChange::Upsert("contracts/__init__.py".into()),
+                }];
+            }
+            let indexed = engine.index(options).await.expect("index sources");
+            engine.close();
+            assert_eq!(
+                indexed.files_failed, 0,
+                "step {step}, rebuild {rebuild}: {indexed:?}"
+            );
+            let edges = target.map(|target| json!({"symbol":{"name":format!("{target}::create_variables"),"filePath":"bases.py"},"line":3})).into_iter().collect::<Vec<_>>();
+            check_queries(
+                &root,
+                &format!("python_annotation_dependencies_refresh_like_a_rebuild: step {step}, rebuild {rebuild}"),
+                vec![Query {
+                    operation: "callees",
+                    symbol: "use",
+                    expected: json!([{"name":"use","edges":edges}]),
+                    ..Query::default()
+                }],
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn python_parameter_annotations_navigate_to_the_imported_contract() {
+    check_case(Case {
+        name: "python_parameter_annotations_navigate_to_the_imported_contract",
+        files: vec![
+            SourceFile {
+                path: "contracts.py",
+                source: "class Index:\n    def create_variables(self): return {}\nclass PandasIndex(Index):\n    def create_variables(self): return {}\n",
+            },
+            SourceFile {
+                path: "unrelated.py",
+                source: "class Index:\n    def create_variables(self): return {}\n",
+            },
+            SourceFile {
+                path: "local.py",
+                source: "class Index:\n    def create_variables(self): return {}\ndef local(index: Index):\n    return index.create_variables()\n",
+            },
+            SourceFile {
+                path: "consumer.py",
+                source: "from contracts import Index, Index as DeclaredIndex, PandasIndex\nimport contracts as api\ndef annotated(index: Index):\n    return index.create_variables()\ndef aliased(index: DeclaredIndex):\n    return index.create_variables()\ndef defaulted(index: DeclaredIndex = None):\n    return index.create_variables()\ndef forward(index: 'DeclaredIndex'):\n    return index.create_variables()\ndef qualified(index: api.Index):\n    return index.create_variables()\ndef untyped(index):\n    return index.create_variables()\ndef variadic(*index: Index):\n    return index.create_variables()\ndef union(index: Index | PandasIndex):\n    return index.create_variables()\n",
+            },
+        ],
+        queries: vec![
+            Query {
+                operation: "callers",
+                symbol: "Index::create_variables",
+                file: Some("contracts.py"),
+                expected: json!([{"name": "Index::create_variables", "edges": [
+                    {"symbol": {"name": "annotated"}, "line": 4},
+                    {"symbol": {"name": "aliased"}, "line": 6},
+                    {"symbol": {"name": "defaulted"}, "line": 8},
+                    {"symbol": {"name": "forward"}, "line": 10},
+                    {"symbol": {"name": "qualified"}, "line": 12}
+                ]}]),
+            },
+            Query {
+                operation: "callers",
+                symbol: "Index::create_variables",
+                file: Some("unrelated.py"),
+                expected: json!([{"name": "Index::create_variables", "edges": []}]),
+            },
+            Query {
+                operation: "callers",
+                symbol: "PandasIndex::create_variables",
+                expected: json!([{"name": "PandasIndex::create_variables", "edges": []}]),
+                ..Query::default()
+            },
+            Query {
+                operation: "callees",
+                symbol: "local",
+                expected: json!([{"name": "local", "edges": [
+                    {"symbol": {"name": "Index::create_variables", "filePath": "local.py"}, "line": 4}
+                ]}]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_parameter_types_follow_relative_imports_and_preserve_missing_imports() {
+    check_case(Case {
+        name: "python_parameter_types_follow_relative_imports_and_preserve_missing_imports",
+        files: vec![
+            SourceFile {
+                path: "pkg/contracts.py",
+                source: "class Index:\n    def create_variables(self): return {}\nclass ChildIndex(Index):\n    pass\n",
+            },
+            SourceFile {
+                path: "unrelated.py",
+                source: "class Index:\n    def create_variables(self): return {}\n",
+            },
+            SourceFile {
+                path: "pkg/consumer.py",
+                source: "from .contracts import Index as Contract, ChildIndex\nfrom .missing import Index as Missing\ndef relative(index: Contract):\n    return index.create_variables()\ndef inherited(index: ChildIndex):\n    return index.create_variables()\ndef missing(index: Missing):\n    return index.create_variables()\n",
+            },
+        ],
+        queries: vec![
+            Query {
+                operation: "callers",
+                symbol: "Index::create_variables",
+                file: Some("pkg/contracts.py"),
+                expected: json!([{"name": "Index::create_variables", "edges": [
+                    {"symbol": {"name": "relative"}, "line": 4},
+                    {"symbol": {"name": "inherited"}, "line": 6}
+                ]}]),
+            },
+            Query {
+                operation: "callees",
+                symbol: "missing",
+                expected: json!([{"name": "missing", "edges": []}]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
 
 #[tokio::test]
 async fn go_narrowed_receiver_does_not_escape_its_branch_or_loop() {
@@ -170,12 +797,16 @@ async fn check_case(case: Case) {
     let indexed = indexed.expect("index sources");
     assert_eq!(indexed.files_failed, 0, "{}: {indexed:?}", case.name);
 
+    check_queries(&root, case.name, case.queries).await;
+}
+
+async fn check_queries(root: &std::path::Path, name: &str, queries: Vec<Query>) {
     // Query a reopened store so the assertions cover persisted relationships.
     let engine = ZvecGrep::new();
     let mut errors = Vec::new();
-    for query in case.queries {
+    for query in queries {
         let options = RelationshipOptions {
-            root: Some(root.clone()),
+            root: Some(root.to_path_buf()),
             symbol: query.symbol.into(),
             limit: Some(50),
             globs: query.file.into_iter().map(Into::into).collect(),
@@ -197,7 +828,7 @@ async fn check_case(case: Case) {
         }
     }
     engine.close();
-    assert!(errors.is_empty(), "{}: {}", case.name, errors.join("\n"));
+    assert!(errors.is_empty(), "{name}: {}", errors.join("\n"));
 }
 
 // Compare the declared fields without imposing result order. Consume each

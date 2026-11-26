@@ -19,6 +19,7 @@
 mod bindings;
 mod cpp_types;
 mod module_config;
+mod python_types;
 mod rust_types;
 
 use std::borrow::Borrow;
@@ -282,6 +283,7 @@ struct RuleCaches {
     /// runs once per file per sweep.
     tu_macros: HashMap<u32, MacroTimeline>,
     import_references: HashMap<u32, Arc<[ImportReference]>>,
+    python_definition_positions: HashMap<String, Option<(usize, usize)>>,
     rust_types: rust_types::TypeCache,
     cpp_types: cpp_types::TypeCache,
     javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,
@@ -405,6 +407,9 @@ fn classify(
         // the wrong bind also rewrites this file's import scope for every
         // later bare-name resolution. Defer instead.
         return Ok(Outcome::Deferred);
+    }
+    if let Some(outcome) = python_types::imported_call(store, snapshot, stored, caches)? {
+        return Ok(outcome);
     }
     if let Some(resolution) = resolve_alias_bound(store, snapshot, stored, caches)? {
         // An `as` alias never names an indexed symbol itself, so the bare-name
@@ -2655,8 +2660,18 @@ fn resolve_receiver_typed(
     // spelling is read: a holder answers as what it holds, an iterator member
     // as the element it walks, and a member type a class states by name as what
     // that name denotes.
-    let root = type_root_scope(store, snapshot, stored, &bound_type, caches)?;
+    let (root, imported) = if stored.language == "python" {
+        python_types::scope(store, snapshot, stored, &bound_type, caches)?
+    } else {
+        (
+            type_root_scope(store, snapshot, stored, &bound_type, caches)?,
+            false,
+        )
+    };
     let Some(root) = root else {
+        if stored.language == "python" {
+            return Ok(None);
+        }
         // A type the workspace never declares still names a member when the
         // workspace declares exactly one by that name.
         return Ok(resolve_undeclared_type_member(
@@ -2669,14 +2684,14 @@ fn resolve_receiver_typed(
     let mut scopes = vec![root.clone()];
     let branched =
         collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
-    Ok(bind_hierarchy_member(
-        snapshot,
-        stored,
-        hits,
-        Some(&root),
-        &scopes,
-        branched,
-    ))
+    let mut resolution =
+        bind_hierarchy_member(snapshot, stored, hits, Some(&root), &scopes, branched);
+    if imported && let Some(resolution) = &mut resolution {
+        // ImportScoped is also revisited on hierarchy changes: the receiver
+        // depends on both its module identity and the inherited declaration.
+        resolution.provenance = EdgeProvenance::ImportScoped;
+    }
+    Ok(resolution)
 }
 
 /// A bare call a using-declaration of the owner's class brings into scope.
@@ -3013,7 +3028,7 @@ fn declared_receiver_type(
         };
         bindings
             .iter()
-            .filter(|binding| binding.name == receiver && binding_holds_at(binding, reference.line))
+            .filter(|binding| binding.name == receiver && binding_holds_at_ref(binding, stored))
             .map(|binding| binding.bound_type.clone())
             .next_back() // bindings are line-ordered; the latest earlier one shadows
     };
@@ -3290,6 +3305,15 @@ fn binding_holds_at(binding: &DeclaredBinding, line: usize) -> bool {
     }
 }
 
+/// A Python assignment takes effect after its right-hand expression, including
+/// when the read and the subsequent write share a source line.
+fn binding_holds_at_ref(binding: &DeclaredBinding, stored: &StoredPendingRef) -> bool {
+    binding_holds_at(binding, stored.reference.line)
+        && (stored.language != "python"
+            || (binding.line as usize, binding.column as usize)
+                <= (stored.reference.line, stored.reference.column))
+}
+
 /// The class scopes a body reads unqualified names from, in the order the
 /// language searches them.
 ///
@@ -3515,6 +3539,10 @@ fn type_root_scope(
     type_text: &str,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<ClassScope>> {
+    if stored.language == "python" {
+        return python_types::scope(store, snapshot, stored, type_text, caches)
+            .map(|(scope, _)| scope);
+    }
     type_root_scope_in(store, snapshot, stored, type_text, caches, 0)
 }
 
@@ -4204,9 +4232,10 @@ fn collect_base_scopes(
             let Some(base) = snapshot.entity_record(&base_id) else {
                 continue;
             };
+            let declared_in = snapshot.visible_file_id(&base_id);
             let scope = ClassScope {
                 entity: Some(base_id),
-                ..ClassScope::at(snapshot, base.qualified_name.clone(), None)
+                ..ClassScope::at(snapshot, base.qualified_name.clone(), declared_in)
             };
             let key = scope.entity.clone().unwrap_or_else(|| scope.name.clone());
             if visited.insert(key) {
@@ -4914,6 +4943,8 @@ mod member_evidence_tests {
         DeclaredBinding {
             name: name.to_owned(),
             bound_type: bound_type.to_owned(),
+            type_origin: None,
+            raw_text: None,
             line: 1,
             until: None,
             column: 0,

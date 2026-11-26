@@ -8,8 +8,8 @@ const STALE_NAME: i64 = 0;
 /// kinds: the table already carried this `kind` when inheritance evidence was
 /// added, and a wider `CHECK` would not reach an existing database.
 const STALE_STRUCTURE: i64 = 1;
-/// A file entered or left the indexed set, which can reorder the module paths
-/// an import specifier reads.
+/// Import targets can change when a file enters or leaves the indexed set,
+/// or when a Python package initializer changes its exports.
 const STRUCTURE_PATHS: &str = "";
 /// A file joined or left an inheritance chain, which changes the member a
 /// receiver call resolves to without changing any name it spells.
@@ -118,12 +118,12 @@ impl SqliteGraphStorage {
             )?;
         }
         if hierarchy_changed && !overflow {
-            // `bind_nearest_member` stamps every hierarchy-bound member call
-            // `file_scoped`; a row without a receiver never read the chain, so
-            // it stays bound and out of this sweep.
+            // Imported typed receivers depend on both module paths and the
+            // hierarchy. Preserve path invalidation without losing this one.
+            // A row without a receiver never read the hierarchy.
             requeued += tx.execute(
                 "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL, candidates = NULL
-                 WHERE status = 'resolved' AND provenance = 'file_scoped' AND receiver_name IS NOT NULL",
+                 WHERE status = 'resolved' AND provenance IN ('file_scoped', 'import_scoped') AND receiver_name IS NOT NULL",
                 [],
             )?;
         }
