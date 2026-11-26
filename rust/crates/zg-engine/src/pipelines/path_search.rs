@@ -20,7 +20,7 @@ use crate::{
     domain::ScanRules,
     file_selection::{GlobMatcher, ScanPolicy},
     utils::resolve_directory,
-    workspace::{find_nearest_workspace, manifest::read_workspace_manifest},
+    workspace::{find_nearest_workspace, manifest::read_workspace_scan},
 };
 
 use super::indexed_search::format_filter::{compile_format_filter, matches_file_name};
@@ -206,8 +206,7 @@ fn workspace_scan(root: Option<&Path>) -> EngineResult<(PathBuf, ScanRules)> {
     let Some((root, layout)) = find_nearest_workspace(&requested)? else {
         return Ok((requested, ScanRules::default()));
     };
-    let manifest = read_workspace_manifest(&root, &layout)?;
-    let scan = manifest.map_or_else(ScanRules::default, |manifest| manifest.scan().clone());
+    let scan = read_workspace_scan(&layout)?.unwrap_or_default();
     Ok((root, scan))
 }
 

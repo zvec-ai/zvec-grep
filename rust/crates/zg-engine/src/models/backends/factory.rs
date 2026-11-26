@@ -12,8 +12,25 @@ use crate::models::{
         ModelComputeRuntime,
         llama_config::{LlamaResources, LlamaSettings},
     },
-    spi::{EmbeddingModel, ModelError},
+    spi::{EmbeddingModel, LayoutModel, LayoutModelConfig, ModelError},
 };
+
+pub(crate) fn create_layout_model(
+    reference: &str,
+    config: LayoutModelConfig,
+    compute: ModelComputeRuntime,
+) -> Result<Arc<dyn LayoutModel>, ModelError> {
+    if reference != crate::models::catalog::layout::PP_S_REFERENCE {
+        return Err(ModelError::new(
+            crate::EngineError::NOT_FOUND,
+            "Layout model is not in the catalog",
+            None,
+        ));
+    }
+    Ok(Arc::new(super::pp_doclayout::PpDocLayoutModel::new(
+        config, compute,
+    )))
+}
 
 /// Creates a catalog-backed embedding model.
 ///

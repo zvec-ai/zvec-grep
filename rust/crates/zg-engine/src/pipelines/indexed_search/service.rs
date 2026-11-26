@@ -346,7 +346,11 @@ fn search_model_request(
     let cache_dir = if http_descriptor.is_some() {
         None
     } else {
-        crate::config::model_cache(&config, options.model_cache.clone(), runtime.cache_dir)
+        crate::config::model_cache(
+            &config,
+            options.model_cache.clone(),
+            workspace.model_cache_dir().map(Path::to_path_buf),
+        )
     };
     Ok(ModelRuntimeRequest::new(
         reference.clone(),

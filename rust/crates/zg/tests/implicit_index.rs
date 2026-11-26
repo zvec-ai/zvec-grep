@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
@@ -91,20 +91,46 @@ impl Fixture {
     }
 
     fn assert_model(&self, mode: &str, reference: &str) {
-        let output = self.success(&[
-            "--status",
-            "--mode",
-            mode,
-            "--check-ready",
-            "--color",
-            "never",
-        ]);
+        let output = self.status_after_index(mode);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_ready_coverage(&stdout);
         assert!(
             stdout.contains(&format!("  Embedding   {reference}")),
             "{stdout}"
         );
+    }
+
+    fn status_after_index(&self, mode: &str) -> Output {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let output = self
+                .command(&[
+                    "--status",
+                    "--mode",
+                    mode,
+                    "--check-ready",
+                    "--color",
+                    "never",
+                ])
+                .output()
+                .expect("workspace status");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // As in server_lifecycle, watcher jobs can invalidate a status scan.
+            // Retry only this server state; other errors and assertions stay strict.
+            let unknown = mode == "server"
+                && output.status.code() == Some(1)
+                && stdout.lines().next() == Some("  Coverage    Unavailable (status unknown)")
+                && stderr.trim() == "Error: workspace index is not ready";
+            if !unknown {
+                return success(output);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server status remained unknown after indexing\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -791,12 +817,12 @@ fn incompatible_index_errors_are_actionable_without_rebuilding_existing_data() {
             assert!(stderr.contains("zg --index --rebuild"), "{stderr}");
             if presentation == "debug" {
                 assert!(stderr.contains("unsupported index version 1"), "{stderr}");
-                assert!(stderr.contains("expected 2"), "{stderr}");
+                assert!(stderr.contains("expected 3"), "{stderr}");
                 assert!(stderr.contains("Error location:"), "{stderr}");
             } else {
                 for internal_detail in [
                     "unsupported index version",
-                    "expected 2",
+                    "expected 3",
                     "manifest.json",
                     "Error location:",
                     "ZG.ENGINE.",
@@ -1030,7 +1056,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": 2,
+            "indexVersion": 3,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" }
@@ -1175,6 +1201,7 @@ fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
             &manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"];
         assert!(runtime.get("device").is_none());
         assert!(runtime.get("cacheDir").is_none());
+        assert!(manifest.get("modelCacheDir").is_none());
         assert!(runtime.get("apiKey").is_none());
         assert!(runtime.get("endpoint").is_none());
         assert!(!manifest.to_string().contains("implicit-query-secret"));
@@ -1187,6 +1214,7 @@ fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
 fn query_refresh_keeps_saved_model_preferences() {
     for mode in ["direct", "server"] {
         let mut fixture = Fixture::new();
+        let saved_cache = fixture.root.path().join("saved-models");
         fixture.success(&[
             "--index",
             "--mode",
@@ -1196,12 +1224,13 @@ fn query_refresh_keeps_saved_model_preferences() {
             "--device",
             "cpu",
             "--model-cache",
-            "saved-models",
+            saved_cache.to_str().expect("saved cache path"),
         ]);
         let manifest_path = fixture.root.path().join(".zvec-grep/manifest.json");
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("saved manifest"))
                 .expect("manifest JSON");
+        assert_eq!(saved["modelCacheDir"], json!(saved_cache));
         assert_eq!(
             saved["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"]["device"],
             "cpu"
@@ -1238,6 +1267,7 @@ fn query_refresh_keeps_saved_model_preferences() {
             saved["index"]["descriptor"]["embeddingConfigs"]
         );
         assert_eq!(updated["storageGeneration"], saved["storageGeneration"]);
+        assert_eq!(updated["modelCacheDir"], saved["modelCacheDir"]);
     }
 }
 

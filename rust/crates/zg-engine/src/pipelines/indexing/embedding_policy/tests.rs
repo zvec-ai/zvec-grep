@@ -94,6 +94,33 @@ async fn analysis_obeys_index_scan_selection_and_size_limits() {
 }
 
 #[tokio::test]
+async fn pdfs_count_as_documents_without_loading_an_extractor() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let root = directory.path();
+    write(root, "paper.pdf", vec![b' '; 96 * 1024]);
+    write(root, "empty.pdf", "");
+    write(root, "ignored.pdf", "ignored");
+    write(root, ".gitignore", "ignored.pdf\n");
+    let analysis = analyze(root, &ScanRules::default(), None)
+        .await
+        .expect("analysis");
+    assert_eq!(analysis.text.files, 1);
+    assert_eq!(analysis.text.weight_bytes, FILE_WEIGHT_LIMIT);
+    assert_eq!(analysis.code.files, 0);
+    assert_eq!(analysis.recommended_model, TEXT_MODEL);
+    write(root, "readme.md", "notes");
+    let rules = ScanRulesUpdate {
+        max_file_size_bytes: Some(Some(100)),
+        ..Default::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan");
+    let analysis = analyze(root, &rules, None).await.expect("limited analysis");
+    assert_eq!(analysis.text.files, 1);
+    assert_eq!(analysis.text.weight_bytes, 5);
+}
+
+#[tokio::test]
 async fn formats_share_index_detection_and_do_not_count_ambiguous_files_twice() {
     let directory = tempfile::tempdir().expect("workspace");
     let root = directory.path();

@@ -574,6 +574,14 @@ pub mod progress {
                     Some(IndexEmbeddingStage::Preparing | IndexEmbeddingStage::Downloading) => {
                         state.0 = true;
                     }
+                    Some(IndexEmbeddingStage::Skipped) => {
+                        state.0 = false;
+                        self.report(progress);
+                        if let Some(latest) = state.1.take() {
+                            self.report(latest);
+                        }
+                        return;
+                    }
                     Some(IndexEmbeddingStage::Ready) => {
                         state.0 = false;
                         self.report(state.1.take().unwrap_or(progress));
@@ -715,6 +723,7 @@ pub mod progress {
         Downloading,
         Ready,
         Warning,
+        Skipped,
     }
 
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -758,6 +767,9 @@ pub mod result {
         pub files_deleted: usize,
         pub files_unchanged: usize,
         pub files_failed: usize,
+        /// Non-fatal extraction notices, including PDFs with no searchable native text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub warnings: Vec<String>,
         /// Files that could not be indexed; successful files remain published.
         #[serde(default)]
         pub failed_files: Vec<crate::api::info::result::FailedFile>,

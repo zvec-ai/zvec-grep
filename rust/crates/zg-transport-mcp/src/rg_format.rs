@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use zg_engine::api::{
     context::{
         ContextResult,
-        result::{ContextCoverage, ContextItem, EmptyReason},
+        result::{ContentRange, ContextCoverage, ContextItem, EmptyReason},
     },
     files::FilesResult,
 };
@@ -70,6 +70,7 @@ pub(crate) fn format(reply: &ContextResult) -> String {
     if reply.coverage == ContextCoverage::RgTruncated {
         lines.push("\nMore matches were omitted by the explicit output bound. Remove or increase the trailing `head` bound to see them.".to_owned());
     }
+    lines.extend(zg_cli::rg_warnings(reply).map(|warning| format!("Warning: {warning}")));
     lines.join("\n")
 }
 
@@ -77,6 +78,27 @@ fn source(items: &[&ContextItem]) -> Vec<String> {
     let mut numbered: BTreeMap<usize, (bool, String)> = BTreeMap::new();
     let mut unnumbered = Vec::new();
     for item in items {
+        if let ContentRange::Pdf { pages, .. } = &item.range {
+            unnumbered.push(format!(
+                "pages: {}",
+                pages
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+            unnumbered.push("kind: text/native".to_owned());
+            if item.status == zg_engine::api::context::result::ContextItemStatus::PossiblyStale {
+                unnumbered.push("status: possibly_stale".to_owned());
+            }
+            for (index, (_, text)) in item.visible_content().enumerate() {
+                if index > 0 {
+                    unnumbered.push("  …".to_owned());
+                }
+                unnumbered.extend(text.trim_end().lines().map(|line| format!("  {line}")));
+            }
+            continue;
+        }
         let matched = item.excerpt_range.as_ref().unwrap_or(&item.range);
         // A trailing newline is not an extra source line in rg's line-oriented output.
         for (offset, text) in item.content.lines().enumerate() {
@@ -213,6 +235,133 @@ mod tests {
                 "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12-\tafter"
             );
         }
+    }
+
+    #[test]
+    fn fallback_warnings_are_visible_with_and_without_matches() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../compat/mcp/rg-presentation.json"))
+                .expect("fixtures");
+        let mut result: ContextResult =
+            serde_json::from_value(fixture["cases"][0]["result"].clone()).expect("result");
+        result.coverage = ContextCoverage::RgExhaustive;
+        result.diagnostics.rg = Some(zg_engine::api::context::result::RgDiagnostics {
+            unindexed_files: vec!["manual.pdf".into()],
+            index_warnings: vec![
+                "Cannot read extraction index: permission denied; searching raw files instead."
+                    .into(),
+            ],
+            backend: "grep".into(),
+            command: "[embedded-grep]".into(),
+            args: vec![],
+            ignored_directories: vec![],
+            missing_paths: vec![],
+            searched_paths: vec![],
+            limit: None,
+            truncated: false,
+        });
+        for empty in [false, true] {
+            if empty {
+                result.items.clear();
+            }
+            let tool_result = crate::context_result_to_tool_result(&result);
+            assert_ne!(tool_result.is_error, Some(true));
+            let output = &tool_result.content[0]
+                .as_text()
+                .expect("text response")
+                .text;
+            assert!(
+                output.contains("Warning: searching 1 files as raw content"),
+                "{output}"
+            );
+            assert!(output.contains("zg --index"), "{output}");
+            assert!(
+                output.contains("Warning: Cannot read extraction index: permission denied"),
+                "{output}"
+            );
+            if empty {
+                assert!(output.starts_with("No matches."), "{output}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_search_only_warns_when_an_index_is_unreadable() {
+        use zg_engine::api::context::ContextOptions;
+        let directory = tempfile::tempdir().expect("workspace");
+        std::fs::write(directory.path().join("raw.pdf"), "%PDF-1.7\nneedle").expect("PDF");
+        let engine = zg_engine::ZvecGrep::new();
+        for indexed in [false, true] {
+            if indexed {
+                std::fs::create_dir(directory.path().join(".zvec-grep")).expect("home");
+                std::fs::write(
+                    directory.path().join(".zvec-grep/manifest.json"),
+                    "not JSON",
+                )
+                .expect("invalid index");
+            }
+            for query in ["needle", "absent"] {
+                let reply = engine
+                    .context(ContextOptions {
+                        root: Some(directory.path().to_path_buf()),
+                        query: Some(query.into()),
+                        rg: true,
+                        auto_update: false,
+                        limit: None,
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("raw search succeeds");
+                let tool_result = crate::context_result_to_tool_result(&reply);
+                assert_ne!(tool_result.is_error, Some(true));
+                let text = &tool_result.content[0]
+                    .as_text()
+                    .expect("text response")
+                    .text;
+                assert_eq!(text.contains("Warning:"), indexed, "{text}");
+                if indexed {
+                    assert!(text.contains("manifest"), "{text}");
+                    assert!(text.contains("raw files"), "{text}");
+                }
+                if query == "needle" {
+                    assert!(text.contains("raw.pdf"), "{text}");
+                } else {
+                    assert!(text.starts_with("No matches."), "{text}");
+                }
+            }
+        }
+        engine.close();
+    }
+
+    #[test]
+    fn pdf_rg_shows_matched_pages_and_omits_unselected_context() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../compat/mcp/rg-presentation.json"))
+                .expect("fixtures");
+        let mut result: ContextResult =
+            serde_json::from_value(fixture["cases"][0]["result"].clone()).expect("result");
+        result.items.truncate(1);
+        result.coverage = ContextCoverage::RgExhaustive;
+        let item = &mut result.items[0];
+        item.relative_path = "manual.pdf".into();
+        item.content = "first needle\nnot selected\nsecond needle\n".into();
+        let range = |pages, start, end| ContentRange::Pdf {
+            pages,
+            start_byte_offset: start,
+            end_byte_offset: end,
+        };
+        item.range = range(vec![2, 4], 0, item.content.len());
+        item.content_range = range(vec![2, 3, 4], 0, item.content.len());
+        item.content_windows = vec![
+            range(vec![2], 0, 13),
+            range(vec![4], 26, item.content.len()),
+        ];
+        item.status = zg_engine::api::context::result::ContextItemStatus::Fresh;
+        item.match_ranges.clear();
+        assert_eq!(
+            format(&result),
+            "manual.pdf\n  pages: 2,4\n  kind: text/native\n    first needle\n    …\n    second needle"
+        );
     }
 
     #[test]

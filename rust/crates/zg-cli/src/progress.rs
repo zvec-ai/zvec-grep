@@ -269,7 +269,7 @@ impl Stage {
                 IndexEmbeddingStage::Preparing => Self::Preparing,
                 IndexEmbeddingStage::Downloading => Self::Downloading,
                 IndexEmbeddingStage::Ready => Self::ModelReady,
-                IndexEmbeddingStage::Warning => Self::Warning,
+                IndexEmbeddingStage::Warning | IndexEmbeddingStage::Skipped => Self::Warning,
             };
         }
         match (progress.phase, progress.detail.as_deref()) {
@@ -751,6 +751,7 @@ fn format_progress(progress: &IndexProgress, terminal: bool) -> (String, String)
             IndexEmbeddingStage::Downloading => "Downloading model",
             IndexEmbeddingStage::Ready => "Model ready",
             IndexEmbeddingStage::Warning => "Model warning",
+            IndexEmbeddingStage::Skipped => "Model skipped",
         };
         let mut line = format!("{label}: {model}");
         if let Some(downloaded) = embedding.downloaded_bytes {
@@ -1609,7 +1610,12 @@ mod tests {
     #[test]
     fn warnings_are_durable_complete_and_survive_coalescing() {
         let warning = "Transformers cuda embedding initialization failed (Unable to configure CUDA ONNX embedding model), falling back to CPU.";
-        for terminal in [false, true] {
+        for (terminal, stage) in [
+            (false, IndexEmbeddingStage::Warning),
+            (true, IndexEmbeddingStage::Warning),
+            (false, IndexEmbeddingStage::Skipped),
+            (true, IndexEmbeddingStage::Skipped),
+        ] {
             let capture = Capture::default();
             let display = if terminal {
                 IndexProgressDisplay::terminal(capture.clone(), ColorMode::Never, true)
@@ -1624,7 +1630,7 @@ mod tests {
                 files_failed: None,
                 detail: None,
                 embedding: Some(IndexEmbeddingProgress {
-                    stage: Some(IndexEmbeddingStage::Warning),
+                    stage: Some(stage),
                     model: Some("local/all-minilm-l6-v2".into()),
                     message: Some(warning.into()),
                     ..IndexEmbeddingProgress::default()
