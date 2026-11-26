@@ -4,7 +4,7 @@
   "artifacts": {
     "linux-x64": {
       "archive": "onnxruntime-linux-x64-1.21.0.tgz",
-      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-x64-1.21.0.tgz",
+      "url": "https://registry.npmmirror.com/-/binary/onnxruntime/v1.21.0/onnxruntime-linux-x64-1.21.0.tgz",
       "sha256": "7485c7e7aac6501b27e353dcbe068e45c61ab51fbaf598d13970dfae669d20bf",
       "files": {
         "onnxruntime-linux-x64-1.21.0/lib/libonnxruntime.so.1.21.0": "libonnxruntime.so.1",
@@ -14,7 +14,7 @@
     },
     "linux-aarch64": {
       "archive": "onnxruntime-linux-aarch64-1.21.0.tgz",
-      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-aarch64-1.21.0.tgz",
+      "url": "https://registry.npmmirror.com/-/binary/onnxruntime/v1.21.0/onnxruntime-linux-aarch64-1.21.0.tgz",
       "sha256": "4508084bde1232ee1ab4b6fad2155be0ea2ccab1c1aae9910ddb3fb68a60805e",
       "files": {
         "onnxruntime-linux-aarch64-1.21.0/lib/libonnxruntime.so.1.21.0": "libonnxruntime.so.1",
@@ -24,7 +24,7 @@
     },
     "linux-x64-gpu": {
       "archive": "onnxruntime-linux-x64-gpu-1.21.0.tgz",
-      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-x64-gpu-1.21.0.tgz",
+      "url": "https://registry.npmmirror.com/-/binary/onnxruntime/v1.21.0/onnxruntime-linux-x64-gpu-1.21.0.tgz",
       "sha256": "ef37a33ba75e457aebfd0d7b342ab20424aa6126bc5f565d247f1201b66996cf",
       "files": {
         "onnxruntime-linux-x64-gpu-1.21.0/lib/libonnxruntime.so.1.21.0": "libonnxruntime.so.1",
@@ -36,7 +36,7 @@
     },
     "osx-arm64": {
       "archive": "onnxruntime-osx-arm64-1.21.0.tgz",
-      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-osx-arm64-1.21.0.tgz",
+      "url": "https://registry.npmmirror.com/-/binary/onnxruntime/v1.21.0/onnxruntime-osx-arm64-1.21.0.tgz",
       "sha256": "5c3f2064ee97eb7774e87f396735c8eada7287734f1bb7847467ad30d4036115",
       "files": {
         "onnxruntime-osx-arm64-1.21.0/lib/libonnxruntime.1.21.0.dylib": "libonnxruntime.1.dylib",
@@ -46,7 +46,7 @@
     },
     "osx-x86_64": {
       "archive": "onnxruntime-osx-x86_64-1.21.0.tgz",
-      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-osx-x86_64-1.21.0.tgz",
+      "url": "https://registry.npmmirror.com/-/binary/onnxruntime/v1.21.0/onnxruntime-osx-x86_64-1.21.0.tgz",
       "sha256": "8305afd2d75ee5702844a23b099d41885af30ad3d1b4cf3d8d795e3d8c1f9396",
       "files": {
         "onnxruntime-osx-x86_64-1.21.0/lib/libonnxruntime.1.21.0.dylib": "libonnxruntime.1.dylib",

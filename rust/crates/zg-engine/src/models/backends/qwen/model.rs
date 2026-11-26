@@ -821,6 +821,7 @@ fn model_name(entry: QwenConfig) -> &'static str {
     match entry.model {
         "text-embedding-v4" => "Qwen text-embedding-v4",
         "qwen3.7-text-embedding" => "Qwen3.7 text embedding",
+        "qwen3.7-text-embedding-flash" => "Qwen3.7 text embedding flash",
         _ => "Qwen3 VL embedding",
     }
 }

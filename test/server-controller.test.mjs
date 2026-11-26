@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import test from "node:test";
+import { removeTemporaryDirectory } from "./helpers/fixtures.mjs";
 import {
   DaemonInstanceLock,
   readInstanceRecord,
@@ -198,7 +199,7 @@ test("concurrent server starts converge on one daemon", async (t) => {
   const port = await availablePort();
   t.after(async () => {
     await stopServer(home).catch(() => undefined);
-    await rm(home, { recursive: true, force: true });
+    await removeTemporaryDirectory(home);
   });
   const options = {
     cliPath: fileURLToPath(new URL("../dist/cli/index.js", import.meta.url)),

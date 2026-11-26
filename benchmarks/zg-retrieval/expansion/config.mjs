@@ -20,11 +20,12 @@ export const PILOT_SUITES = {
     goldVersion: 2,
     lockFile: "beir20.json",
     taskCount: 20,
-    model: "local/potion-multilingual-128m",
+    model: "local/bekko-256-int8",
     targetKind: "qrels",
     breakdownBy: "dataset",
     indexTimeoutMinutes: 180,
     report: {
+      comparison: "BEIR",
       title: "BEIR / four datasets (test)",
       overview: "BEIR / four datasets",
       note: [
@@ -40,11 +41,12 @@ export const PILOT_SUITES = {
     goldVersion: 1,
     lockFile: "duretrieval10.json",
     taskCount: 10,
-    model: "local/potion-multilingual-128m",
+    model: "local/bekko-256-int8",
     targetKind: "qrels",
     breakdownBy: null,
     indexTimeoutMinutes: 300,
     report: {
+      comparison: "DuRetrieval",
       title: "DuRetrieval (C-MTEB dev)",
       overview: "DuRetrieval / Chinese web search",
       note: [
@@ -74,6 +76,7 @@ export const PILOT_SUITES = {
       C: "c",
     },
     report: {
+      comparison: "Quarry",
       title: "Quarry / eight languages (preimage)",
       overview: "Quarry / eight languages",
       note: [

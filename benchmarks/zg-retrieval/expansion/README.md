@@ -5,7 +5,8 @@ the frozen SWE-QA20 suite and report File metrics and diagnostic Entity metrics.
 
 `config.mjs` is the editable registry for pilot suite metadata: lock filename,
 expected query count, embedding model, gold projection, report labels, optional
-breakdown, and index timeout. Quarry's indexed language extensions live there
+breakdown, and index timeout. PR comparison titles come from its
+`report.comparison` field. Quarry's indexed language extensions live there
 too. Original queries, relevance labels, corpus revisions, and source hashes
 remain in the pinned `data/*.json` files. Adding a pilot still requires a
 corpus preparation adapter and its own CI job; the registry keeps the shared
@@ -76,7 +77,7 @@ out-of-range source lines are still rejected.
 
 After one shared Rust package build, SWE-QA20, BEIR, DuRetrieval and Quarry run
 in four parallel suite jobs. BEIR and DuRetrieval use
-`local/potion-multilingual-128m`; the two code suites use
+`local/bekko-256-int8`; the two code suites use
 `local/potion-code-16m-v2`. These configured models are the default `local`
 workflow choice. The optional `remote` choice overrides all four suites with
 `qwen/qwen3.7-text-embedding` without changing the pinned dataset files. Each
@@ -91,6 +92,14 @@ materialized corpus files are run-local inputs; only hashes and selected
 original query/qrel records are checked in.
 
 ## Gold and scoring
+
+All three pilots support the opt-in [Gold stage diagnostic](../README.md#gold-coverage-by-retrieval-stage).
+Add `--gold-stages` to the local `expansion/run.mjs` command with `--suite beir`,
+`--suite duretrieval`, or `--suite quarry`.
+The shared runner receives captures through MCP response metadata and matches
+them against each suite's verified File and Entity targets. New suites reuse
+this path after preparing their corpus and Gold; ZG has no suite-specific
+capture or scoring rules.
 
 | Suite | File Gold | Entity Gold |
 | --- | --- | --- |

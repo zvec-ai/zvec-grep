@@ -463,15 +463,24 @@ async fn polling_tracks_control_symlink_targets_without_following_source_links()
     let root = temporary.path().join("workspace");
     let config = temporary.path().join("config");
     let targets = temporary.path().join("targets");
+    // Keep staging entries outside the directories scanned by the polling backend.
+    let staging = temporary.path().join("staging/updates");
     fs::create_dir(&root)?;
     fs::create_dir(&config)?;
     fs::create_dir(&targets)?;
+    fs::create_dir_all(&staging)?;
     let first = targets.join("first.rules");
     let second = targets.join("second.rules");
     let control_path = config.join("rules");
+    let replacement = staging.join("rules");
+    let first_update = staging.join("first.rules");
+    let second_update = staging.join("second.rules");
     fs::write(&first, "disabled")?;
     fs::write(&second, "disabled")?;
+    fs::write(&first_update, "enabled")?;
+    fs::write(&second_update, "enabled")?;
     std::os::unix::fs::symlink(&first, &control_path)?;
+    std::os::unix::fs::symlink(&second, &replacement)?;
     let policy = Arc::new(MutablePolicy {
         blocked: root.join("blocked"),
         control: control_path.clone(),
@@ -494,31 +503,29 @@ async fn polling_tracks_control_symlink_targets_without_following_source_links()
             &control,
         )
         .await?;
-    fs::write(&first, "enabled")?;
-    wait_for_change(
-        &session,
-        &control,
-        WorkspaceChange::RescanDirectory(PathBuf::new()),
-    )
-    .await?;
-    assert!(policy.enabled.load(std::sync::atomic::Ordering::Acquire));
-    fs::remove_file(&control_path)?;
-    std::os::unix::fs::symlink(&second, &control_path)?;
-    wait_for_change(
-        &session,
-        &control,
-        WorkspaceChange::RescanDirectory(PathBuf::new()),
-    )
-    .await?;
-    assert!(!policy.enabled.load(std::sync::atomic::Ordering::Acquire));
-    fs::write(&second, "enabled")?;
-    wait_for_change(
-        &session,
-        &control,
-        WorkspaceChange::RescanDirectory(PathBuf::new()),
-    )
-    .await?;
-    assert!(policy.enabled.load(std::sync::atomic::Ordering::Acquire));
+    let rescan = WorkspaceChange::RescanDirectory(PathBuf::new());
+    // A rescan from an earlier change can still be queued when the next step starts.
+    let rules_changed = |change: &WorkspaceChange, enabled| {
+        covers_change(change, &rescan)
+            && policy.enabled.load(std::sync::atomic::Ordering::Acquire) == enabled
+    };
+
+    // Keep each target edit to one observable transition for the polling backend.
+    fs::rename(&first_update, &first)?;
+    wait_for_change_matching(&session, &control, |change| rules_changed(change, true))
+        .await
+        .map_err(|error| format!("enabling rules through the first target: {error}"))?;
+
+    // Replace the link atomically so a missing control cannot look like disabled rules.
+    fs::rename(&replacement, &control_path)?;
+    wait_for_change_matching(&session, &control, |change| rules_changed(change, false))
+        .await
+        .map_err(|error| format!("switching to the disabled target: {error}"))?;
+
+    fs::rename(&second_update, &second)?;
+    wait_for_change_matching(&session, &control, |change| rules_changed(change, true))
+        .await
+        .map_err(|error| format!("enabling rules through the second target: {error}"))?;
     tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
     session.close().await?;
     Ok(())

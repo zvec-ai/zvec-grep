@@ -10,7 +10,9 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
-use std::{ffi::OsString, os::unix::process::CommandExt, process::Command};
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::{os::unix::process::CommandExt, process::Command};
 
 use tokio::runtime::Builder;
 use tracing::debug;
@@ -117,7 +119,21 @@ fn parse_cli() -> (Cli, Option<String>) {
     (cli, warning)
 }
 
+mod standalone;
+
 fn run() -> Result<ExitCode, Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        // Pin executable-relative resources before a later update changes a command symlink.
+        let executable = std::env::current_exe()?;
+        let resolved = executable.canonicalize()?;
+        if executable != resolved {
+            return Err(Command::new(resolved)
+                .args(std::env::args_os().skip(1))
+                .exec()
+                .into());
+        }
+    }
     let (cli, warning) = parse_cli();
     let _ = OUTPUT_OPTIONS.set(cli.output_options());
     let warn = || {
@@ -131,9 +147,14 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
     };
     let positional_warning = cli.positional_query_warning();
-    let plan = cli
+    let mut plan = cli
         .into_plan(std::env::current_dir()?)
         .inspect_err(|_| warn())?;
+    if let CliPlan::Install(args) = &mut plan
+        && args.launcher.is_none()
+    {
+        args.launcher = standalone::installed_launcher()?;
+    }
     match &plan {
         CliPlan::Help(topic) => {
             warn();
@@ -147,6 +168,13 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
         CliPlan::Install(args) if args.upgrade_installed => {
             zg_cli::execute_upgrade_installed(args)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        CliPlan::Standalone(args) => {
+            Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(standalone::execute(args))?;
             return Ok(ExitCode::SUCCESS);
         }
         _ => {}
@@ -175,14 +203,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         );
     }
 
-    // The grep walker owns its search threads; a Tokio worker pool would duplicate them.
-    let runtime = if lexical_only {
-        Builder::new_current_thread().enable_all().build()?
-    } else {
-        Builder::new_multi_thread().enable_all().build()?
-    };
-
-    let result = runtime.block_on(Box::pin(execute_plan(plan)));
+    let result = execute_plan_with_runtime(plan, lexical_only);
     if let Err(error) = &result
         && let Some(output) = error_presentation
         && let Some(report) = engine_error_report(error.as_ref())
@@ -195,6 +216,26 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             zg_cli::stderr_supports_ansi(),
         )?;
         return Ok(ExitCode::FAILURE);
+    }
+    result
+}
+
+fn execute_plan_with_runtime(
+    plan: CliPlan,
+    lexical_only: bool,
+) -> Result<ExitCode, Box<dyn Error>> {
+    // The grep walker owns its search threads; a Tokio worker pool would duplicate them.
+    let runtime = if lexical_only {
+        Builder::new_current_thread().enable_all().build()?
+    } else {
+        Builder::new_multi_thread().enable_all().build()?
+    };
+    let stdio_bridge = matches!(&plan, CliPlan::Server(ServerPlan::Stdio(_)));
+    let result = runtime.block_on(Box::pin(execute_plan(plan)));
+    if stdio_bridge {
+        // Tokio's blocking stdin read cannot be cancelled. Once the relay ends,
+        // exit without waiting for a client that is itself waiting for our EOF.
+        runtime.shutdown_background();
     }
     result
 }
@@ -299,7 +340,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
         CliPlan::Server(plan) => execute_server_plan(plan).await,
         CliPlan::Install(args) => execute_install_plan(&args).await,
         CliPlan::Uninstall(args) => zg_cli::execute_uninstall(&args).map_err(Into::into),
-        CliPlan::Help(_) | CliPlan::Version => Ok(()),
+        CliPlan::Standalone(_) | CliPlan::Help(_) | CliPlan::Version => Ok(()),
     }?;
     Ok(ExitCode::SUCCESS)
 }
@@ -643,6 +684,7 @@ async fn execute_context(
                 serde_json::to_string(&result.diagnostics)?
             );
         }
+        let _ = write_stage_traces(&result);
         return Ok(());
     }
     execute_direct_context(request, output).await
@@ -783,6 +825,11 @@ async fn select_query_index(
         let Some(model) = selection.select(root, color)? else {
             return Err(EngineError::cancelled("Index creation cancelled").into());
         };
+        if !model.available() && model.reference.starts_with("http/") {
+            return Err(EngineError::invalid_argument(
+                "Pass --api-key or set the environment variable named by this HTTP model's apiKeyEnv before selecting it",
+            ).into());
+        }
         if !model.available()
             && request
                 .api_key
@@ -1029,6 +1076,18 @@ async fn execute_direct_context(
             "Diagnostics: {}",
             serde_json::to_string(&result.diagnostics)?
         );
+    }
+    let _ = write_stage_traces(&result);
+    Ok(())
+}
+
+fn write_stage_traces(result: &zg_engine::api::context::ContextResult) -> io::Result<()> {
+    if result.stage_traces.is_empty() {
+        return Ok(());
+    }
+    let mut stderr = io::stderr().lock();
+    for trace in &result.stage_traces {
+        writeln!(stderr, "[ZG_STAGE] {}", serde_json::to_string(trace)?)?;
     }
     Ok(())
 }

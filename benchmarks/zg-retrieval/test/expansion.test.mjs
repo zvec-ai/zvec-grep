@@ -51,8 +51,8 @@ test("expanded locks preserve the original ten questions and cover new datasets 
   assert.equal(beir.lock.tasks.length, 20);
   assert.equal(duretrieval.lock.tasks.length, 10);
   assert.equal(quarry.lock.tasks.length, 20);
-  assert.equal(beir.lock.model, "local/potion-multilingual-128m");
-  assert.equal(duretrieval.lock.model, "local/potion-multilingual-128m");
+  assert.equal(beir.lock.model, "local/bekko-256-int8");
+  assert.equal(duretrieval.lock.model, "local/bekko-256-int8");
   assert.equal(quarry.lock.model, "local/potion-code-16m-v2");
   assert.equal(beir.model, beir.lock.model);
   assert.equal(duretrieval.model, duretrieval.lock.model);

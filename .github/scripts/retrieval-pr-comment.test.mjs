@@ -35,8 +35,8 @@ const request = {
 };
 const models = {
   sweqa: "local/potion-code-16m-v2",
-  beir: "local/potion-multilingual-128m",
-  duretrieval: "local/potion-multilingual-128m",
+  beir: "local/bekko-256-int8",
+  duretrieval: "local/bekko-256-int8",
   quarry: "local/potion-code-16m-v2",
 };
 const readTrustedJson = async (path) =>
@@ -134,12 +134,14 @@ async function fixture(t) {
   };
   const calls = [],
     comments = [],
+    artifacts = [],
     info = [];
   let prReads = 0;
-  const x = { context, directory, run, pr, calls, comments, info };
+  const x = { context, directory, run, pr, calls, comments, artifacts, info };
   x.github = {
     rest: {
       actions: {
+        listWorkflowRunArtifacts() {},
         async getWorkflowRun(input) {
           assert.equal(input.run_id, 123);
           return { data: run };
@@ -173,8 +175,16 @@ async function fixture(t) {
         },
       },
     },
-    async paginate(_method, input) {
+    async paginate(method, input) {
       calls.push(["list", input]);
+      if (method === x.github.rest.actions.listWorkflowRunArtifacts) {
+        assert.equal(input.run_id, run.id);
+        assert.equal(input.owner, context.repo.owner);
+        assert.equal(input.repo, context.repo.repo);
+        if (x.artifactError) throw x.artifactError;
+        return artifacts;
+      }
+      assert.equal(method, x.github.rest.issues.listComments);
       return comments;
     },
   };
@@ -244,6 +254,79 @@ test("the publisher labels validated full preview without relabeling historical 
       () => validateComparison({ ...report, preview }, request),
       /Unsupported comparison preview/,
     );
+});
+
+const traceArtifact = {
+  id: 456,
+  name: "retrieval-trace.html",
+  expired: false,
+  workflow_run: { id: 123, head_sha: head },
+};
+
+test("the publisher links the triggering run's HTML artifact using only GitHub metadata", async (t) => {
+  const x = await fixture(t);
+  // Older runs uploaded a ZIP under this name; never select it as direct HTML.
+  x.artifacts.push({
+    ...traceArtifact,
+    id: 455,
+    name: "retrieval-stage-trace",
+  });
+  x.artifacts.push({
+    ...traceArtifact,
+    archive_download_url: "https://untrusted.example/trace.html",
+  });
+  await x.write("comparison/summary.json", {
+    ...report,
+    trace_url: "https://untrusted.example/report.html",
+    traceArtifactId: "[untrusted](https://untrusted.example)",
+    baseline_gold_stages: "untrusted baseline <script>",
+    candidate_gold_stages: { warning: "untrusted candidate <script>" },
+  });
+  await publish(x);
+  const { body } = x.messages()[0][1];
+  assert.match(
+    body,
+    /\[Download stage trace \(HTML\)\]\(https:\/\/github\.com\/Cuiyus\/zvec-grep\/actions\/runs\/123\/artifacts\/456\)/,
+  );
+  assert.doesNotMatch(
+    body,
+    /untrusted|<script>|Gold coverage by stage|Stage capture incomplete/,
+  );
+  assert.doesNotMatch(body, /\/artifacts\/455/);
+});
+
+test("missing, expired, unrelated or invalid trace artifacts never produce a download link", async (t) => {
+  for (const artifact of [
+    null,
+    { ...traceArtifact, expired: true },
+    { ...traceArtifact, name: "retrieval-comparison" },
+    { ...traceArtifact, name: "retrieval-stage-trace" },
+    { ...traceArtifact, id: "456" },
+    { ...traceArtifact, id: 0 },
+    { ...traceArtifact, id: 1.5 },
+    { ...traceArtifact, id: Number.MAX_SAFE_INTEGER + 1 },
+    { ...traceArtifact, workflow_run: { id: 122, head_sha: head } },
+    { ...traceArtifact, workflow_run: { id: 123, head_sha: base } },
+    { ...traceArtifact, workflow_run: undefined },
+  ]) {
+    const x = await fixture(t);
+    if (artifact) x.artifacts.push(artifact);
+    await publish(x);
+    const { body } = x.messages()[0][1];
+    assert.match(body, /✅ Complete/);
+    assert.doesNotMatch(body, /Download stage trace|\/artifacts\/456/);
+  }
+});
+
+test("an unavailable artifact listing preserves the validated quality comment", async (t) => {
+  const x = await fixture(t);
+  x.artifactError = new Error("artifact API unavailable");
+  await publish(x);
+  assert.match(x.messages()[0][1].body, /✅ Complete/);
+  assert.doesNotMatch(x.messages()[0][1].body, /Download stage trace/);
+  assert.ok(
+    x.info.some((message) => message.includes("omitting its download link")),
+  );
 });
 
 test("the publisher validates corpus totals and renders each suite once", async (t) => {
@@ -643,11 +726,23 @@ test("missing, malformed or invalid comparison artifacts publish incomplete with
   assert.match(x.messages()[0][1].body, /Failed \/ incomplete/);
 });
 
+test("a valid comparison report above 128 KiB can publish within the 256 KiB limit", async (t) => {
+  const x = await fixture(t);
+  // JSON whitespace exercises the byte limit without pretending to be run evidence.
+  const contents = JSON.stringify(report).padEnd(128 * 1024 + 1, " ");
+  assert.ok(Buffer.byteLength(contents) > 128 * 1024);
+  assert.ok(Buffer.byteLength(contents) < 256 * 1024);
+  await writeFile(join(x.directory, "comparison/summary.json"), contents);
+  await publish(x);
+  const { body } = x.messages()[0][1];
+  assert.match(body, /✅ Complete/);
+});
+
 test("oversized report data is withheld instead of being loaded into a PR comment", async (t) => {
   const x = await fixture(t);
   await writeFile(
     join(x.directory, "comparison/summary.json"),
-    " ".repeat(128 * 1024 + 1),
+    JSON.stringify(report).padEnd(256 * 1024 + 1, " "),
   );
   await publish(x);
   assert.match(x.messages()[0][1].body, /Failed \/ incomplete/);
