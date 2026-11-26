@@ -5,9 +5,10 @@ use super::*;
 fn persisted_ancestors_keep_their_identities_after_reopen() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
+    let layout = IndexLayout::new(root.path());
     let first = SourcePath::new("src/nested/main.rs").expect("source path");
     let ids = {
-        let directories = Directories::open(root.path(), false).expect("directories");
+        let directories = Directories::open(layout, false).expect("directories");
         directories.load().expect("load identities");
         let ids = directories.ensure(&first).expect("first ancestors");
         assert_eq!(ids, [DirectoryId::new(0), DirectoryId::new(1)]);
@@ -21,7 +22,7 @@ fn persisted_ancestors_keep_their_identities_after_reopen() {
         directories.flush().expect("flush");
         ids
     };
-    let directories = Directories::open(root.path(), false).expect("reopen");
+    let directories = Directories::open(layout, false).expect("reopen");
     directories.load().expect("load identities");
     assert_eq!(
         directories.ensure(&first).expect("retained identities"),
@@ -46,7 +47,8 @@ fn load_rejects_missing_or_inconsistent_parent_records() {
     initialize().expect("initialize zvec");
     for parent in [None, Some(5)] {
         let root = tempfile::tempdir().expect("storage");
-        let directories = Directories::open(root.path(), false).expect("directories");
+        let directories =
+            Directories::open(IndexLayout::new(root.path()), false).expect("directories");
         let mut ids = DirectoryIds::default();
         ids.resolve(&SourcePath::new("src/nested/main.rs").expect("source path"))
             .expect("ancestors");

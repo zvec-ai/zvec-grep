@@ -163,6 +163,16 @@ fn write_embedding(
             },
         );
     write_status_field(writer, theme, "Embedding", &values)?;
+    for table in index.into_iter().flat_map(|index| &index.content_indexes) {
+        let model = &table.embedding;
+        let label = format!("  {}", table.kind.as_str());
+        let value = format!(
+            "{}/{}",
+            human_text(&model.provider, terminal),
+            human_text(&model.model, terminal)
+        );
+        write_status_field(writer, theme, &label, &[value])?;
+    }
     let fts = index.and_then(|index| index.fts.as_ref()).map_or_else(
         || "Not configured".into(),
         |fts| {
@@ -248,12 +258,13 @@ mod tests {
         InfoResult {
             root: "/workspace".into(),
             indexed: true,
-            compatibility: IndexCompatibility::Compatible { version: 2 },
+            compatibility: IndexCompatibility::Compatible { version: 3 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
+                content_indexes: Vec::new(),
                 path: "/workspace/.zvec-grep".into(),
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
@@ -269,7 +280,7 @@ mod tests {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
                 }),
-                index_version: Some(2),
+                index_version: Some(3),
                 created_epoch_ms: 0,
                 updated_epoch_ms: 0,
             }),
@@ -479,7 +490,7 @@ mod tests {
             info.index_policy = WorkspaceIndexPolicy::Disabled;
             info.compatibility = IndexCompatibility::RebuildRequired {
                 actual_version,
-                expected_version: 2,
+                expected_version: 3,
                 reason: "unsupported persisted index".into(),
             };
             info.suggestion = Some("zg --index".into());

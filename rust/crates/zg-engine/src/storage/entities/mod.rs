@@ -1,12 +1,12 @@
 //! Canonical entities, content, metadata, and fragment selectors.
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use tokio_util::sync::CancellationToken;
 use zvec_rust::{Collection, CollectionSchema, DataType, Doc};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{CodeMetadata, Entity, EntityId, EntityMetadata, FileId},
+    domain::{CodeMetadata, Entity, EntityId, EntityMetadata, FileId, IndexLayout},
 };
 
 use super::zvec::{
@@ -26,9 +26,9 @@ impl Entities {
         &self.collection
     }
 
-    pub(super) fn open(path: &Path, read_only: bool) -> EngineResult<Self> {
+    pub(super) fn open(layout: IndexLayout<'_>, read_only: bool) -> EngineResult<Self> {
         Ok(Self {
-            collection: open_collection(&path.join("entities"), &schema()?, read_only)?,
+            collection: open_collection(&layout.entities_dir(), &schema()?, read_only)?,
         })
     }
 

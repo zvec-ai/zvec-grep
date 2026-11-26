@@ -9,6 +9,7 @@ use rmcp::{
     model::{ElicitRequestParams, ElicitResult, ElicitationAction},
     service::RequestContext,
 };
+use tokio_util::sync::CancellationToken;
 use zg_engine::{
     EngineError,
     api::{context::ContextOptions, index::IndexOptions},
@@ -22,11 +23,56 @@ enum Decision {
     FtsOnly,
 }
 
+/// Discovering remote work can scan and extract changed files.
+async fn preflight<T: Send + 'static>(
+    signal: &CancellationToken,
+    resolve: impl FnOnce(CancellationToken) -> Result<T, EngineError> + Send + 'static,
+) -> Result<T, EngineError> {
+    let child = signal.child_token();
+    let _guard = child.clone().drop_guard();
+    let worker = async move {
+        tokio::task::spawn_blocking(move || resolve(child))
+            .await
+            .map_err(|error| {
+                EngineError::internal(format!("Authorization worker failed: {error}"))
+            })?
+    };
+    tokio::select! {
+        biased;
+        () = signal.cancelled() => Err(EngineError::cancelled("MCP authorization was cancelled")),
+        result = worker => result,
+    }
+}
+
+pub(crate) async fn index_targets(
+    options: &IndexOptions,
+    signal: &CancellationToken,
+) -> Result<Vec<IndexAuthorization>, EngineError> {
+    let mut options = options.clone();
+    preflight(signal, move |child| {
+        options.signal = Some(child);
+        authorization::index_authorizations(&options)
+    })
+    .await
+}
+
+async fn query_targets(
+    options: &ContextOptions,
+    signal: &CancellationToken,
+) -> Result<Vec<authorization::QueryAuthorization>, EngineError> {
+    let mut options = options.clone();
+    preflight(signal, move |child| {
+        options.signal = Some(child);
+        authorization::query_authorizations(&options)
+    })
+    .await
+}
+
 pub(crate) async fn index(
     options: &mut IndexOptions,
     context: &RequestContext<RoleServer>,
 ) -> Result<(), EngineError> {
-    let targets = authorization::index_authorizations(options)?;
+    let targets = index_targets(options, &context.ct).await?;
     if targets.is_empty() {
         return Ok(());
     }
@@ -34,7 +80,7 @@ pub(crate) async fn index(
     for target in &targets {
         decisions.push(ask(target, false, true, false, context).await?);
     }
-    if authorization::index_authorizations(options)? != targets {
+    if index_targets(options, &context.ct).await? != targets {
         return Err(EngineError::permission_denied(
             "Workspace authorization scope changed while awaiting consent; retry to review all destinations",
         ));
@@ -50,7 +96,7 @@ pub(crate) async fn search(
     options: &mut ContextOptions,
     context: &RequestContext<RoleServer>,
 ) -> Result<(), EngineError> {
-    let targets = authorization::query_authorizations(options)?;
+    let targets = query_targets(options, &context.ct).await?;
     if targets.is_empty() {
         return Ok(());
     }
@@ -70,16 +116,17 @@ pub(crate) async fn search(
         }
         decisions.push(decision);
     }
-    if authorization::query_authorizations(options)? != targets {
+    if query_targets(options, &context.ct).await? != targets {
         return Err(EngineError::permission_denied(
             "Workspace authorization scope changed while awaiting consent; retry to review all destinations",
         ));
     }
     for (required, decision) in targets.iter().zip(decisions) {
-        apply(decision, &required.target, &mut options.authorized_remote)?;
-    }
-    if targets.len() == 1 {
-        options.authorization_model = Some(targets[0].target.model.clone());
+        match decision {
+            Decision::Once => options.authorize_once(required),
+            Decision::Workspace => authorization::grant_index(&required.target)?,
+            Decision::FtsOnly => unreachable!("FTS-only returns before applying grants"),
+        }
     }
     Ok(())
 }
@@ -123,14 +170,34 @@ async fn ask(
             "Remote authorization scope changed; retry consent",
         ));
     }
+    let scope = format!(
+        "Destination: {} (host: {}). Model: {}. Workspace: {}. Source roots: {}. Query text sent: {query_text}. Workspace content sent for indexing/refresh: {workspace_content}.",
+        target.endpoint,
+        target.endpoint_host,
+        target.model,
+        zg_cli::output_path(&target.root).display(),
+        target
+            .workspace_roots
+            .iter()
+            .map(|root| zg_cli::output_path(root).display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
     let supported = context
         .client_capabilities()
         .and_then(|caps| caps.elicitation)
         .is_some_and(|cap| cap.form.is_some() || cap.url.is_none());
     if !supported {
+        let lexical = if allow_fts {
+            " For lexical search, use FTS with autoUpdate: false and eventual freshness."
+        } else {
+            ""
+        };
         return Err(EngineError::permission_denied(
-            "Remote embedding requires consent. This MCP client does not support form elicitation; grant workspace authorization with `zg --auth` or use FTS with autoUpdate: false.",
-        ));
+            "Remote embedding requires consent. This MCP client does not support form elicitation.",
+        ).with_help(format!(
+            "{scope} For workspace approval, use the reported values with zg --auth grant <root> --capability embedding --scope workspace --embedding <model> --endpoint <endpoint>.{lexical}"
+        )));
     }
     let mut choices = vec!["once", "workspace", "cancel"];
     if allow_fts {
@@ -143,19 +210,11 @@ async fn ask(
         }}, "required": ["choice"]
     });
     let message = format!(
-        "Allow remote embedding? Destination: {} (host: {}). Model: {}. Workspace: {}. Source roots: {}. Query text sent: {query_text}. Workspace content sent for indexing/refresh: {workspace_content}. Only explicit acceptance permits transmission. Do not enter credentials in this form.",
-        target.endpoint,
-        target.endpoint_host,
-        target.model,
-        zg_cli::output_path(&target.root).display(),
-        target
-            .workspace_roots
-            .iter()
-            .map(|root| zg_cli::output_path(root).display().to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
+        "Allow remote embedding? {scope} Only explicit acceptance permits transmission. Do not enter credentials in this form."
     );
-    let result = elicit_form(message, requested_schema, context).await?;
+    let result = elicit_form(message, requested_schema, context)
+        .await
+        .map_err(|error| error.with_help(scope))?;
     decision(&result, allow_fts)
 }
 
@@ -429,6 +488,17 @@ mod tests {
                         !supported || choice == "cancel"
                     );
                     assert_eq!(calls.load(Ordering::SeqCst), usize::from(supported));
+                    if !supported {
+                        let report = serde_json::to_string(&result.content).expect("error report");
+                        for expected in [
+                            "consent-workspace",
+                            "remote/test-model",
+                            "https://embedding.example.test/v1",
+                            "--embedding <model> --endpoint <endpoint>",
+                        ] {
+                            assert!(report.contains(expected), "missing scope: {expected}");
+                        }
+                    }
                     client.cancel().await.expect("close client");
                     task.await.expect("server task").expect("server stop");
                 }

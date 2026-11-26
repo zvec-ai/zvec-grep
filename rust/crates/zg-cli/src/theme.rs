@@ -64,6 +64,19 @@ impl StatusTheme {
     pub fn muted(self, value: &str) -> String {
         self.paint(value, "2")
     }
+
+    pub fn group_heading(self, title: &str) -> String {
+        let width = columns().saturating_sub(title.len() + 2).min(22);
+        let title = self.paint(title, "1;38;2;175;203;213");
+        if width == 0 {
+            return title;
+        }
+        let rule = if unicode_supported() { "─" } else { "-" };
+        format!(
+            "{title}  {}",
+            self.paint(&rule.repeat(width), "38;2;98;105;112")
+        )
+    }
 }
 
 pub(crate) fn clean(value: &str) -> String {

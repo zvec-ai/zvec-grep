@@ -158,6 +158,14 @@ pub(crate) struct ModelRuntimeRequest {
 }
 
 impl ModelRuntimeRequest {
+    pub(crate) fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    pub(crate) fn matches_query_request(&self, query: &Self) -> bool {
+        self.reference == query.reference && self.options == query.options
+    }
+
     pub(crate) fn new(
         reference: impl Into<String>,
         options: ModelConfig,
@@ -604,15 +612,6 @@ impl fmt::Debug for ModelRuntimeManager {
 }
 
 impl ModelRuntimeLease {
-    /// Endpoint supplied when acquiring this runtime, after caller-side resolution.
-    pub(crate) fn configured_endpoint(&self) -> Option<&str> {
-        self.inner.key.endpoint.as_deref()
-    }
-
-    pub(crate) fn configured_http(&self) -> Option<&HttpEmbeddingConfig> {
-        self.inner.key.http.as_ref()
-    }
-
     pub(crate) fn matches_query_request(&self, request: &ModelRuntimeRequest) -> bool {
         // Queries may borrow writer storage while using a separate native budget.
         let mut key = ModelRuntimeKey::new(&request.reference, &request.options);

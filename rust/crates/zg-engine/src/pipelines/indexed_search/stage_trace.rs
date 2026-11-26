@@ -58,6 +58,7 @@ impl StageTraceCollector {
             .collect::<Vec<_>>();
         watched_paths.sort();
         let mut capture = StageTrace {
+            kinds: Vec::new(),
             version: 1,
             group_id: String::new(),
             limit,

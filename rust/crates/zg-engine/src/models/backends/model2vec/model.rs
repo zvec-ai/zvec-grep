@@ -14,8 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::utils::atomic_write;
 use crate::{
     domain::model::{
-        EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelInfo,
-        ModelProgress,
+        EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelProgress,
     },
     models::{
         artifacts::{
@@ -78,23 +77,7 @@ impl Model2VecEmbeddingModel {
             .unwrap_or_else(|| default_model_cache(LocalModelBackend::Model2Vec));
         Self {
             entry,
-            info: EmbeddingModelInfo::new(
-                ModelInfo::new(
-                    entry.provider.to_owned(),
-                    entry.model.to_owned(),
-                    [
-                        crate::domain::ContentKind::Text,
-                        crate::domain::ContentKind::Code,
-                    ],
-                    entry.max_batch_size,
-                )
-                .expect("valid model metadata"),
-                entry.dimension,
-                entry.metric,
-                Some(entry.max_input_tokens),
-                None,
-            )
-            .expect("valid embedding metadata"),
+            info: crate::models::EmbeddingCatalogEntry::Model2Vec(entry).embedding_info(),
             model_cache_dir,
             compute_runtime,
             dependencies,

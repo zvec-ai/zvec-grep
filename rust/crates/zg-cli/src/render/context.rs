@@ -9,9 +9,10 @@ use unicode_width::UnicodeWidthStr;
 
 use zg_engine::api::context::{
     ContextResult,
+    options::ContentKind,
     result::{
         ContentRange, ContextCoverage, ContextItem, ContextItemKind, ContextItemStatus,
-        EmptyReason, EntityMetadata,
+        EmptyReason, EntityMetadata, IndexResultGroup,
     },
 };
 
@@ -30,8 +31,9 @@ pub(super) fn write(
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(options.color, terminal);
+    let heading_theme = terminal.then_some(theme);
     if options.preview == PreviewMode::Detail {
-        return write_detail(writer, result, options, theme);
+        return write_detail(writer, result, options, theme, heading_theme);
     }
     if result.group_results.is_empty() {
         if result.items.is_empty()
@@ -39,7 +41,18 @@ pub(super) fn write(
         {
             return writeln!(writer, "No searchable files.");
         }
-        return write_items(writer, &result.items, &result.query, options, theme);
+        let groups = result
+            .diagnostics
+            .index
+            .as_ref()
+            .map_or(&[][..], |index| index.result_groups.as_slice());
+        return write_rank_groups(
+            writer,
+            &result.items,
+            groups,
+            heading_theme,
+            |writer, items| write_items(writer, items, &result.query, options, theme),
+        );
     }
     let groups = result
         .group_results
@@ -67,7 +80,65 @@ pub(super) fn write(
                 )
             )?;
         }
-        write_items(writer, &group.items, &group.query, options, theme)?;
+        write_rank_groups(
+            writer,
+            &group.items,
+            &group.result_groups,
+            heading_theme,
+            |writer, items| write_items(writer, items, &group.query, options, theme),
+        )?;
+    }
+    Ok(())
+}
+
+/// Distances from incompatible embedding spaces have independent ranks.
+fn write_rank_groups<W: Write>(
+    writer: &mut W,
+    items: &[ContextItem],
+    groups: &[IndexResultGroup],
+    heading_theme: Option<StatusTheme>,
+    mut render: impl FnMut(&mut W, &[ContextItem]) -> io::Result<()>,
+) -> io::Result<()> {
+    if groups.iter().filter(|group| group.item_count > 0).count() <= 1 {
+        return render(writer, items);
+    }
+    for (index, group) in groups
+        .iter()
+        .filter(|group| group.item_count > 0)
+        .enumerate()
+    {
+        let end = group.item_start.saturating_add(group.item_count);
+        let slice = items.get(group.item_start..end).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "search result group exceeds the returned hits",
+            )
+        })?;
+        if index > 0 || heading_theme.is_some() {
+            writeln!(writer)?;
+        }
+        if let Some(theme) = heading_theme {
+            let title = group
+                .kinds
+                .iter()
+                .map(|kind| match kind {
+                    ContentKind::Text => "Text",
+                    ContentKind::Code => "Code",
+                    ContentKind::Image => "Image",
+                })
+                .collect::<Vec<_>>()
+                .join(" + ");
+            writeln!(writer, "{}", theme.group_heading(&title))?;
+        } else {
+            let kinds = group
+                .kinds
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(" + ");
+            writeln!(writer, "{kinds} results")?;
+        }
+        render(writer, slice)?;
     }
     Ok(())
 }
@@ -246,6 +317,7 @@ fn write_detail(
     result: &ContextResult,
     options: OutputOptions,
     theme: StatusTheme,
+    heading_theme: Option<StatusTheme>,
 ) -> io::Result<()> {
     let grouped = !result.group_results.is_empty();
     let items: Vec<_> = if grouped {
@@ -312,10 +384,27 @@ fn write_detail(
                 )?;
             }
             let highlighter = QueryHighlighter::new(&group.query, theme.color);
-            write_detail_items(writer, &group.items, options, theme, &highlighter)?;
+            write_rank_groups(
+                writer,
+                &group.items,
+                &group.result_groups,
+                heading_theme,
+                |writer, items| write_detail_items(writer, items, options, theme, &highlighter),
+            )?;
         }
     } else {
-        write_detail_items(writer, &result.items, options, theme, &highlighter)?;
+        let groups = result
+            .diagnostics
+            .index
+            .as_ref()
+            .map_or(&[][..], |index| index.result_groups.as_slice());
+        write_rank_groups(
+            writer,
+            &result.items,
+            groups,
+            heading_theme,
+            |writer, items| write_detail_items(writer, items, options, theme, &highlighter),
+        )?;
     }
     Ok(())
 }

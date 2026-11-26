@@ -270,6 +270,58 @@ async fn fts_queries_borrow_writer_without_credentials_but_wait_does_not() -> Te
 }
 
 #[tokio::test]
+async fn vector_query_borrows_a_writer_updating_another_model() -> TestResult {
+    use zg_engine::api::index::options::{ContentKind, Device};
+    let fixture = Fixture::new().await;
+    let root = fixture.root.path();
+    std::fs::write(root.join("orchard.rs"), "pub fn orchard() {}")?;
+    let spec = |reference: &str| EmbeddingModelSpec {
+        reference: reference.to_owned(),
+        endpoint: Some(fixture.endpoint.clone()),
+        revision: None,
+        cache_dir: None,
+        device: Device::Auto,
+    };
+    let indexed = fixture
+        .engine
+        .index(IndexOptions {
+            root: Some(root.to_owned()),
+            rebuild: true,
+            embedding: Some(spec("qwen/qwen3.7-text-embedding")),
+            embedding_routes: [(ContentKind::Code, spec("qwen/text-embedding-v4"))].into(),
+            api_key: Some("local-test-key".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        })
+        .await?;
+    assert_eq!(indexed.files_failed, 0);
+
+    let update = fixture.start_update(false).await;
+    let mut query = fixture.query(RefreshPolicy::Off);
+    query.routes[0].mode = ContextRouteMode::Vector;
+    query.target_kinds = vec![ContentKind::Code];
+    query.lock_timeout_ms = Some(100);
+    let mut mismatched = query.clone();
+    mismatched.model_cache = Some(root.join("different-cache"));
+    let busy = fixture
+        .engine
+        .context(mismatched)
+        .await
+        .expect_err("different configuration");
+    assert_eq!(busy.code(), EngineError::RESOURCE_BUSY);
+    let result = fixture.engine.context(query).await;
+    fixture.index_gate.release.add_permits(1);
+    update.await??;
+    assert!(
+        result?
+            .items
+            .iter()
+            .any(|item| item.relative_path.ends_with("orchard.rs"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn mismatched_models_and_rebuilds_wait_instead_of_borrowing() -> TestResult {
     let fixture = Fixture::new().await;
     let update = fixture.start_update(false).await;

@@ -121,6 +121,61 @@ fn every_preview_separates_queries_and_preserves_hits_and_local_ranks() {
 }
 
 #[test]
+fn content_kind_headings_preserve_the_original_hits_and_redirected_output() {
+    use zg_engine::api::context::{options::ContentKind, result::IndexResultGroup};
+
+    let mut result = grouped_result();
+    result.group_results.truncate(1);
+    let render = |result: &ContextResult, terminal| {
+        let mut bytes = Vec::new();
+        let options = OutputOptions {
+            color: ColorMode::Never,
+            preview: PreviewMode::None,
+            ..OutputOptions::default()
+        };
+        write_context_with_options(&mut bytes, result, options, terminal).expect("render");
+        String::from_utf8(bytes).expect("UTF-8")
+    };
+    let text_hit = render(&result, true);
+    let mut code = result.clone();
+    code.group_results[0].items[0].relative_path = "src/example.rs".into();
+    let code_hit = render(&code, true);
+    let group = &mut result.group_results[0];
+    group.items.extend(code.group_results.remove(0).items);
+    group.result_groups = [ContentKind::Text, ContentKind::Code]
+        .into_iter()
+        .enumerate()
+        .map(|(item_start, kind)| IndexResultGroup {
+            kinds: vec![kind],
+            models: vec![],
+            item_start,
+            item_count: 1,
+        })
+        .collect();
+
+    assert_eq!(
+        render(&result, false),
+        format!("text results\n{text_hit}\ncode results\n{code_hit}")
+    );
+    let terminal = render(&result, true);
+    let (text_heading, remaining) = terminal.split_once(&text_hit).expect("original text hit");
+    let code_heading = remaining
+        .strip_suffix(&code_hit)
+        .expect("original code hit");
+    for (heading, kind) in [(text_heading, "Text"), (code_heading, "Code")] {
+        let rule = heading
+            .trim()
+            .strip_prefix(kind)
+            .expect("kind heading")
+            .trim();
+        assert!(
+            !rule.is_empty() && rule.chars().all(|c| matches!(c, '─' | '-')),
+            "{heading}"
+        );
+    }
+}
+
+#[test]
 fn compact_previews_highlight_the_query_of_each_group() {
     let result = grouped_result();
     for preview in [PreviewMode::Short, PreviewMode::Full] {

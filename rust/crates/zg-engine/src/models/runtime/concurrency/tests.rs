@@ -8,7 +8,7 @@ fn resolve(
 ) -> (Option<usize>, Vec<String>) {
     let mut warnings = Vec::new();
     let value = resolve_override(
-        reference,
+        Some(reference),
         requested,
         |name| {
             Some(
@@ -29,7 +29,7 @@ fn resolve(
 #[test]
 fn renamed_environment_controls_index_concurrency() {
     let value = resolve_override(
-        "local/potion-code-16m-v2",
+        None,
         None,
         |name| match name {
             "ZVEC_GREP_EMBEDDING_CONCURRENCY" => Some("12".to_owned()),
@@ -43,6 +43,16 @@ fn renamed_environment_controls_index_concurrency() {
 
 #[test]
 fn index_override_precedence_and_legacy_scope() {
+    assert_eq!(
+        resolve_override(
+            None,
+            None,
+            |name| (name == CONTEXT_PARALLELISM_ENV).then(|| "4".into()),
+            |_| {}
+        )
+        .expect("global budget"),
+        None,
+    );
     let llama = "local/embeddinggemma-300m";
     assert_eq!(resolve(llama, Some(3), "2", "1").0, Some(3));
     assert_eq!(resolve(llama, None, " 02 ", "1").0, Some(2));
@@ -79,7 +89,9 @@ fn invalid_environment_warns_and_uses_auto_without_legacy_retry() {
                 .is_empty()
         );
     }
-    assert!(resolve_override("local/embeddinggemma-300m", Some(0), |_| None, |_| {}).is_err());
+    assert!(
+        resolve_override(Some("local/embeddinggemma-300m"), Some(0), |_| None, |_| {}).is_err()
+    );
 }
 
 #[test]
@@ -121,7 +133,7 @@ fn explicit_zero_is_rejected_and_zero_environment_warns_for_every_backend() {
         "local/potion-code-16m-v2",
         "qwen/text-embedding-v4",
     ] {
-        assert!(resolve_override(reference, Some(0), |_| None, |_| {}).is_err());
+        assert!(resolve_override(Some(reference), Some(0), |_| None, |_| {}).is_err());
         let (limit, warnings) = resolve(reference, None, "0", "4");
         assert_eq!(limit, None);
         assert_eq!(warnings.len(), 1);

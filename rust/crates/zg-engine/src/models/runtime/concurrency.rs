@@ -30,8 +30,9 @@ fn is_bekko(reference: &str) -> bool {
 }
 
 /// Called only at the index boundary, including implicit builds and refreshes.
+/// Omit the reference to select just the operation-wide CLI/environment limit.
 pub(crate) fn resolve_index_concurrency(
-    reference: &str,
+    reference: Option<&str>,
     requested: Option<usize>,
 ) -> Result<Option<usize>, ModelError> {
     resolve_override(
@@ -45,7 +46,7 @@ pub(crate) fn resolve_index_concurrency(
 }
 
 fn resolve_override(
-    reference: &str,
+    reference: Option<&str>,
     requested: Option<usize>,
     mut environment: impl FnMut(&str) -> Option<String>,
     mut warn: impl FnMut(String),
@@ -60,7 +61,7 @@ fn resolve_override(
     }
     let mut name = EMBEDDING_CONCURRENCY_ENV;
     let mut value = environment(name).unwrap_or_default();
-    if value.trim().is_empty() && is_llama(reference) {
+    if value.trim().is_empty() && reference.is_some_and(is_llama) {
         name = CONTEXT_PARALLELISM_ENV;
         value = environment(name).unwrap_or_default();
     }

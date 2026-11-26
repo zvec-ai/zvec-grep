@@ -260,6 +260,18 @@ impl WorkspaceWatcherFactoryPort for EngineWatcherFactory {
     }
 }
 
+/// Older daemon clients express background refresh with the auto-update flag.
+pub(crate) fn normalize_query_refresh(request: &mut ContextOptions) -> RefreshPolicy {
+    let policy = request.refresh.unwrap_or(if request.auto_update {
+        RefreshPolicy::Background
+    } else {
+        RefreshPolicy::Off
+    });
+    request.auto_update = false;
+    request.refresh = Some(policy);
+    policy
+}
+
 impl WorkspaceRuntimeManager {
     #[cfg(test)]
     pub(crate) fn native(engine: Arc<ZvecGrep>) -> Self {
@@ -336,6 +348,7 @@ impl WorkspaceRuntimeManager {
             // A submitted background job outlives the request that created it.
             options.signal = None;
         }
+        options.normalize_model_cache()?;
         let canonical_root = canonical_root(options.root.as_deref())?;
         options.root = Some(canonical_root.clone());
         let runtime = self.runtime(canonical_root, &options)?;
@@ -991,6 +1004,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         engine: &ZvecGrep,
         mut request: ContextOptions,
     ) -> Result<ContextResult, EngineError> {
+        request.validate_index_targets()?;
         // In-process callers without a request token must still be interruptible at shutdown.
         if request.signal.is_none() {
             request.signal = Some(self.inner.shutdown.child_token());
@@ -1003,19 +1017,13 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .as_ref()
             .map(|runtime| runtime.search_freshness())
             .unwrap_or_default();
-        let policy = request.refresh.unwrap_or(if request.auto_update {
-            RefreshPolicy::Background
-        } else {
-            RefreshPolicy::Off
-        });
-        request.auto_update = false;
-        request.refresh = Some(policy);
+        let policy = normalize_query_refresh(&mut request);
         let options = IndexOptions {
             root: request.root.clone(),
             on_progress: request.on_progress.clone(),
             signal: request.signal.clone(),
             allow_remote: request.allow_remote,
-            authorized_remote: request.authorized_remote.clone(),
+            authorized_remote: request.refresh_authorizations().to_vec(),
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
             runtime_device: request.device,
@@ -1379,6 +1387,8 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.scan = ScanRulesUpdate::default();
     template.graph_indexing = None;
     template.embedding = None;
+    template.embedding_routes.clear();
+    template.clear_embedding_routes.clear();
     template.embedding_default = None;
     template
 }
@@ -1475,7 +1485,7 @@ mod tests {
 
     #[test]
     fn watch_template_does_not_replay_model_configuration() {
-        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+        use zg_engine::api::index::options::{ContentKind, Device, EmbeddingModelSpec};
 
         let template = super::index_template(&IndexOptions {
             api_key: Some("one-operation-key".into()),
@@ -1485,6 +1495,18 @@ mod tests {
             runtime_api_key: Some("temporary-key".into()),
             runtime_device: Some(Device::Auto),
             runtime_model_cache: Some("temporary-cache".into()),
+            clear_embedding_routes: vec![ContentKind::Text],
+            embedding_routes: [(
+                ContentKind::Code,
+                EmbeddingModelSpec {
+                    reference: "local/potion-code-16m-v2".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Auto,
+                },
+            )]
+            .into(),
             embedding_default: Some(zg_engine::api::index::embedding::EmbeddingSelection {
                 model: "local/bekko-256-int8".into(),
                 source: zg_engine::api::index::embedding::EmbeddingSelectionSource::Automatic,
@@ -1506,6 +1528,8 @@ mod tests {
         assert!(template.api_key.is_none());
         assert!(template.endpoint.is_none());
         assert!(template.embedding.is_none());
+        assert!(template.embedding_routes.is_empty());
+        assert!(template.clear_embedding_routes.is_empty());
         assert!(template.embedding_default.is_none());
         assert!(template.device.is_none());
     }
@@ -1646,7 +1670,7 @@ mod tests {
         zg_engine::api::info::InfoResult {
             root: "/workspace".into(),
             indexed: true,
-            compatibility: IndexCompatibility::Compatible { version: 2 },
+            compatibility: IndexCompatibility::Compatible { version: 3 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/index".into(),
@@ -2431,6 +2455,7 @@ mod tests {
             assert_eq!(error.code(), EngineError::RESOURCE_CLOSED);
         }
     }
+
     #[tokio::test]
     async fn manual_updates_replace_the_watcher_once_without_replaying_configuration() {
         use zg_engine::api::index::options::ScanRulesUpdate;

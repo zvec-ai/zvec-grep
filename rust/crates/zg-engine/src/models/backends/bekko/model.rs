@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     domain::{
         Content,
-        model::{EmbeddingModelInfo, EmbeddingResult, ModelConfig, ModelInfo, ModelProgress},
+        model::{EmbeddingModelInfo, EmbeddingResult, ModelConfig, ModelProgress},
     },
     models::{
         artifacts::{
@@ -51,23 +51,7 @@ impl BekkoEmbeddingModel {
     ) -> Self {
         Self {
             entry,
-            info: EmbeddingModelInfo::new(
-                ModelInfo::new(
-                    entry.provider.to_owned(),
-                    entry.model.to_owned(),
-                    [
-                        crate::domain::ContentKind::Text,
-                        crate::domain::ContentKind::Code,
-                    ],
-                    entry.max_batch_size,
-                )
-                .expect("valid Bekko model metadata"),
-                entry.dimension,
-                entry.metric,
-                Some(entry.max_input_tokens),
-                None,
-            )
-            .expect("valid Bekko embedding metadata"),
+            info: crate::models::EmbeddingCatalogEntry::Bekko(entry).embedding_info(),
             cache: options
                 .cache_dir
                 .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))

@@ -47,6 +47,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"
 serde.workspace = true
 serde_json.workspace = true
+serde_with = { version = "3", default-features = false, features = ["alloc"] }
 sha2.workspace = true
 shutdown_hooks = "0.1.0"
 sysinfo.workspace = true

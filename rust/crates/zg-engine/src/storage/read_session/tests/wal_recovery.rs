@@ -125,6 +125,12 @@ async fn first_status_recovers_interrupted_incremental_wal() {
     let fixture = Fixture::new();
     fixture.publish();
     interrupt_incremental_write(&fixture);
+    assert!(
+        IndexStore::inspect_published(&fixture.layout, |store| store.populated_kinds(&[]))
+            .expect("preflight defers WAL recovery")
+            .is_none()
+    );
+    assert_wal_pending(&fixture);
     let result = WorkspaceIndexService::new()
         .info(crate::api::info::InfoOptions {
             root: fixture.layout.storage_dir().parent().map(Path::to_path_buf),

@@ -18,6 +18,10 @@ decision before remote indexing, search or refresh sends data. Unsupported
 clients, cancellation, invalid responses and timeouts never grant consent.
 A local-search choice disables vector retrieval and refresh.
 
+One-time approval covers the data categories shown for each destination.
+For example, a search approved to send query text needs separate approval
+to send file contents discovered during refresh.
+
 Continuation state is opaque, bounded, expiring and single-use. It binds the
 caller, tool, unchanged arguments and disclosed destinations; consent is
 rechecked before execution. A daemon restart invalidates pending continuations.

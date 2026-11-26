@@ -53,8 +53,9 @@ file-name lookup and its literal-source fallback without creating an index.
 
 Indexing coordinates the native scanner, source extraction, model runtimes,
 and zvec storage. Scan rules belong to the persisted workspace; query filters
-narrow retrieval without rewriting those rules. Text and code share one
-embedding model per workspace; images are currently skipped.
+narrow retrieval without rewriting those rules. Each enabled content kind has a
+separate search collection. Text and code can share a model runtime or select
+different models. The file catalog, canonical entities, and code graph are shared.
 
 The workspace layer owns manifests, portable paths, credentials, locks,
 and recoverable index publication under `.zvec-grep/`. See the

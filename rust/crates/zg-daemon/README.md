@@ -44,6 +44,9 @@ gate optional request fields; unsupported capabilities require an upgrade or
 restart instead of silently changing the request's meaning. An incompatible
 live daemon must not cause `auto` mode to silently execute directly.
 
+Content-kind routing uses daemon protocol v3. Replace an older resident
+daemon with `zg --server on` using the same home and token settings.
+
 Supported daemon replacement serializes shutdown and startup, validates process
 identity and checks the destination before stopping the old service.
 Unreachable endpoints, rejected shutdowns and exit timeouts preserve the process.

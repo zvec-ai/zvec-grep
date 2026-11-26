@@ -305,14 +305,23 @@ async fn execute_command(
                 .await
                 .map(DaemonReply::IndexSetup),
         ),
-        DaemonCommand::QueryAuthorization(request) => engine_execution(
-            zg_engine::authorization::query_authorizations(&request)
-                .map(DaemonReply::QueryAuthorization),
-        ),
-        DaemonCommand::IndexAuthorization(request) => engine_execution(
-            zg_engine::authorization::index_authorizations(&request)
-                .map(DaemonReply::IndexAuthorization),
-        ),
+        DaemonCommand::QueryAuthorization(mut request) => {
+            crate::workspace_runtime::normalize_query_refresh(&mut request);
+            authorization_preflight(&state.shutdown, move |signal| {
+                request.signal = Some(signal);
+                zg_engine::authorization::query_authorizations(&request)
+                    .map(DaemonReply::QueryAuthorization)
+            })
+            .await
+        }
+        DaemonCommand::IndexAuthorization(mut request) => {
+            authorization_preflight(&state.shutdown, move |signal| {
+                request.signal = Some(signal);
+                zg_engine::authorization::index_authorizations(&request)
+                    .map(DaemonReply::IndexAuthorization)
+            })
+            .await
+        }
         DaemonCommand::GrantIndexAuthorization(target) => engine_execution(
             zg_engine::authorization::grant_index(&target)
                 .map(|()| DaemonReply::GrantIndexAuthorization),
@@ -374,6 +383,20 @@ async fn execute_command(
         ),
     };
     (StatusCode::OK, Json(result))
+}
+
+async fn authorization_preflight(
+    shutdown: &CancellationToken,
+    resolve: impl FnOnce(CancellationToken) -> Result<DaemonReply, zg_engine::EngineError>
+    + Send
+    + 'static,
+) -> ExecutionResult {
+    let signal = shutdown.child_token();
+    let _guard = signal.clone().drop_guard();
+    match tokio::task::spawn_blocking(move || resolve(signal)).await {
+        Ok(result) => engine_execution(result),
+        Err(error) => internal_failure(&format!("Authorization worker failed: {error}")),
+    }
 }
 
 fn engine_execution(result: Result<DaemonReply, zg_engine::EngineError>) -> ExecutionResult {

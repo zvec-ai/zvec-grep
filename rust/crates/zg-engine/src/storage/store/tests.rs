@@ -13,7 +13,6 @@ use crate::pipelines::indexing::graph_resolver::resolve_pending;
 #[derive(Clone)]
 struct FixtureEntity {
     entity: Entity,
-    model: String,
     vector: Vec<f32>,
     fts_text: String,
 }
@@ -33,7 +32,7 @@ fn fixture_records(
                     super::super::types::IndexedFragment {
                         entity_id: fixture.entity.id().clone(),
                         fragment_id: fragment.id.clone(),
-                        model: fixture.model.clone(),
+                        kind: fixture.entity.content().kind(),
                         vector: fixture.vector.clone(),
                         fts_text: fixture.fts_text.clone(),
                     }
@@ -221,10 +220,10 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
         expected.sort();
         for hits in [
             storage
-                .search_fts("orchard", 20, Some(&filter))
+                .search_fts(ContentKind::Text, "orchard", 20, Some(&filter))
                 .expect("FTS"),
             storage
-                .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 20, Some(&filter))
+                .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 20, Some(&filter))
                 .expect("vector"),
         ] {
             let mut actual = hits.into_iter().map(|hit| hit.file_id).collect::<Vec<_>>();
@@ -241,7 +240,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
     };
     assert!(
         storage
-            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 20, Some(&filter))
+            .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 20, Some(&filter))
             .expect("no stale vectors")
             .is_empty()
     );
@@ -249,7 +248,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
     let reader = open(directory.path(), true);
     assert!(
         reader
-            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 20, Some(&filter))
+            .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 20, Some(&filter))
             .expect("reopened filter")
             .is_empty()
     );
@@ -421,6 +420,13 @@ fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
     reopened.close().expect("close");
 }
 
+fn text_index() -> ContentIndex {
+    ContentIndex {
+        kind: ContentKind::Text,
+        embedding: schema(),
+    }
+}
+
 fn schema() -> EmbeddingModelInfo {
     EmbeddingModelInfo::new(
         crate::domain::model::ModelInfo::new(
@@ -457,7 +463,10 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: home.to_owned(),
-        embeddings: vec![original.clone()],
+        indexes: vec![ContentIndex {
+            kind: ContentKind::Text,
+            embedding: original.clone(),
+        }],
     })
     .expect("create index")
     .close()
@@ -467,14 +476,17 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
     assert_eq!(
         record,
-        serde_json::json!({"path_encoding": "components", "embeddings": [original]})
+        serde_json::json!({"path_encoding": "components", "indexes": [{"kind": "text", "embedding": original}]})
     );
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
             .expect("read model info")
-            .embeddings()
+            .indexes()
             .expect("valid model info"),
-        vec![original.clone()]
+        vec![ContentIndex {
+            kind: ContentKind::Text,
+            embedding: original.clone()
+        }]
     );
 
     let current = EmbeddingModelInfo::new(
@@ -495,7 +507,10 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: home.to_owned(),
-        embeddings: vec![current.clone()],
+        indexes: vec![ContentIndex {
+            kind: ContentKind::Text,
+            embedding: current.clone(),
+        }],
     })
     .expect("runtime metadata changes do not invalidate an index")
     .close()
@@ -517,7 +532,10 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
         let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: false,
             storage_path: home.to_owned(),
-            embeddings: vec![changed],
+            indexes: vec![ContentIndex {
+                kind: ContentKind::Text,
+                embedding: changed,
+            }],
         })
         .err()
         .expect("index fields must match");
@@ -541,11 +559,11 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
     let path = directory.path();
     for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
         let mut record =
-            serde_json::to_value(SchemaRecord::new(&[schema()])).expect("descriptor JSON");
+            serde_json::to_value(SchemaRecord::new(&[text_index()])).expect("descriptor JSON");
         if field == "maxBatchSize" {
-            record["embeddings"][0]["model"][field] = serde_json::json!(0);
+            record["indexes"][0]["embedding"]["model"][field] = serde_json::json!(0);
         } else {
-            record["embeddings"][0][field] = serde_json::json!(0);
+            record["indexes"][0]["embedding"][field] = serde_json::json!(0);
         }
         fs::write(
             path.join("schema.json"),
@@ -560,7 +578,7 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
             WorkspaceIndexStorageOptions::ReadWrite {
                 graph_enabled: false,
                 storage_path: directory.path().to_owned(),
-                embeddings: vec![schema()],
+                indexes: vec![text_index()],
             },
         ] {
             let error = IndexStore::open(options).err().expect("corrupt metadata");
@@ -586,7 +604,7 @@ fn initializes_schema_only_in_empty_storage() {
 
 #[test]
 fn rejects_existing_collections_without_schema_before_opening_them() {
-    for collection in ["files", "directories", "entities", "fragments_existing"] {
+    for collection in ["files", "directories", "entities", "text", "code"] {
         let directory = tempfile::tempdir().expect("fixture directory");
         let path = directory.path();
         let collection_path = path.join(collection);
@@ -601,7 +619,7 @@ fn rejects_existing_collections_without_schema_before_opening_them() {
             WorkspaceIndexStorageOptions::ReadWrite {
                 graph_enabled: false,
                 storage_path: directory.path().to_owned(),
-                embeddings: vec![schema()],
+                indexes: vec![text_index()],
             },
         ] {
             let error = IndexStore::open(options)
@@ -629,7 +647,7 @@ fn open(path: &Path, read_only: bool) -> IndexStore {
         WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: false,
             storage_path: path.to_owned(),
-            embeddings: vec![schema()],
+            indexes: vec![text_index()],
         }
     };
     IndexStore::open(options).expect("open real zvec storage")
@@ -641,7 +659,10 @@ fn open_graph(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: path.to_owned(),
         graph_enabled: true,
-        embeddings: vec![schema()],
+        indexes: vec![ContentIndex {
+            kind: ContentKind::Code,
+            embedding: schema(),
+        }],
     })
     .expect("open real zvec storage with a graph")
 }
@@ -675,7 +696,7 @@ fn fixture(
     let content = Content::Text(text.to_owned());
     let entry = FixtureEntity {
         fts_text: format!("quoted'\\name\0suffix\n{text}\n"),
-        model: "fixture/fixture-model".into(),
+
         entity: fixture_entity(
             id,
             content,
@@ -750,7 +771,7 @@ fn persists_filters_and_replaces_complete_files() {
     };
     for query in ["orchard", "数据库", "orchard\0"] {
         let hits = storage
-            .search_fts(query, 10, Some(&filter))
+            .search_fts(ContentKind::Text, query, 10, Some(&filter))
             .expect("filtered FTS");
         assert_eq!(hits.len(), 1);
         let loaded = storage.load_search_hits(&hits).expect("FTS result details");
@@ -760,7 +781,7 @@ fn persists_filters_and_replaces_complete_files() {
         );
     }
     let hits = storage
-        .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, Some(&filter))
+        .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, Some(&filter))
         .expect("filtered ANN");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].file_id, first.id());
@@ -769,7 +790,7 @@ fn persists_filters_and_replaces_complete_files() {
     assert_eq!(stored.file.snapshot(), first.snapshot());
     assert!(stored.file.index_status().is_indexed());
     let ranked = storage
-        .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, None)
+        .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, None)
         .expect("ranked ANN");
     assert_eq!(ranked.len(), 2);
     let loaded = storage
@@ -802,18 +823,13 @@ fn persists_filters_and_replaces_complete_files() {
     ] {
         assert!(
             storage
-                .search_fts("orchard", 10, Some(&rejected))
+                .search_fts(ContentKind::Text, "orchard", 10, Some(&rejected))
                 .expect("FTS exclusion")
                 .is_empty()
         );
         assert!(
             storage
-                .search_vector(
-                    "fixture/fixture-model",
-                    &[1.0, 0.0, 0.0],
-                    10,
-                    Some(&rejected)
-                )
+                .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, Some(&rejected))
                 .expect("ANN exclusion")
                 .is_empty()
         );
@@ -825,13 +841,13 @@ fn persists_filters_and_replaces_complete_files() {
     };
     assert!(
         storage
-            .search_fts("orchard", 10, Some(&empty))
+            .search_fts(ContentKind::Text, "orchard", 10, Some(&empty))
             .expect("empty filter")
             .is_empty()
     );
     assert!(
         storage
-            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, Some(&empty))
+            .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, Some(&empty))
             .expect("empty filter")
             .is_empty()
     );
@@ -841,13 +857,13 @@ fn persists_filters_and_replaces_complete_files() {
         .expect("mark failed");
     assert!(
         storage
-            .search_fts("数据库", 10, None)
+            .search_fts(ContentKind::Text, "数据库", 10, None)
             .expect("old content removed")
             .is_empty()
     );
     assert!(
         storage
-            .search_vector("fixture/fixture-model", &entry.vector, 10, Some(&filter))
+            .search_vector(ContentKind::Text, &entry.vector, 10, Some(&filter))
             .expect("old vector removed")
             .is_empty()
     );
@@ -870,14 +886,14 @@ fn persists_filters_and_replaces_complete_files() {
     assert_eq!(reader.list_files().expect("reopened files").len(), 1);
     assert_eq!(
         reader
-            .search_fts("数据库", 10, None)
+            .search_fts(ContentKind::Text, "数据库", 10, None)
             .expect("reopened FTS")
             .len(),
         1
     );
     assert_eq!(
         reader
-            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, None)
+            .search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, None)
             .expect("reopened ANN")
             .len(),
         1
@@ -906,7 +922,12 @@ fn deletion_rejects_an_external_storage_lock_and_succeeds_after_release() {
     let record = home.join("record");
     fs::write(&record, b"preserve while locked").expect("stored record");
 
-    let reader = acquire_storage_lock(&home, true).expect("external reader lock");
+    let layout = IndexLayout::new(&home);
+    fs::create_dir(layout.lock_path()).expect("invalid lock entry");
+    let error = acquire_storage_lock(layout, true, false).expect_err("reject non-file lock");
+    assert!(error.message().contains("expected a regular file"));
+    fs::remove_dir(layout.lock_path()).expect("clear invalid lock");
+    let reader = acquire_storage_lock(layout, true, true).expect("external reader lock");
     let error = IndexStore::delete(&home).expect_err("active reader prevents deletion");
     assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
     assert_eq!(
@@ -940,7 +961,7 @@ fn close_preserves_failure_status() {
     let reader = open(home, true);
     assert_eq!(
         reader
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("finalized source")
             .len(),
         1
@@ -1006,7 +1027,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
     );
     assert_eq!(
         storage
-            .search_fts("healthy", 10, None)
+            .search_fts(ContentKind::Text, "healthy", 10, None)
             .expect("invalid input leaves accepted writes readable")
             .len(),
         1
@@ -1030,7 +1051,10 @@ fn rejects_invalid_writes_without_poisoning_storage() {
         IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: false,
             storage_path: home.to_owned(),
-            embeddings: vec![incompatible],
+            indexes: vec![ContentIndex {
+                kind: ContentKind::Text,
+                embedding: incompatible
+            }],
         })
         .is_err()
     );
@@ -1066,7 +1090,7 @@ fn persists_zero_cosine_vector_without_failing_its_file() {
     assert!(files[0].index_status().is_indexed());
     assert_eq!(
         reader
-            .search_fts("hexadecimal", 10, None)
+            .search_fts(ContentKind::Text, "hexadecimal", 10, None)
             .expect("search text from zero-vector fragment")
             .len(),
         1
@@ -1186,7 +1210,6 @@ fn writes_fragments_across_native_batch_boundaries() {
                 prototype.entity.metadata().cloned(),
             );
             FixtureEntity {
-                model: "fixture/fixture-model".into(),
                 entity,
                 vector: prototype.vector.clone(),
                 fts_text: prototype.fts_text.clone(),
@@ -1203,18 +1226,13 @@ fn writes_fragments_across_native_batch_boundaries() {
     };
     assert_eq!(
         storage
-            .search_fts("harvest", 1030, None)
+            .search_fts(ContentKind::Text, "harvest", 1030, None)
             .expect("all batches")
             .len(),
         entries.len()
     );
     let hits = storage
-        .search_vector(
-            "fixture/fixture-model",
-            &prototype.vector,
-            10,
-            Some(&filter),
-        )
+        .search_vector(ContentKind::Text, &prototype.vector, 10, Some(&filter))
         .expect("last batch ANN");
     assert_eq!(hits.len(), 1);
     let loaded = storage
@@ -1229,18 +1247,13 @@ fn writes_fragments_across_native_batch_boundaries() {
         .expect("replace with empty file");
     assert!(
         storage
-            .search_fts("harvest", 10, None)
+            .search_fts(ContentKind::Text, "harvest", 10, None)
             .expect("no stale fragments")
             .is_empty()
     );
     assert!(
         storage
-            .search_vector(
-                "fixture/fixture-model",
-                &prototype.vector,
-                10,
-                Some(&filter)
-            )
+            .search_vector(ContentKind::Text, &prototype.vector, 10, Some(&filter))
             .expect("no stale vector")
             .is_empty()
     );
@@ -1301,7 +1314,7 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
     let reader = open(home.path(), true);
     assert_eq!(
         reader
-            .search_fts("orchard", 10, Some(&filter))
+            .search_fts(ContentKind::Text, "orchard", 10, Some(&filter))
             .expect("directory query")
             .len(),
         1
@@ -1316,7 +1329,7 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
     let reader = open(home.path(), true);
     assert_eq!(
         reader
-            .search_fts("orchard", 10, Some(&filter))
+            .search_fts(ContentKind::Text, "orchard", 10, Some(&filter))
             .expect("recovered directory query")
             .len(),
         1
@@ -1324,7 +1337,7 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
     reader.close().expect("close reader");
 }
 
-fn multi_model_schema() -> Vec<EmbeddingModelInfo> {
+fn multi_model_schema() -> Vec<ContentIndex> {
     let text = schema();
     let mut vision = schema();
     {
@@ -1337,14 +1350,23 @@ fn multi_model_schema() -> Vec<EmbeddingModelInfo> {
         metadata["dimension"] = serde_json::json!(2);
         vision = serde_json::from_value(metadata).expect("valid model metadata");
     }
-    vec![text, vision]
+    vec![
+        ContentIndex {
+            kind: ContentKind::Text,
+            embedding: text,
+        },
+        ContentIndex {
+            kind: ContentKind::Image,
+            embedding: vision,
+        },
+    ]
 }
 
 fn open_multi_model(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: path.to_owned(),
-        embeddings: multi_model_schema(),
+        indexes: multi_model_schema(),
     })
     .expect("multi-model storage")
 }
@@ -1357,7 +1379,7 @@ fn multi_model_file(storage: &IndexStore) -> (FileRecord, Vec<FixtureEntity>) {
         vec![1.0, 0.0, 0.0],
     );
     let mut image = text.clone();
-    image.model = "fixture/vision".into();
+
     image.vector = vec![0.0, 1.0];
     let content = Content::Image(
         crate::domain::ImageContent::new(vec![1, 2, 3], crate::domain::FileFormat::Png)
@@ -1368,12 +1390,12 @@ fn multi_model_file(storage: &IndexStore) -> (FileRecord, Vec<FixtureEntity>) {
     (file, vec![text, image])
 }
 
-fn vector_index_completeness(storage: &IndexStore, model: &str) -> f32 {
+fn vector_index_completeness(storage: &IndexStore, kind: ContentKind) -> f32 {
     storage
         .read(|state| {
             let stats = state
                 .fragments
-                .collection(model)?
+                .collection(kind)?
                 .stats()
                 .expect("native index statistics");
             assert_eq!(stats.indexes.len(), 1);
@@ -1429,7 +1451,7 @@ fn partial_optimization_is_retried_on_the_same_store_and_after_reopening() {
         writer.close().expect("flush without optimizing");
 
         let writer = open(home.path(), false);
-        assert!(vector_index_completeness(&writer, "fixture/fixture-model") < 1.0);
+        assert!(vector_index_completeness(&writer, ContentKind::Text) < 1.0);
         let error = writer
             .finalize_writes_with(|state| {
                 optimize_collections([
@@ -1445,7 +1467,7 @@ fn partial_optimization_is_retried_on_the_same_store_and_after_reopening() {
             })
             .expect_err("one collection failed");
         assert!(error.message().contains("injected"));
-        assert!(vector_index_completeness(&writer, "fixture/fixture-model") >= 1.0);
+        assert!(vector_index_completeness(&writer, ContentKind::Text) >= 1.0);
 
         let writer = if reopen {
             writer.close().expect("close after partial failure");
@@ -1473,7 +1495,10 @@ fn partial_optimization_is_retried_on_the_same_store_and_after_reopening() {
             .finalize_writes_with(|_| panic!("successful optimization must not repeat"))
             .expect("completed optimization survives reopening");
         assert_eq!(
-            writer.search_fts("orchard", 10, None).expect("FTS").len(),
+            writer
+                .search_fts(ContentKind::Text, "orchard", 10, None)
+                .expect("FTS")
+                .len(),
             1
         );
         writer.close().expect("close verified store");
@@ -1481,7 +1506,7 @@ fn partial_optimization_is_retried_on_the_same_store_and_after_reopening() {
 }
 
 #[test]
-fn finalization_builds_every_model_index_in_reopened_flush_only_storage() {
+fn finalization_builds_every_kind_index_in_reopened_flush_only_storage() {
     let home = tempfile::tempdir().expect("workspace");
     let writer = open_multi_model(home.path());
     let (file, entries) = multi_model_file(&writer);
@@ -1492,7 +1517,7 @@ fn finalization_builds_every_model_index_in_reopened_flush_only_storage() {
 
     let writer = open_multi_model(home.path());
     for entry in &entries {
-        assert!(vector_index_completeness(&writer, &entry.model) < 1.0);
+        assert!(vector_index_completeness(&writer, entry.entity.content().kind()) < 1.0);
     }
     writer.finalize_writes().expect("finish existing indexes");
     writer.finalize_writes().expect("unchanged finalization");
@@ -1500,14 +1525,22 @@ fn finalization_builds_every_model_index_in_reopened_flush_only_storage() {
 
     let reader = open(home.path(), true);
     for entry in &entries {
-        assert!(vector_index_completeness(&reader, &entry.model) >= 1.0);
+        assert!(vector_index_completeness(&reader, entry.entity.content().kind()) >= 1.0);
         let hits = reader
-            .search_vector(&entry.model, &entry.vector, 10, None)
+            .search_vector(entry.entity.content().kind(), &entry.vector, 10, None)
             .expect("optimized model retrieval");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].document_id, entry.entity.fragments()[0].id.as_str());
     }
-    assert_eq!(reader.search_fts("name", 10, None).expect("FTS").len(), 2);
+    for kind in [ContentKind::Text, ContentKind::Image] {
+        assert_eq!(
+            reader
+                .search_fts(kind, "name", 10, None)
+                .expect("FTS")
+                .len(),
+            1
+        );
+    }
     reader.close().expect("close reader");
 }
 
@@ -1533,22 +1566,22 @@ fn finalization_preserves_replacements_and_deletions_after_reopen() {
     writer.close().expect("close writer");
 
     let reader = open(home.path(), true);
-    assert!(vector_index_completeness(&reader, "fixture/fixture-model") >= 1.0);
+    assert!(vector_index_completeness(&reader, ContentKind::Text) >= 1.0);
     for removed in ["orchard", "vineyard"] {
         assert!(
             reader
-                .search_fts(removed, 10, None)
+                .search_fts(ContentKind::Text, removed, 10, None)
                 .expect("removed FTS")
                 .is_empty()
         );
     }
     let hits = reader
-        .search_fts("meadow", 10, None)
+        .search_fts(ContentKind::Text, "meadow", 10, None)
         .expect("replacement FTS");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].file_id, first.id());
     let vectors = reader
-        .search_vector("fixture/fixture-model", &[0.0, 0.0, 1.0], 10, None)
+        .search_vector(ContentKind::Text, &[0.0, 0.0, 1.0], 10, None)
         .expect("replacement vector");
     assert_eq!(vectors.len(), 1);
     assert_eq!(vectors[0].document_id, hits[0].document_id);
@@ -1556,7 +1589,7 @@ fn finalization_preserves_replacements_and_deletions_after_reopen() {
 }
 
 #[test]
-fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
+fn kind_tables_partition_fragments_and_failed_files_clear_every_partition() {
     let home = tempfile::tempdir().expect("workspace");
     let writer = open_multi_model(home.path());
     let (file, entries) = multi_model_file(&writer);
@@ -1577,30 +1610,30 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         "directories".to_owned(),
         "files".to_owned(),
         "entities".to_owned(),
-        "fragments_438e".to_owned(),
-        "fragments_d020".to_owned(),
+        "text".to_owned(),
+        "image".to_owned(),
     ];
     expected.sort();
     assert_eq!(
         collections, expected,
-        "three canonical collections and one per model, without a graph directory"
+        "three canonical collections and one per content kind, without a graph directory"
     );
 
     let reader = open(home.path(), true);
-    for (model, vector, id) in [
+    for (kind, vector, id) in [
         (
-            "fixture/fixture-model",
+            ContentKind::Text,
             vec![1.0, 0.0, 0.0],
             entries[0].entity.fragments()[0].id.as_str(),
         ),
         (
-            "fixture/vision",
+            ContentKind::Image,
             vec![0.0, 1.0],
             entries[1].entity.fragments()[0].id.as_str(),
         ),
     ] {
         let hits = reader
-            .search_vector(model, &vector, 10, None)
+            .search_vector(kind, &vector, 10, None)
             .expect("partition query");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].document_id, id);
@@ -1609,16 +1642,21 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     }
     assert!(
         reader
-            .search_vector("fixture/unknown", &[1.0, 0.0], 10, None)
+            .search_vector(ContentKind::Code, &[1.0, 0.0], 10, None)
             .is_err()
     );
     assert!(
         reader
-            .search_vector("fixture/vision", &[1.0, 0.0, 0.0], 10, None)
+            .search_vector(ContentKind::Image, &[1.0, 0.0, 0.0], 10, None)
             .is_err()
     );
     // Indexed owner metadata is searchable in both disjoint partitions.
-    let hits = reader.search_fts("name", 10, None).expect("all-table FTS");
+    let mut hits = Vec::new();
+    for kind in [ContentKind::Text, ContentKind::Image] {
+        let matches = reader.search_fts(kind, "name", 10, None).expect("kind FTS");
+        assert_eq!(matches.len(), 1);
+        hits.extend(matches);
+    }
     assert_eq!(hits.len(), 2);
     assert_ne!(hits[0].document_id, hits[1].document_id);
     reader.close().expect("close reader");
@@ -1631,16 +1669,16 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     assert!(
         matches!(failed[0].index_status(), FileIndexStatus::Failed { error } if error == "vision request failed")
     );
-    assert!(
-        writer
-            .search_fts("name", 10, None)
-            .expect("no FTS remnants")
-            .is_empty()
-    );
     for entry in &entries {
         assert!(
             writer
-                .search_vector(&entry.model, &entry.vector, 10, None)
+                .search_fts(entry.entity.content().kind(), "name", 10, None)
+                .expect("no FTS remnants")
+                .is_empty()
+        );
+        assert!(
+            writer
+                .search_vector(entry.entity.content().kind(), &entry.vector, 10, None)
                 .expect("no vector remnants")
                 .is_empty()
         );
@@ -1656,29 +1694,18 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
 }
 
 #[test]
-fn colliding_model_collection_names_are_rejected_before_opening_storage() {
+fn duplicate_kinds_are_rejected_before_opening_storage() {
     let home = tempfile::tempdir().expect("workspace");
-    let embeddings = ["model-188", "model-215"]
-        .into_iter()
-        .map(|name| {
-            let mut metadata = serde_json::to_value(schema()).expect("model metadata");
-            metadata["model"]["name"] = serde_json::json!(name);
-            serde_json::from_value(metadata).expect("valid model metadata")
-        })
-        .collect::<Vec<_>>();
+    let indexes = vec![text_index(); 2];
     let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: home.path().to_owned(),
-        embeddings: embeddings.clone(),
+        indexes: indexes.clone(),
     })
     .err()
     .expect("colliding collection names");
     assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
-    assert!(
-        error
-            .message()
-            .contains("share index collection fragments_ccb7")
-    );
+    assert!(error.message().contains("duplicate content index for text"));
     assert_eq!(
         fs::read_dir(home.path())
             .expect("untouched storage")
@@ -1688,7 +1715,7 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
 
     fs::write(
         home.path().join("schema.json"),
-        serde_json::to_vec(&SchemaRecord::new(&embeddings)).expect("descriptor JSON"),
+        serde_json::to_vec(&SchemaRecord::new(&indexes)).expect("descriptor JSON"),
     )
     .expect("write conflicting schema");
     let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
@@ -1698,16 +1725,12 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
     .err()
     .expect("stored collection names also require validation");
     assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
-    assert!(
-        error
-            .message()
-            .contains("share index collection fragments_ccb7")
-    );
-    assert!(!home.path().join("fragments_ccb7").exists());
+    assert!(error.message().contains("duplicate content index for text"));
+    assert!(!home.path().join("text").exists());
 }
 
 #[test]
-fn model_set_changes_require_rebuild_and_order_does_not() {
+fn route_changes_require_rebuild_and_order_does_not() {
     let home = tempfile::tempdir().expect("workspace");
     open_multi_model(home.path())
         .close()
@@ -1717,17 +1740,23 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: home.path().to_owned(),
-        embeddings: reversed,
+        indexes: reversed,
     })
     .expect("same models in different order")
     .close()
     .expect("close");
-    for embeddings in [vec![schema()], vec![schema(), schema()]] {
+    let mut swapped = multi_model_schema();
+    let [text_route, image_route] = swapped.as_mut_slice() else {
+        panic!("two routes")
+    };
+    std::mem::swap(&mut text_route.embedding, &mut image_route.embedding);
+    let text = text_index();
+    for indexes in [vec![text.clone()], vec![text.clone(), text], swapped] {
         assert!(
             IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
                 graph_enabled: false,
                 storage_path: home.path().to_owned(),
-                embeddings,
+                indexes,
             })
             .is_err()
         );
@@ -1797,7 +1826,7 @@ fn relocated_storage_preserves_identity_and_updates_only_the_snapshot() {
         ..StorageSearchFilter::default()
     };
     let hits = writer
-        .search_fts("orchard", 10, Some(&filter))
+        .search_fts(ContentKind::Text, "orchard", 10, Some(&filter))
         .expect("directory query");
     assert_eq!(hits.len(), 1);
     let stored = writer.load_search_hits(&hits).expect("entity");
@@ -1855,40 +1884,13 @@ fn relocated_storage_preserves_identity_and_updates_only_the_snapshot() {
 #[test]
 fn native_path_schema_requires_rebuild_without_mutating_collections() {
     let root = tempfile::tempdir().expect("workspace");
-    let bytes =
-        serde_json::to_vec(&serde_json::json!({"embeddings": [schema()]})).expect("old schema");
     let path = root.path().join("schema.json");
-    fs::write(&path, &bytes).expect("old descriptor");
-    for options in [
-        WorkspaceIndexStorageOptions::ReadOnly {
-            graph_enabled: true,
-            storage_path: root.path().to_owned(),
-        },
-        WorkspaceIndexStorageOptions::ReadWrite {
-            graph_enabled: false,
-            storage_path: root.path().to_owned(),
-            embeddings: vec![schema()],
-        },
+    for record in [
+        serde_json::json!({"embeddings": [schema()]}),
+        serde_json::json!({"path_encoding": "components", "embeddings": [schema()]}),
     ] {
-        let error = IndexStore::open(options)
-            .err()
-            .expect("reject old encoding");
-        assert!(error.message().contains("rebuild the index"));
-        assert_eq!(fs::read(&path).expect("unchanged descriptor"), bytes);
-        assert!(!root.path().join("files").exists());
-    }
-}
-
-#[test]
-fn missing_or_malformed_collections_are_not_recreated() {
-    let root = tempfile::tempdir().expect("workspace");
-    open(root.path(), false).close().expect("create index");
-    let missing = root.path().join("directories");
-    fs::remove_dir_all(&missing).expect("remove collection");
-    for malformed in [false, true] {
-        if malformed {
-            fs::write(&missing, b"not a directory").expect("invalid collection entry");
-        }
+        let bytes = serde_json::to_vec(&record).expect("old schema");
+        fs::write(&path, &bytes).expect("old descriptor");
         for options in [
             WorkspaceIndexStorageOptions::ReadOnly {
                 graph_enabled: true,
@@ -1897,21 +1899,79 @@ fn missing_or_malformed_collections_are_not_recreated() {
             WorkspaceIndexStorageOptions::ReadWrite {
                 graph_enabled: false,
                 storage_path: root.path().to_owned(),
-                embeddings: vec![schema()],
+                indexes: vec![text_index()],
             },
         ] {
             let error = IndexStore::open(options)
                 .err()
-                .expect("reject incomplete storage");
+                .expect("reject old encoding");
+            assert!(error.message().contains("rebuild the index"));
+            assert_eq!(fs::read(&path).expect("unchanged descriptor"), bytes);
+            assert!(!root.path().join("files").exists());
+        }
+    }
+}
+
+#[test]
+fn preflight_inspects_the_live_writer_without_creating_storage() {
+    let root = tempfile::tempdir().expect("workspace");
+    let workspace = WorkspaceLayout::new(root.path().join(".zvec-grep")).expect("layout");
+    let layout = IndexLayout::new(workspace.index_dir());
+    assert!(
+        IndexStore::inspect_published(&workspace, |store| store.populated_kinds(&[]))
+            .expect("empty workspace")
+            .is_none()
+    );
+    assert!(!layout.lock_path().exists());
+    fs::create_dir_all(layout.root()).expect("index root");
+    let store = open(layout.root(), false);
+    let (file, entry) = file_at(&store, "doc.txt");
+    store
+        .replace_fixture_file(&file, &[entry])
+        .expect("index document");
+    assert_eq!(
+        IndexStore::inspect_published(&workspace, |store| store.populated_kinds(&[]))
+            .expect("inspect writer"),
+        Some(BTreeSet::from([ContentKind::Text]))
+    );
+    store.close().expect("close writer");
+}
+
+#[test]
+fn missing_or_malformed_collections_are_not_recreated() {
+    for collection in ["directories", "text"] {
+        let root = tempfile::tempdir().expect("workspace");
+        open(root.path(), false).close().expect("create index");
+        let missing = root.path().join(collection);
+        fs::remove_dir_all(&missing).expect("remove collection");
+        for malformed in [false, true] {
             if malformed {
-                assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
-                assert_eq!(
-                    fs::read(&missing).expect("unchanged entry"),
-                    b"not a directory"
-                );
-            } else {
-                assert!(error.message().contains("rebuild the index"));
-                assert!(!missing.exists());
+                fs::write(&missing, b"not a directory").expect("invalid collection entry");
+            }
+            for options in [
+                WorkspaceIndexStorageOptions::ReadOnly {
+                    graph_enabled: true,
+                    storage_path: root.path().to_owned(),
+                },
+                WorkspaceIndexStorageOptions::ReadWrite {
+                    graph_enabled: false,
+                    storage_path: root.path().to_owned(),
+                    indexes: vec![text_index()],
+                },
+            ] {
+                let error = IndexStore::open(options)
+                    .err()
+                    .expect("reject incomplete storage");
+                if malformed {
+                    assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
+                    assert_eq!(
+                        fs::read(&missing).expect("unchanged entry"),
+                        b"not a directory"
+                    );
+                } else {
+                    assert!(error.message().contains("rebuild the index"));
+                    assert!(!missing.exists());
+                }
             }
         }
     }
@@ -1943,7 +2003,7 @@ fn critical_storage_symlinks_are_rejected_before_opening_the_target() {
         let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: false,
             storage_path: index,
-            embeddings: vec![schema()],
+            indexes: vec![text_index()],
         })
         .err()
         .expect("reject storage alias");
@@ -2033,7 +2093,6 @@ fn index_code_file(
         ..graph
     };
     let fixture = FixtureEntity {
-        model: entry.model,
         vector: entry.vector,
         fts_text: entry.fts_text,
         entity,
@@ -2356,7 +2415,7 @@ fn resolver_returns_an_empty_sweep_when_the_workspace_has_no_graph() {
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.path().to_owned(),
         graph_enabled: false,
-        embeddings: vec![schema()],
+        indexes: vec![text_index()],
     })
     .expect("open graph-free storage");
     let sweep = resolve_pending(&storage, None, None)
@@ -2447,7 +2506,6 @@ fn resolver_keeps_self_receiver_pending_when_the_member_belongs_to_another_class
     let fixtures: Vec<FixtureEntity> = domain_entities
         .into_iter()
         .map(|entity| FixtureEntity {
-            model: entry.model.clone(),
             vector: entry.vector.clone(),
             fts_text: entry.fts_text.clone(),
             entity,

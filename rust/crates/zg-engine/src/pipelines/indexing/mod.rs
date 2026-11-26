@@ -7,7 +7,9 @@ mod input_budget;
 mod model_progress;
 pub(crate) mod pipeline;
 mod preprocessor;
+mod routing;
 pub(crate) mod service;
+pub(crate) use routing::embedding_requests;
 pub(crate) mod setup;
 pub(crate) mod storage;
 

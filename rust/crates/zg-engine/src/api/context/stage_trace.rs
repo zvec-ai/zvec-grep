@@ -4,12 +4,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Range, TextRange};
+use crate::domain::{ByteRange, Range, TextRange};
 
 /// A single query group's stage observations. Disabled by default and omitted
 /// from ordinary results; transports decide how to deliver the diagnostic data.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StageTrace {
+    /// Kind tables searched by this query group and score space.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<crate::api::context::options::ContentKind>,
     pub(crate) version: u32,
     pub(crate) group_id: String,
     pub(crate) limit: usize,
@@ -54,10 +57,7 @@ impl ObservedEntity {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StageRange {
     Full,
-    Byte {
-        start_offset: u64,
-        end_offset: u64,
-    },
+    Byte(ByteRange),
     Text(TextRange),
     Pdf {
         pages: Vec<u32>,
@@ -68,38 +68,20 @@ pub(crate) enum StageRange {
 
 impl StageRange {
     pub(crate) fn from_location(range: Range, offsets: Option<(u64, u64)>) -> Self {
-        let mut range = Self::from(range);
-        if let (
-            Self::Pdf {
-                start_byte_offset,
-                end_byte_offset,
-                ..
-            },
-            Some((start, end)),
-        ) = (&mut range, offsets)
-        {
-            *start_byte_offset =
-                usize::try_from(start).expect("offset originates from in-memory text");
-            *end_byte_offset = usize::try_from(end).expect("offset originates from in-memory text");
-        }
-        range
-    }
-}
-
-impl From<Range> for StageRange {
-    fn from(range: Range) -> Self {
         match range {
             Range::Full => Self::Full,
-            Range::Byte(range) => Self::Byte {
-                start_offset: range.start_offset(),
-                end_offset: range.end_offset(),
-            },
+            Range::Byte(range) => Self::Byte(range),
             Range::Text(range) => Self::Text(range),
-            Range::Pdf(location) => Self::Pdf {
-                pages: location.page_numbers(),
-                start_byte_offset: 0,
-                end_byte_offset: 0,
-            },
+            Range::Pdf(location) => {
+                let (start, end) = offsets.unwrap_or_default();
+                Self::Pdf {
+                    pages: location.page_numbers(),
+                    start_byte_offset: usize::try_from(start)
+                        .expect("offset originates from in-memory text"),
+                    end_byte_offset: usize::try_from(end)
+                        .expect("offset originates from in-memory text"),
+                }
+            }
         }
     }
 }
@@ -128,6 +110,7 @@ pub(crate) struct StagePoolSizes {
 mod tests {
     use super::*;
     use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+    use serde_json::json;
 
     #[test]
     fn pdf_trace_preserves_pages_and_document_offsets_without_block_payloads() {
@@ -165,5 +148,32 @@ mod tests {
             serde_json::from_value::<StageRange>(encoded).expect("deserialize PDF trace"),
             range
         );
+    }
+
+    #[test]
+    fn trace_ranges_preserve_json_and_reject_reversed_bytes() {
+        let mut trace = serde_json::to_value(ObservedEntity::new(None, true)).expect("trace JSON");
+        for range in [
+            json!("full"),
+            json!({"byte": {"start_offset": 3, "end_offset": 9}}),
+            json!({"byte": {"start_offset": 3, "end_offset": 3}}),
+            json!({"text": {
+                "start": {"byte_offset": 3, "line": 1, "byte_column": 3},
+                "end": {"byte_offset": 9, "line": 1, "byte_column": 9}
+            }}),
+        ] {
+            trace["range"] = range.clone();
+            trace["loaded_range"] = range;
+            let observed: ObservedEntity = serde_json::from_value(trace.clone()).expect("decode");
+            assert_eq!(serde_json::to_value(observed).expect("encode"), trace);
+        }
+        for field in ["range", "loaded_range"] {
+            let mut invalid = trace.clone();
+            invalid[field] = json!({"byte": {"start_offset": 9, "end_offset": 3}});
+            assert!(
+                serde_json::from_value::<ObservedEntity>(invalid).is_err(),
+                "{field} accepted reversed byte offsets"
+            );
+        }
     }
 }

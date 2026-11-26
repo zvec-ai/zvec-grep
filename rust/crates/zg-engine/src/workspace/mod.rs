@@ -12,8 +12,7 @@ pub(crate) mod manifest;
 // Compatibility version of persisted index metadata and storage. Every manifest
 // declares it, including uninitialized and disabled workspaces without an index.
 // Incompatible formats require an explicit rebuild instead of an implicit upgrade.
-// Version 3 adds PDF provenance, including raw rectangles and page dimensions,
-// to canonical entity source ranges.
+// Version 3 separates content indexes by kind and records PDF page provenance.
 pub(crate) const CURRENT_INDEX_VERSION: u32 = 3;
 
 /// Finds the nearest workspace at or above the given directory.

@@ -163,12 +163,21 @@ pub mod result {
         pub root: PathBuf,
         pub scan: ScanRules,
         pub policy: WorkspaceIndexPolicy,
-        /// The workspace's text embedding model.
+        /// Workspace default inherited by content kinds without an override.
         pub embedding: Option<WorkspaceIndexEmbedding>,
+        #[serde(default)]
+        pub content_indexes: Vec<WorkspaceContentIndex>,
         pub fts: Option<WorkspaceIndexFts>,
         pub index_version: Option<u32>,
         pub created_epoch_ms: u64,
         pub updated_epoch_ms: u64,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct WorkspaceContentIndex {
+        pub kind: crate::api::index::options::ContentKind,
+        pub inherited: bool,
+        pub embedding: WorkspaceIndexEmbedding,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -257,6 +266,20 @@ impl result::WorkspaceIndexInfo {
                 .index()
                 .descriptor()
                 .map(|index| index.default_embedding_model().into()),
+            content_indexes: workspace
+                .index()
+                .descriptor()
+                .map_or_else(Vec::new, |descriptor| {
+                    descriptor
+                        .content_indexes()
+                        .iter()
+                        .map(|index| result::WorkspaceContentIndex {
+                            kind: index.kind,
+                            inherited: !descriptor.embedding_routes().contains_key(&index.kind),
+                            embedding: (&index.embedding).into(),
+                        })
+                        .collect()
+                }),
             fts: workspace
                 .index()
                 .descriptor()
@@ -301,6 +324,7 @@ impl From<&crate::domain::EmbeddingModelInfo> for result::WorkspaceIndexEmbeddin
 #[cfg(test)]
 mod tests {
     use super::{InfoOptions, InfoResult, result::*};
+    use crate::workspace::CURRENT_INDEX_VERSION;
 
     #[test]
     fn stored_counts_require_an_explicit_request() {
@@ -359,7 +383,9 @@ mod tests {
         InfoResult {
             root: "/workspace".into(),
             indexed: true,
-            compatibility: IndexCompatibility::Compatible { version: 2 },
+            compatibility: IndexCompatibility::Compatible {
+                version: CURRENT_INDEX_VERSION,
+            },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/index".into(),
@@ -445,9 +471,9 @@ mod tests {
     fn incompatibility_takes_precedence_over_policy_and_cached_stats() {
         let mut info = indexed_info();
         info.compatibility = IndexCompatibility::RebuildRequired {
-            actual_version: Some(1),
-            expected_version: 2,
-            reason: "unsupported index version 1; expected 2".into(),
+            actual_version: Some(2),
+            expected_version: CURRENT_INDEX_VERSION,
+            reason: format!("unsupported index version 2; expected {CURRENT_INDEX_VERSION}"),
         };
         assert_eq!(info.index_status(), IndexStatus::RebuildRequired);
         info.indexed = false;
@@ -470,9 +496,11 @@ mod tests {
         );
         assert!(IndexCompatibility::Unbuilt.ensure_compatible().is_ok());
         assert!(
-            IndexCompatibility::Compatible { version: 2 }
-                .ensure_compatible()
-                .is_ok()
+            IndexCompatibility::Compatible {
+                version: CURRENT_INDEX_VERSION
+            }
+            .ensure_compatible()
+            .is_ok()
         );
     }
 
@@ -480,13 +508,13 @@ mod tests {
     fn compatibility_serialization_preserves_missing_version_and_rebuild_reason() {
         let compatibility = IndexCompatibility::RebuildRequired {
             actual_version: None,
-            expected_version: 2,
+            expected_version: CURRENT_INDEX_VERSION,
             reason: "index version is missing".into(),
         };
         let value = serde_json::to_value(&compatibility).expect("compatibility");
         assert_eq!(value["status"], "rebuild_required");
         assert!(value["actual_version"].is_null());
-        assert_eq!(value["expected_version"], 2);
+        assert_eq!(value["expected_version"], CURRENT_INDEX_VERSION);
         assert_eq!(
             serde_json::from_value::<IndexCompatibility>(value).expect("round trip"),
             compatibility

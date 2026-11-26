@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 use zvec_rust::{Collection, CollectionSchema, DataType, Doc, SearchQuery};
 
@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     EngineError, EngineResult,
-    domain::{DirectoryId, FileId, FileIndexStatus, FileRecord, SourcePath},
+    domain::{DirectoryId, FileId, FileIndexStatus, FileRecord, IndexLayout, SourcePath},
 };
 
 mod codec;
@@ -38,14 +38,14 @@ impl Files {
         &self.collection
     }
 
-    pub(super) fn open(root: &Path, read_only: bool) -> EngineResult<Self> {
+    pub(super) fn open(layout: IndexLayout<'_>, read_only: bool) -> EngineResult<Self> {
         let ids = if read_only {
             None
         } else {
-            Some(FileIds::open(root)?)
+            Some(FileIds::open(layout)?)
         };
         let mut files = Self {
-            collection: open_collection(&root.join("files"), &files_schema()?, read_only)?,
+            collection: open_collection(&layout.files_dir(), &files_schema()?, read_only)?,
             ids,
         };
         if !read_only {

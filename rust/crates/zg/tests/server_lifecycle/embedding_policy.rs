@@ -96,7 +96,7 @@ fn assert_model(guard: &ServerGuard, root: &Path, model: &str) -> Result<(), Box
 }
 
 #[test]
-fn embedding_policy_matches_direct_server_and_mcp_with_protocol_v2() -> Result<(), Box<dyn Error>> {
+fn embedding_policy_matches_direct_server_and_mcp_with_protocol_v3() -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;

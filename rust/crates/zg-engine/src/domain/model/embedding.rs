@@ -62,26 +62,33 @@ impl EmbeddingModelInfo {
     }
 
     /// Check whether two embedding models use compatible embedding spaces.
-    pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
-        let reason = if self.model.provider() != other.model.provider()
-            || self.model.name() != other.model.name()
+    pub(crate) fn ensure_index_compatible(&self, requested: &Self) -> EngineResult<()> {
+        let message = if self.model.provider() != requested.model.provider()
+            || self.model.name() != requested.model.name()
         {
-            "model references differ".to_owned()
-        } else if self.dimension != other.dimension {
             format!(
-                "dimensions differ ({} vs {})",
-                self.dimension, other.dimension
+                "embedding model would change from {} to {}",
+                self.model.reference(),
+                requested.model.reference(),
             )
-        } else if self.metric != other.metric {
-            format!("metrics differ ({:?} vs {:?})", self.metric, other.metric)
+        } else if self.dimension != requested.dimension {
+            format!(
+                "vector dimension for {} would change from {} to {}",
+                self.model.reference(),
+                self.dimension,
+                requested.dimension,
+            )
+        } else if self.metric != requested.metric {
+            format!(
+                "distance metric for {} would change from {:?} to {:?}",
+                self.model.reference(),
+                self.metric,
+                requested.metric,
+            )
         } else {
             return Ok(());
         };
-        Err(EngineError::invalid_argument(format!(
-            "embedding models {} and {} are incompatible: {reason}",
-            self.model.reference(),
-            other.model.reference(),
-        )))
+        Err(EngineError::invalid_argument(message))
     }
 }
 

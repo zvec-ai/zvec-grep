@@ -1,6 +1,7 @@
 use super::super::zvec::{WRITE_BATCH, initialize};
 use super::*;
 use crate::domain::FileSnapshot;
+use std::path::Path;
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
     FileRecord::new(
@@ -69,7 +70,7 @@ fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads
     let temporary = tempfile::tempdir().expect("temporary storage");
     let storage_path = temporary.path().join("storage");
     std::fs::create_dir(&storage_path).expect("storage directory");
-    let store = Files::open(&storage_path, false).expect("open storage");
+    let store = Files::open(IndexLayout::new(&storage_path), false).expect("open storage");
     let mut expected = Vec::new();
     let mut expected_attributes = Vec::new();
     let mut docs = Vec::new();
@@ -112,7 +113,8 @@ fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads
 fn exact_path_lookup_batches_selected_projections_without_allocating_missing_ids() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
-    let mut files = Files::open(root.path(), false).expect("files");
+    let layout = IndexLayout::new(root.path());
+    let mut files = Files::open(layout, false).expect("files");
     let mut paths = (0..PATH_LOOKUP_BATCH + 2)
         .map(|index| PathBuf::from(format!("src/file-{index}.rs")))
         .collect::<Vec<_>>();
@@ -160,7 +162,7 @@ fn exact_path_lookup_batches_selected_projections_without_allocating_missing_ids
     files.flush().expect("flush sources");
     drop(files);
 
-    let reader = Files::open(root.path(), true).expect("open read-only sources");
+    let reader = Files::open(layout, true).expect("open read-only sources");
     assert_eq!(
         reader.lookup_paths(&requested).expect("read-only lookup"),
         expected
@@ -175,7 +177,7 @@ fn exact_path_lookup_batches_selected_projections_without_allocating_missing_ids
 fn exact_path_lookup_rejects_duplicate_and_conflicting_identities() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
-    let files = Files::open(root.path(), false).expect("files");
+    let files = Files::open(IndexLayout::new(root.path()), false).expect("files");
     let requested = HashSet::from([PathBuf::from("same.rs")]);
     let first = encode_file_doc(&file(0, "same.rs"), &[]).expect("first source");
     let duplicate = encode_file_doc(&file(1, "same.rs"), &[]).expect("duplicate source");
@@ -223,7 +225,8 @@ fn exact_path_lookup_preserves_non_unicode_identity_in_read_only_storage() {
 
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
-    let mut files = Files::open(root.path(), false).expect("files");
+    let layout = IndexLayout::new(root.path());
+    let mut files = Files::open(layout, false).expect("files");
     let native = PathBuf::from(std::ffi::OsString::from_vec(b"src/\xff.rs".to_vec()));
     let paths = [native.clone(), PathBuf::from("src/\u{fffd}.rs")];
     let ids = files
@@ -235,7 +238,7 @@ fn exact_path_lookup_preserves_non_unicode_identity_in_read_only_storage() {
     files.flush().expect("flush sources");
     drop(files);
 
-    let reader = Files::open(root.path(), true).expect("read-only sources");
+    let reader = Files::open(layout, true).expect("read-only sources");
     assert_eq!(
         reader
             .lookup_paths(&HashSet::from([native.clone()]))
@@ -351,7 +354,7 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
 fn deleting_preserves_file_projections_until_record_removal() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
-    let mut files = Files::open(root.path(), false).expect("files");
+    let mut files = Files::open(IndexLayout::new(root.path()), false).expect("files");
     let path = PathBuf::from("src/nested/main.rs");
     let id = files
         .resolve_ids(std::slice::from_ref(&path))
@@ -408,16 +411,17 @@ fn deleting_preserves_file_projections_until_record_removal() {
 fn reader_opens_without_loading_the_file_identity_map() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
+    let layout = IndexLayout::new(root.path());
     {
-        let files = Files::open(root.path(), false).expect("files");
+        let files = Files::open(layout, false).expect("files");
         let mut doc = encode_file_doc(&file(1, "main.rs"), &[]).expect("source");
         doc.add_string("path", "invalid native path")
             .expect("invalid projection");
         write_docs(&files.collection, &[doc], "write source").expect("source");
         files.flush().expect("flush");
     }
-    let reader = Files::open(root.path(), true).expect("reader does not scan source identities");
+    let reader = Files::open(layout, true).expect("reader does not scan source identities");
     assert!(reader.list_paths().is_err());
     drop(reader);
-    assert!(Files::open(root.path(), false).is_err());
+    assert!(Files::open(layout, false).is_err());
 }

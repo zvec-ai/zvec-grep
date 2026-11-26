@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     EngineError,
     domain::WorkspaceLayout,
-    utils::{directory_exists, reject_symlink},
+    utils::{directory_exists, file_exists, reject_symlink},
     workspace::index,
 };
 
@@ -204,20 +204,44 @@ pub(crate) fn try_acquire_workspace_read(
 
 /// Probe without creating paths that may have been removed with the workspace.
 pub(crate) fn can_retain_read_cache(layout: &WorkspaceLayout) -> bool {
-    if !directory_exists(layout.storage_dir()).is_ok_and(|exists| exists)
-        || reject_symlink(layout.locks_dir()).is_err()
-        || reject_symlink(layout.workspace_lock_path()).is_err()
-    {
-        return false;
-    }
-    let Ok(file) = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(layout.workspace_lock_path())
-    else {
-        return false;
+    open_existing_workspace_lock(layout)
+        .is_ok_and(|file| file.is_some_and(|file| file.try_lock_shared().is_ok()))
+}
+
+/// Try shared admission without creating lock files or recovering an interrupted publication.
+pub(crate) fn try_lock_existing_workspace_read(
+    layout: &WorkspaceLayout,
+) -> Result<Option<File>, EngineError> {
+    let Some(file) = open_existing_workspace_lock(layout)? else {
+        return Ok(None);
     };
-    file.try_lock_shared().is_ok()
+    // Observe the same writer-priority barrier as normal readers. Keep the intent
+    // held through shared admission. A writer always creates it before queuing.
+    let intent = open_existing_lock(layout.write_intent_lock_path())?;
+    if let Some(intent) = &intent
+        && !try_lock_handle(intent, LockMode::Exclusive)?
+    {
+        return Ok(None);
+    }
+    Ok(try_lock_handle(&file, LockMode::Shared)?.then_some(file))
+}
+
+fn open_existing_workspace_lock(layout: &WorkspaceLayout) -> Result<Option<File>, EngineError> {
+    if !directory_exists(layout.storage_dir())? || !directory_exists(layout.locks_dir())? {
+        return Ok(None);
+    }
+    open_existing_lock(layout.workspace_lock_path())
+}
+
+fn open_existing_lock(path: &Path) -> Result<Option<File>, EngineError> {
+    if !file_exists(path)? {
+        return Ok(None);
+    }
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(EngineError::from_io("open workspace read lock", &error)),
+    }
 }
 
 fn try_recover_publication(
@@ -550,6 +574,12 @@ mod tests {
             }
         });
         pending_writer(source_root, &layout).await;
+        assert!(
+            try_lock_existing_workspace_read(&layout)
+                .expect("inspect queued writer")
+                .is_none(),
+            "a preflight inspection must yield to a queued writer"
+        );
         signal.cancel();
         assert_eq!(
             writer

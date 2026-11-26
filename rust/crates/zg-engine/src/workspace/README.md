@@ -65,9 +65,10 @@ embedding again.
 ## Settings and relocation
 
 Explicit index device and model-cache options become workspace defaults.
-Omitted options preserve them. The model cache is shared by embedding and PDF
-layout models and survives changing embedding models during a rebuild;
-endpoints and credentials remain per model. Settings resolve from explicit
+Omitted options preserve them. All embedding routes and PDF layout models use
+one workspace cache directory, which survives a model change during a rebuild.
+Explicit cache paths in the same indexing request must agree. Endpoints and
+credentials are saved per model. Settings resolve from explicit
 options, environment, workspace defaults, global configuration, then backend
 defaults.
 Query overrides remain temporary and must not be written back by automatic
@@ -85,6 +86,9 @@ Explicit indexing API keys are encrypted in the manifest. Inherited environment
 or global credentials and query-only keys are not persisted.
 `credentials.key` must travel with the index; copying the workspace also copies
 access to its saved credentials.
+
+Each saved key belongs to one model and endpoint. Changing that model's
+endpoint clears its old key unless the index request supplies a replacement.
 
 `authorization.json` records remote-service consent separately from credentials.
 A grant binds the canonical source root, username, model and endpoint. Changes

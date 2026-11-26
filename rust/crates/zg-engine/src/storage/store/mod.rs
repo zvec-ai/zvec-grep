@@ -1,7 +1,7 @@
 //! Index lifecycle and operations that span multiple tables.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
@@ -13,11 +13,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     EngineError, EngineResult,
     domain::{
-        Entity, EntityId, EntityMetadata, FileId, FileIndexStatus, FileRecord, Language, Range,
+        ContentIndex, ContentKind, Entity, EntityId, EntityMetadata, FileId, FileIndexStatus,
+        FileRecord, IndexLayout, Language, Range, WorkspaceLayout,
     },
     utils::{
         atomic_write as write_record, directory_exists, ensure_directory, file_exists,
-        reject_symlink, sync_directory,
+        sync_directory,
     },
 };
 
@@ -46,7 +47,7 @@ static STORES: OnceLock<StoreRegistry> = OnceLock::new();
 
 struct SharedStore {
     state: Mutex<StoreState>,
-    schema: Vec<EmbeddingModelInfo>,
+    schema: Vec<ContentIndex>,
     read_only: bool,
     graph_enabled: bool,
     // The native handles must close before the operating-system lock is released.
@@ -88,7 +89,7 @@ pub(crate) struct IndexedSourceEntity {
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
     path_encoding: PathEncoding,
-    embeddings: Vec<EmbeddingModelInfo>,
+    indexes: Vec<ContentIndex>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,47 +99,46 @@ enum PathEncoding {
 }
 
 impl SchemaRecord {
-    fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
+    fn new(indexes: &[ContentIndex]) -> Self {
         Self {
             path_encoding: PathEncoding::Components,
-            embeddings: embeddings.to_vec(),
+            indexes: indexes.to_vec(),
         }
     }
 
-    fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
-        validate_models(&self.embeddings).map_err(|error| {
-            EngineError::storage_failure(format!(
-                "invalid stored embedding model information: {error}"
-            ))
+    fn indexes(self) -> EngineResult<Vec<ContentIndex>> {
+        validate_indexes(&self.indexes).map_err(|error| {
+            EngineError::storage_failure(format!("invalid stored content index: {error}"))
         })?;
-        Ok(self.embeddings)
+        Ok(self.indexes)
     }
 }
 
-fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
-    if embeddings.is_empty() {
+fn validate_indexes(indexes: &[ContentIndex]) -> EngineResult<()> {
+    if indexes.is_empty() {
         return Err(EngineError::invalid_argument(
-            "at least one embedding model is required",
+            "at least one content index is required",
         ));
     }
-    let mut models = std::collections::HashSet::new();
-    let mut collections = HashSet::new();
-    for embedding in embeddings {
-        if !(1..=20_000).contains(&embedding.dimension()) {
+    let mut kinds = HashSet::new();
+    for index in indexes {
+        if !kinds.insert(index.kind) {
+            return Err(EngineError::invalid_argument(format!(
+                "duplicate content index for {}",
+                index.kind.as_str()
+            )));
+        }
+        if !index.embedding.model().supports_content(index.kind) {
+            return Err(EngineError::invalid_argument(format!(
+                "embedding model {} does not support {}",
+                index.embedding.model().reference(),
+                index.kind.as_str()
+            )));
+        }
+        if !(1..=20_000).contains(&index.embedding.dimension()) {
             return Err(EngineError::invalid_argument(
                 "embedding dimension must be in 1..=20,000",
             ));
-        }
-        if !models.insert(embedding.model().reference()) {
-            return Err(EngineError::invalid_argument(
-                "embedding model references must be unique",
-            ));
-        }
-        let collection = fragments::fragment_collection_name(embedding);
-        if !collections.insert(collection.clone()) {
-            return Err(EngineError::invalid_argument(format!(
-                "embedding models share index collection {collection}; use different models"
-            )));
         }
     }
     Ok(())
@@ -151,9 +151,68 @@ impl IndexStore {
     }
 
     pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
+        Self::open_with(options, false)
+    }
+
+    /// Read the published state for consent preflight without creating files or recovering WAL.
+    /// A busy index is inspected again by the operation holding workspace admission.
+    pub(crate) fn inspect_published<T>(
+        layout: &WorkspaceLayout,
+        inspect: impl FnOnce(&Self) -> EngineResult<T>,
+    ) -> EngineResult<Option<T>> {
+        let inspect_state = || {
+            let access = crate::workspace::lock::try_lock_existing_workspace_read(layout)?;
+            let storage = if access.is_some() {
+                if crate::workspace::index::needs_recovery(layout)? {
+                    return Ok(None);
+                }
+                Self::open_with(
+                    WorkspaceIndexStorageOptions::ReadOnly {
+                        storage_path: layout.index_dir().to_owned(),
+                        graph_enabled: false,
+                    },
+                    true,
+                )?
+            } else {
+                // A daemon writer can already own workspace admission. Borrow only its
+                // live store; never race it by opening native collections from disk.
+                let path = fs::canonicalize(layout.index_dir()).map_err(|error| {
+                    io_error("locate index directory", layout.index_dir(), &error)
+                })?;
+                let Some(shared) = registry()?
+                    .get(&path)
+                    .and_then(Weak::upgrade)
+                    .filter(|s| !s.read_only)
+                else {
+                    return Ok(None);
+                };
+                Self {
+                    shared: Mutex::new(Some(shared)),
+                    read_only: true,
+                }
+            };
+            inspect(&storage).map(Some)
+        };
+        match inspect_state() {
+            Err(error)
+                if matches!(
+                    error.code(),
+                    EngineError::NOT_FOUND
+                        | EngineError::RESOURCE_BUSY
+                        | EngineError::RESOURCE_CLOSED
+                        | WAL_RECOVERY_REQUIRED
+                ) =>
+            {
+                Ok(None)
+            }
+            result => result,
+        }
+    }
+
+    fn open_with(options: WorkspaceIndexStorageOptions, inspect_only: bool) -> EngineResult<Self> {
         let graph_enabled = options.graph_enabled();
-        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
-            validate_models(embeddings)?;
+        if let WorkspaceIndexStorageOptions::ReadWrite { indexes, .. } = &options {
+            validate_indexes(indexes)?;
         }
         initialize()?;
         let home = options.storage_path();
@@ -176,7 +235,9 @@ impl IndexStore {
             .map_err(|error| io_error("locate index directory", home, &error))?;
         let mut registry = registry()?;
         if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
-            if read_only && shared.read_only && graph_enabled == shared.graph_enabled {
+            if inspect_only
+                || (read_only && shared.read_only && graph_enabled == shared.graph_enabled)
+            {
                 return Ok(Self {
                     shared: Mutex::new(Some(shared)),
                     read_only,
@@ -186,48 +247,36 @@ impl IndexStore {
                 "workspace storage is already open",
             ));
         }
-        let (mut lock, mut schema, new_storage) = prepare_storage(&path, options.clone())?;
-        let optimize_marker = path.join("optimize.pending");
+        let layout = IndexLayout::new(&path);
+        let (mut lock, mut schema, new_storage) =
+            prepare_storage(layout, options.clone(), !inspect_only)?;
+        let optimize_marker = layout.optimize_marker_path();
         let needs_optimize = file_exists(&optimize_marker)?;
-        let graph_path = path.join("graph").join("graph.sqlite");
-        let graph = if graph_enabled {
-            let mode = if read_only {
-                OpenMode::ReadOnly
-            } else if new_storage {
-                OpenMode::Create
-            } else {
-                OpenMode::ReadWrite
-            };
-            let graph = open_graph(&graph_path, mode);
-            if read_only {
-                // Graph failures do not prevent canonical text/vector reads.
-                graph
-            } else {
-                // Existing files will skip extraction when unchanged, so an empty
-                // replacement graph cannot restore their missing relationships.
-                let graph = graph?;
-                if new_storage {
-                    sync_directory(&path.join("graph"))?;
-                }
-                Ok(graph)
-            }
-        } else {
+        let graph = if !graph_enabled {
             Err(graph_disabled())
+        } else if read_only {
+            // Graph failures do not prevent canonical text/vector reads.
+            open_graph(layout, OpenMode::ReadOnly)
+        } else if new_storage {
+            let graph = open_graph(layout, OpenMode::Create)?;
+            sync_directory(&layout.graph_dir())?;
+            Ok(graph)
+        } else {
+            // Unchanged files skip extraction and cannot restore a missing graph.
+            Ok(open_graph(layout, OpenMode::ReadWrite)?)
         }
         .map_err(EngineError::into_report);
-        let tables = open_tables(&path, &schema, read_only);
+        let tables = open_tables(layout, &schema, read_only);
         let (files, directories, entities, fragments) = match tables {
-            Err(error) if read_only && error.code() == WAL_RECOVERY_REQUIRED => {
+            Err(error) if read_only && !inspect_only && error.code() == WAL_RECOVERY_REQUIRED => {
                 // open_tables has dropped every partial native reader.
-                (lock, schema) = recover_wal(&path, options, lock)?;
-                open_tables(&path, &schema, true)?
+                (lock, schema) = recover_wal(layout, options, lock)?;
+                open_tables(layout, &schema, true)?
             }
             result => result?,
         };
         if !read_only {
             directories.load()?;
-        }
-        if !read_only {
             // Repeat the same range after failures that leave directories in place.
             sync_directory(&path)?;
             if let Some(outer) = outer {
@@ -250,7 +299,11 @@ impl IndexStore {
             graph_enabled,
             _lock: lock,
         });
-        registry.insert(path, Arc::downgrade(&shared));
+        // An inspection holds workspace read admission itself. Leaving this short-lived,
+        // graph-independent reader out of the registry lets normal readers open concurrently.
+        if !inspect_only {
+            registry.insert(path, Arc::downgrade(&shared));
+        }
         Ok(Self {
             shared: Mutex::new(Some(shared)),
             read_only,
@@ -261,9 +314,8 @@ impl IndexStore {
         if !directory_exists(storage_path)? {
             return Ok(());
         }
-        let home = fs::canonicalize(storage_path)
+        let path = fs::canonicalize(storage_path)
             .map_err(|error| io_error("locate storage", storage_path, &error))?;
-        let path = home.clone();
         let mut registry = registry()?;
         if registry.get(&path).and_then(Weak::upgrade).is_some() {
             return Err(EngineError::resource_busy(
@@ -271,10 +323,10 @@ impl IndexStore {
             ));
         }
         // The caller's workspace write lock prevents new opens while this inner lock is closed.
-        drop(acquire_storage_lock(&home, false)?);
+        drop(acquire_storage_lock(IndexLayout::new(&path), false, true)?);
         fs::remove_dir_all(&path)
             .map_err(|error| io_error("delete workspace storage", &path, &error))?;
-        if let Some(parent) = home.parent() {
+        if let Some(parent) = path.parent() {
             sync_directory(parent)?;
         }
         registry.remove(&path);
@@ -288,6 +340,10 @@ impl IndexStore {
             .as_ref()
             .cloned()
             .ok_or_else(|| EngineError::resource_closed("workspace storage is closed"))
+    }
+
+    pub(crate) fn validate_vector_targets(&self, targets: &[ContentIndex]) -> EngineResult<()> {
+        ensure_targets_compatible(&self.shared()?.schema, targets)
     }
 
     fn read<T>(&self, operation: impl FnOnce(&StoreState) -> EngineResult<T>) -> EngineResult<T> {
@@ -318,6 +374,13 @@ impl IndexStore {
 
     pub(crate) fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
         self.read(|state| state.files.list())
+    }
+
+    pub(crate) fn populated_kinds(
+        &self,
+        excluded_files: &[FileId],
+    ) -> EngineResult<BTreeSet<ContentKind>> {
+        self.read(|state| state.fragments.populated_kinds(excluded_files))
     }
 
     pub(crate) fn count_fragments(&self) -> EngineResult<u64> {
@@ -392,22 +455,23 @@ impl IndexStore {
 
     pub(crate) fn search_fts(
         &self,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.read_snapshot(|view| view.search_fts(query, limit, filter))
+        self.read_snapshot(|view| view.search_fts(kind, query, limit, filter))
     }
 
     pub(crate) fn search_vector(
         &self,
-        model: &str,
+        kind: ContentKind,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
         let shared = self.shared()?;
-        validate_vector(vector, model_schema(&shared.schema, model)?)?;
+        validate_vector(vector, index_embedding(&shared.schema, kind)?)?;
         self.read(|state| {
             if limit == 0 || fragments::empty_filter(filter) {
                 return Ok(Vec::new());
@@ -415,7 +479,7 @@ impl IndexStore {
             let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
             state
                 .fragments
-                .search_vector(model, vector, limit, filter.as_deref())
+                .search_vector(kind, vector, limit, filter.as_deref())
         })
     }
 
@@ -592,34 +656,34 @@ impl IndexStore {
 }
 
 fn open_tables(
-    path: &Path,
-    schema: &[EmbeddingModelInfo],
+    layout: IndexLayout<'_>,
+    schema: &[ContentIndex],
     read_only: bool,
 ) -> EngineResult<(Files, Directories, Entities, Fragments)> {
     Ok((
-        Files::open(path, read_only)?,
-        Directories::open(path, read_only)?,
-        Entities::open(path, read_only)?,
-        Fragments::open(path, schema, read_only)?,
+        Files::open(layout, read_only)?,
+        Directories::open(layout, read_only)?,
+        Entities::open(layout, read_only)?,
+        Fragments::open(layout, schema, read_only)?,
     ))
 }
 
 fn recover_wal(
-    path: &Path,
+    layout: IndexLayout<'_>,
     options: WorkspaceIndexStorageOptions,
     shared_lock: File,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
+) -> EngineResult<(File, Vec<ContentIndex>)> {
     // Keep the caller's workspace read lock to prevent publication, but release
     // shared storage access before taking the exclusive recovery lock.
     drop(shared_lock);
-    let recovery_lock = acquire_storage_lock(path, false)?;
-    let (schema, _) = load_schema(path, options.clone())?;
-    for name in collection_names(&schema) {
-        recover_collection(&path.join(name))?;
+    let recovery_lock = acquire_storage_lock(layout, false, true)?;
+    let (schema, _) = load_schema(layout, options.clone())?;
+    for path in collection_paths(layout, &schema) {
+        recover_collection(&path)?;
     }
     drop(recovery_lock);
     // Do not retain an exclusive lock in a long-lived cached read session.
-    let (lock, schema, _) = prepare_storage(path, options)?;
+    let (lock, schema, _) = prepare_storage(layout, options, true)?;
     Ok((lock, schema))
 }
 
@@ -743,14 +807,15 @@ fn graph_missing() -> EngineError {
     )
 }
 
-fn open_graph(path: &Path, mode: OpenMode) -> EngineResult<SqliteGraphStorage> {
+fn open_graph(layout: IndexLayout<'_>, mode: OpenMode) -> EngineResult<SqliteGraphStorage> {
+    let path = layout.graph_db_path();
     let graph = if mode == OpenMode::Create {
-        SqliteGraphStorage::open(path, mode).map_err(graph_error)
+        SqliteGraphStorage::open(&path, mode).map_err(graph_error)
     } else {
-        match fs::metadata(path) {
-            Ok(_) => SqliteGraphStorage::open(path, mode).map_err(graph_error),
+        match fs::metadata(&path) {
+            Ok(_) => SqliteGraphStorage::open(&path, mode).map_err(graph_error),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(graph_missing()),
-            Err(error) => Err(io_error("inspect workspace graph", path, &error)),
+            Err(error) => Err(io_error("inspect workspace graph", &path, &error)),
         }
     };
     graph.map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild --graph`."))
@@ -835,7 +900,7 @@ fn validate_batch(
     file: &FileRecord,
     entities: &[Entity],
     entries: &[IndexedFragment],
-    schema: &[EmbeddingModelInfo],
+    schema: &[ContentIndex],
 ) -> EngineResult<()> {
     let mut entity_ids = HashSet::new();
     let mut fragment_ids = HashSet::new();
@@ -856,19 +921,22 @@ fn validate_batch(
     }
     fragments::validate_projections(entities, entries)?;
     for entry in entries {
-        validate_vector(&entry.vector, model_schema(schema, &entry.model)?)?;
+        validate_vector(&entry.vector, index_embedding(schema, entry.kind)?)?;
     }
     Ok(())
 }
 
-fn model_schema<'a>(
-    schemas: &'a [EmbeddingModelInfo],
-    model: &str,
-) -> EngineResult<&'a EmbeddingModelInfo> {
-    schemas
+fn index_embedding(
+    schema: &[ContentIndex],
+    kind: ContentKind,
+) -> EngineResult<&EmbeddingModelInfo> {
+    schema
         .iter()
-        .find(|schema| schema.model().reference() == model)
-        .ok_or_else(|| EngineError::invalid_argument(format!("unknown embedding model {model:?}")))
+        .find(|index| index.kind == kind)
+        .map(|index| &index.embedding)
+        .ok_or_else(|| {
+            EngineError::invalid_argument(format!("missing {} fragment collection", kind.as_str()))
+        })
 }
 
 fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<()> {
@@ -882,12 +950,24 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
     Ok(())
 }
 
-/// Returns the model schema and whether this call initialized an empty store.
+fn ensure_targets_compatible(
+    stored: &[ContentIndex],
+    targets: &[ContentIndex],
+) -> EngineResult<()> {
+    for index in targets {
+        index_embedding(stored, index.kind)
+            .and_then(|embedding| embedding.ensure_index_compatible(&index.embedding))
+            .map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild`."))?;
+    }
+    Ok(())
+}
+
+/// Returns the content-index schema and whether this call initialized an empty store.
 fn load_schema(
-    path: &Path,
+    layout: IndexLayout<'_>,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(Vec<EmbeddingModelInfo>, bool)> {
-    let descriptor = path.join("schema.json");
+) -> EngineResult<(Vec<ContentIndex>, bool)> {
+    let descriptor = layout.schema_path();
     if file_exists(&descriptor)? {
         let schema = read_json::<SchemaRecord>(&descriptor)
             .map_err(|error| {
@@ -895,28 +975,21 @@ fn load_schema(
                     "unsupported or invalid storage schema: {error}; rebuild the index"
                 ))
             })?
-            .embeddings()?;
-        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
-            if schema.len() != embeddings.len() {
+            .indexes()?;
+        if let WorkspaceIndexStorageOptions::ReadWrite { indexes, .. } = &options {
+            if schema.len() != indexes.len() {
                 return Err(EngineError::invalid_argument(
-                    "embedding model set changed; rebuild the index",
+                    "content index kinds changed; rebuild the index",
                 ));
             }
-            for stored in &schema {
-                let current =
-                    model_schema(embeddings, &stored.model().reference()).map_err(|_| {
-                        EngineError::invalid_argument(
-                            "embedding model set changed; rebuild the index",
-                        )
-                    })?;
-                stored.ensure_index_compatible(current).map_err(|error| {
-                    error.with_help("Rebuild the index with `zg --index --rebuild`.")
-                })?;
-            }
+            ensure_targets_compatible(&schema, indexes)?;
         }
-        for collection in collection_names(&schema) {
-            let collection_path = path.join(&collection);
+        for collection_path in collection_paths(layout, &schema) {
             if !directory_exists(&collection_path)? {
+                let collection = collection_path
+                    .strip_prefix(layout.root())
+                    .unwrap_or(&collection_path)
+                    .display();
                 return Err(EngineError::storage_failure(format!(
                     "index collection {collection} is missing; rebuild the index"
                 )));
@@ -924,12 +997,14 @@ fn load_schema(
         }
         return Ok((schema, false));
     }
+    let path = layout.root();
+    let lock_path = layout.lock_path();
     if fs::read_dir(path)
         .map_err(|error| io_error("inspect storage directory", path, &error))?
         .find(|entry| {
             entry
                 .as_ref()
-                .map_or(true, |entry| entry.file_name() != "storage.lock")
+                .map_or(true, |entry| entry.path() != lock_path)
         })
         .transpose()
         .map_err(|error| io_error("inspect storage entry", path, &error))?
@@ -939,27 +1014,33 @@ fn load_schema(
             "existing workspace storage is missing its schema; rebuild the index",
         ));
     }
-    let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = options else {
+    let WorkspaceIndexStorageOptions::ReadWrite { indexes, .. } = options else {
         return Err(EngineError::not_found(
             "workspace storage schema does not exist",
         ));
     };
-    validate_models(&embeddings)?;
     write_record(
         &descriptor,
-        &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
+        &serde_json::to_vec(&SchemaRecord::new(&indexes)).map_err(|error| json_error(&error))?,
     )?;
-    Ok((embeddings, true))
+    Ok((indexes, true))
 }
 
-fn collection_names(schema: &[EmbeddingModelInfo]) -> impl Iterator<Item = String> + '_ {
+fn collection_paths(
+    layout: IndexLayout<'_>,
+    schema: &[ContentIndex],
+) -> impl Iterator<Item = PathBuf> {
     [
-        "files".to_owned(),
-        "directories".to_owned(),
-        "entities".to_owned(),
+        layout.files_dir(),
+        layout.directories_dir(),
+        layout.entities_dir(),
     ]
     .into_iter()
-    .chain(schema.iter().map(fragments::fragment_collection_name))
+    .chain(
+        schema
+            .iter()
+            .map(move |index| layout.content_dir(index.kind)),
+    )
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
@@ -979,22 +1060,23 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 }
 
 fn prepare_storage(
-    path: &Path,
+    layout: IndexLayout<'_>,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>, bool)> {
-    let lock = acquire_storage_lock(path, options.is_read_only())?;
-    let (schema, new_storage) = load_schema(path, options)?;
+    create_lock: bool,
+) -> EngineResult<(File, Vec<ContentIndex>, bool)> {
+    let lock = acquire_storage_lock(layout, options.is_read_only(), create_lock)?;
+    let (schema, new_storage) = load_schema(layout, options)?;
     Ok((lock, schema, new_storage))
 }
 
-fn acquire_storage_lock(home: &Path, shared: bool) -> EngineResult<File> {
-    let path = home.join("storage.lock");
-    reject_symlink(&path)?;
+fn acquire_storage_lock(layout: IndexLayout<'_>, shared: bool, create: bool) -> EngineResult<File> {
+    let path = layout.lock_path();
+    file_exists(&path)?;
     let file = OpenOptions::new()
-        .create(true)
+        .create(create)
         .truncate(false)
         .read(true)
-        .write(true)
+        .write(create)
         .open(&path)
         .map_err(|error| io_error("open storage lock", &path, &error))?;
     let result = if shared {
@@ -1002,7 +1084,7 @@ fn acquire_storage_lock(home: &Path, shared: bool) -> EngineResult<File> {
     } else {
         file.try_lock()
     };
-    result.map_err(|error| storage_lock_error(home, error))?;
+    result.map_err(|error| storage_lock_error(layout.root(), error))?;
     Ok(file)
 }
 

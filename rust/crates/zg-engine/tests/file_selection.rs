@@ -24,7 +24,7 @@ use zg_engine::{
         },
         index::{
             IndexOptions,
-            options::{GlobRule, ScanRules, ScanRulesUpdate},
+            options::{ContentKind, GlobRule, ScanRules, ScanRulesUpdate},
         },
     },
 };
@@ -727,10 +727,6 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Compare positive catalog filtering and native NOT LIKE errors through both public retrieval routes"
-)]
 async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResult {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
@@ -794,25 +790,37 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
     }
 
     let info = engine.info(info_options(root)).await?;
-    let dimension = info
-        .workspace_index
-        .expect("workspace")
-        .embedding
-        .expect("model")
-        .dimension;
-    let collections = fs::read_dir(&info.index_path)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|path| {
-            path.file_name()
-                .expect("collection name")
-                .to_string_lossy()
-                .starts_with("fragments_")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(collections.len(), 1, "one native model collection");
-    let collection_path = &collections[0];
+    let collections = info.workspace_index.expect("workspace").content_indexes;
+    assert_eq!(
+        collections
+            .iter()
+            .map(|collection| collection.kind)
+            .collect::<Vec<_>>(),
+        [ContentKind::Text, ContentKind::Code]
+    );
+    for collection in collections {
+        let collection_path = info.index_path.join(collection.kind.as_str());
+        assert_native_exclusion_error(
+            &engine,
+            root,
+            &collection_path,
+            collection.kind,
+            collection.embedding.dimension,
+        )
+        .await?;
+    }
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+async fn assert_native_exclusion_error(
+    engine: &ZvecGrep,
+    root: &Path,
+    collection_path: &Path,
+    kind: ContentKind,
+    dimension: usize,
+) -> TestResult {
     #[cfg(windows)]
     let collection_path = dunce::simplified(collection_path);
     let mut collection_options = zvec_rust::CollectionOptions::new()?;
@@ -846,6 +854,7 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         assert!(native_error.to_string().contains("syntax error"));
         let error = engine
             .context(ContextOptions {
+                target_kinds: vec![kind],
                 root: Some(root.to_path_buf()),
                 routes: vec![ContextRoute {
                     mode,
@@ -866,9 +875,6 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         assert_eq!(error.message(), format!("zvec {operation}: {native_error}"));
     }
     collection.close()?;
-
-    engine.drop_index(info_options(root)).await?;
-    engine.close();
     Ok(())
 }
 

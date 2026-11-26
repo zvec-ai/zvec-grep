@@ -64,6 +64,13 @@ An index is created on the first indexing run and updated as files are added, ch
 
 Indexed search combines full-text and vector retrieval to return relevant source snippets. Index refresh follows the caller's policy; resident execution can schedule background refresh. Query filters narrow results without changing the workspace's scanning rules. [Direct search](src/pipelines/direct_search/README.md) reads ordinary files without an index; for PDFs, it uses saved extraction when available and otherwise searches the raw file.
 
+`--kind` selects a content collection. `--category` filters source files. A
+semantic search with no kind filter searches every populated collection. Kinds
+with compatible embedding spaces share a ranking. Different spaces get separate
+result groups that share the query's limit. With `--fuse`, the limit applies
+to the fused query.
+Full-text search with refresh off needs no embedding model.
+
 In indexed search, `--trace` shows each hit's rank (`#1`, `#2`, …) and `score=`.
 Code hits show the rule-ranking score. Other hits show the raw reciprocal rank
 fusion (RRF) score. These scores use different scales, so use the displayed
@@ -73,11 +80,20 @@ for the shared Direct, Server and MCP selection policy.
 
 ### Vector storage
 
-Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. See [index compatibility](src/workspace/README.md#key-conventions) for the current format and rebuild policy.
+Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. Index format 3 stores each enabled collection in `.zvec-grep/index/<kind>/`. An image-capable route creates an `image` collection. The file indexer currently skips standalone images. Rebuild an older index from source with `zg --index --rebuild`.
+
+Building a README-only workspace with text and code enabled creates both
+`text/` and `code/`. Searching the empty code collection returns zero hits.
+See [index compatibility](src/workspace/README.md#key-conventions) for rebuild details.
 
 ### Embedding models
 
-Each workspace uses an embedding model for semantic search. Local models run on your machine and may need an initial download; remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
+Each workspace inherits the content kinds its default embedding model supports. A per-kind override can replace that model or enable an additional kind. Vector search uses a model only when a selected collection contains indexed fragments. Local models run on your machine and may need an initial download. Remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
+
+`--embedding MODEL` sets the default. For example,
+`--embedding code=http/team-search` routes code to a configured HTTP alias.
+`--embedding code=default` clears that override. Omitted assignments retain
+their saved values. `zg --status` shows the effective model for each kind.
 
 Model selection runs at the shared engine boundary for Direct, Server and MCP.
 An existing compatible index keeps its stored model unless a replacement is
@@ -118,6 +134,7 @@ serialized requests; transports carry progress events instead.
 
 Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
+Indexing routes that use different models share the configured limit.
 The option is rejected outside `--index`. For automatic indexing and
 refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`.
 Explicit zero is rejected. Explicit CLI/API index settings take precedence over
@@ -166,8 +183,12 @@ For llama.cpp, C is the concurrent context limit on CPU, Metal and CUDA:
 ## Remote authorization
 
 The public [authorization module](src/authorization.rs) supports consent
-preflight independently of engine operations. Inspecting or granting consent
-does not load models, open index storage or send remote requests.
+preflight independently of engine operations. Preflight can inspect indexed
+fragments and pending file changes to determine which remote models a request
+needs. It determines those destinations without loading models or sending data.
+For a remote text model, searchable native PDF text can trigger an early consent
+prompt. If layout filtering later removes all of that text, the encoder receives
+no fragments from the PDF. A scan with no native text skips that prompt.
 
 API credentials and permission to send data are separate. CLI, daemon and MCP
 check the same workspace grants for the effective destination on each operation;

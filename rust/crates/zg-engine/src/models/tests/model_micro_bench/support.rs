@@ -41,8 +41,8 @@ impl Config {
             Ok("default") | Err(_) => None,
             Ok(value) => Some(value.parse().expect("CLI positive concurrency")),
         };
-        let index_limit =
-            resolve_index_concurrency(&reference, requested).expect("CLI concurrency resolution");
+        let index_limit = resolve_index_concurrency(Some(&reference), requested)
+            .expect("CLI concurrency resolution");
         let device = match env::var("ZG_MODEL_BENCH_DEVICE").as_deref() {
             Ok("cpu") => Device::Cpu,
             Ok("metal") => Device::Metal,
@@ -316,7 +316,7 @@ fn transformer_workers_use_effective_runtime_admission() {
             cache: cache.path().into(),
             device: Device::Cpu,
             requested,
-            index_limit: resolve_index_concurrency(reference, requested).expect("budget"),
+            index_limit: resolve_index_concurrency(Some(reference), requested).expect("budget"),
             entry: get_embedding_model_catalog_entry(reference).expect("model"),
         };
         let manager = ModelRuntimeManager::new();

@@ -191,8 +191,15 @@ fn concurrent_starts_replace_one_legacy_daemon_and_reuse_the_new_protocol()
             .env_remove("ZVEC_GREP_SERVER_TOKEN_FILE");
     })?;
     let mut legacy = instance_record(home.path())?;
-    legacy["daemonProtocolVersion"] = json!(1);
+    legacy["daemonProtocolVersion"] = json!(2);
     write_record(home.path(), &legacy)?;
+    for args in [
+        &["--server", "status"][..],
+        &["--fts", "needle", "--refresh", "off", "--mode", "server"],
+    ] {
+        assert_failure(&cli(&guard, args).output()?, "zg --server on");
+        assert_eq!(instance_record(home.path())?, legacy);
+    }
     let mut children = Vec::new();
     for _ in 0..4 {
         children.push(
@@ -292,7 +299,7 @@ fn unsupported_protocol_is_rejected_without_replacing_the_daemon() -> Result<(),
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let (mut guard, _) = start_server(&binary, &home, "agent", None, |_| {})?;
-    for version in [0, 2, 4] {
+    for version in [0, 4] {
         let mut record = instance_record(home.path())?;
         record["daemonProtocolVersion"] = json!(version);
         write_record(home.path(), &record)?;

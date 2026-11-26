@@ -141,7 +141,13 @@ struct ScanDomain {
     identity: Handle,
 }
 
-fn discover_sync(request: &ScanRequest, control: &TaskControl) -> Result<ScanSnapshot, HostError> {
+/// Discover selected files synchronously with the same policy as the async scanner.
+/// # Errors
+/// Returns discovery or cancellation errors.
+pub fn discover_sync(
+    request: &ScanRequest,
+    control: &TaskControl,
+) -> Result<ScanSnapshot, HostError> {
     control_check(control)?;
     let domains = validate_domains(&request.roots)?;
     let scope = ScanScope::new(&request.scope_paths)?;
@@ -503,7 +509,10 @@ fn read_file_info(
     }))
 }
 
-fn read_batch_sync(
+/// Read the discovered source snapshots synchronously.
+/// # Errors
+/// Returns read, source identity, or cancellation errors.
+pub fn read_batch_sync(
     request: &ReadBatchRequest,
     control: &TaskControl,
 ) -> Result<Vec<SourceFile>, HostError> {

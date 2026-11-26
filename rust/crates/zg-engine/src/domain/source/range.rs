@@ -69,6 +69,19 @@ impl ByteRange {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for ByteRange {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Offsets {
+            start_offset: u64,
+            end_offset: u64,
+        }
+
+        let offsets = Offsets::deserialize(deserializer)?;
+        Self::new(offsets.start_offset, offsets.end_offset).map_err(serde::de::Error::custom)
+    }
+}
+
 /// A half-open location in decoded UTF-8 source text, with one-based lines and
 /// zero-based byte offsets and columns.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
