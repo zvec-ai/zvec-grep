@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 #[derive(Default)]
@@ -8,19 +8,19 @@ struct Uses {
     ambiguous: bool,
 }
 
-/// Skip only a table whose sole references are direct class attributes. A
+/// Identify tables whose sole references are direct class attributes. A
 /// missing local read may mean another module imports it. Any same-spelling
 /// local binding, other reference, or explicitly quoted name keeps the table.
-pub(super) fn filter<'tree>(
-    tables: &mut Vec<(Node<'tree>, Node<'tree>)>,
+pub(super) fn forwarded<'tree>(
+    tables: &[(Node<'tree>, Node<'tree>)],
     root: Node<'tree>,
     source: &str,
-) {
+) -> HashSet<usize> {
     if tables.is_empty() || root.has_error() {
-        return;
+        return HashSet::new();
     }
     let mut uses = HashMap::new();
-    for &(_, name) in tables.iter() {
+    for &(_, name) in tables {
         uses.insert(
             &source[name.byte_range()],
             Uses {
@@ -33,7 +33,7 @@ pub(super) fn filter<'tree>(
     loop {
         let node = cursor.node();
         if node.kind() == "wildcard_import" {
-            return;
+            return HashSet::new();
         }
         if matches!(node.kind(), "identifier" | "string_content")
             && let Some(usage) = uses.get_mut(&source[node.byte_range()])
@@ -51,11 +51,11 @@ pub(super) fn filter<'tree>(
         }
         while !cursor.goto_next_sibling() {
             if !cursor.goto_parent() {
-                tables.retain(|(_, name)| {
-                    let usage = &uses[&source[name.byte_range()]];
-                    usage.ambiguous || !usage.forwarded
-                });
-                return;
+                return uses
+                    .into_values()
+                    .filter(|usage| usage.forwarded && !usage.ambiguous)
+                    .map(|usage| usage.declaration)
+                    .collect();
             }
         }
     }
@@ -116,7 +116,8 @@ mod tests {
             .named_children(&mut root.walk())
             .filter_map(|stmt| super::super::python_table_binding(stmt).map(|name| (stmt, name)))
             .collect();
-        filter(&mut candidates, root, body);
+        let forwarded = forwarded(&candidates, root, body);
+        candidates.retain(|(_, name)| !forwarded.contains(&name.id()));
         candidates
             .iter()
             .map(|(_, name)| body[name.byte_range()].to_owned())

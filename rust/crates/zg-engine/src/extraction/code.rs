@@ -184,6 +184,7 @@ fn assemble_output(
             code_entity_metadata(entity),
             max_chars,
             overlap_chars,
+            text_fragments,
             &mut output,
         );
     }
@@ -688,6 +689,7 @@ fn append_code_entity(
     metadata: EntityMetadata,
     max_chars: usize,
     overlap_chars: usize,
+    split: impl FnOnce(&str, usize, usize) -> Vec<super::ExtractedEntityFragment>,
     output: &mut Vec<ExtractedEntity>,
 ) {
     let (content_max, content_overlap) =
@@ -712,7 +714,7 @@ fn append_code_entity(
         index: output.len(),
         source_range: Range::Text(range),
         source_map: None,
-        fragments: text_fragments(&content, content_max, content_overlap),
+        fragments: split(&content, content_max, content_overlap),
         content: Content::Text(content),
         metadata: Some(metadata),
     });

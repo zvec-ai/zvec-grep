@@ -1,4 +1,5 @@
 //! Retain package-level lookup tables that the symbol walk skips.
+mod catalog_labels;
 mod class_forward;
 
 use tree_sitter::Node;
@@ -22,7 +23,7 @@ pub(super) fn append(
     let Some(adapter) = resolve_adapter(format) else {
         return;
     };
-    let mut retain = |node: Node<'_>, name: Node<'_>| {
+    let mut retain = |node: Node<'_>, name: Node<'_>, forwarded: bool| {
         let metadata = EntityMetadata::Code(CodeMetadata {
             symbol_name: Some(source.text[name.byte_range()].to_owned()),
             symbol_type: Some(SymbolType::Value),
@@ -31,7 +32,23 @@ pub(super) fn append(
             documentation: adjacent_documentation(node, &source.text),
             ..CodeMetadata::default()
         });
-        append_code_entity(source, node, metadata, max_chars, overlap_chars, output);
+        append_code_entity(
+            source,
+            node,
+            metadata,
+            max_chars,
+            overlap_chars,
+            |text, max, overlap| {
+                if forwarded
+                    && let Some(labels) = catalog_labels::fragments(node, &source.text, max)
+                {
+                    labels
+                } else {
+                    super::text_fragments(text, max, overlap)
+                }
+            },
+            output,
+        );
     };
     let mut python_tables = Vec::new();
     // Direct children only. Function and class entities already own their bodies.
@@ -47,20 +64,20 @@ pub(super) fn append(
                     if child.kind() == "var_spec_list" {
                         for spec in named_children(child) {
                             if let Some(name) = go_table_binding(spec, &source.text) {
-                                retain(spec, name);
+                                retain(spec, name, false);
                             }
                         }
                     } else if let Some(name) = go_table_binding(child, &source.text) {
-                        retain(node, name);
+                        retain(node, name, false);
                     }
                 }
             }
             _ => {}
         }
     }
-    class_forward::filter(&mut python_tables, root, &source.text);
+    let forwarded = class_forward::forwarded(&python_tables, root, &source.text);
     for (node, name) in python_tables {
-        retain(node, name);
+        retain(node, name, forwarded.contains(&name.id()));
     }
 }
 
