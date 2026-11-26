@@ -11,10 +11,6 @@ contains the legacy TypeScript implementation.
 - [npm installation](npm/meta/README.md): native packages distributed through npm.
 - [Agent integration](https://zvec.org/en/docs/zvec-grep/agents/): client configuration.
 
-After upgrading from a version that skipped module-level code such as Python
-lookup tables, run `zg --index --rebuild` once to make that code searchable in
-unchanged files. Incremental indexing reuses files with matching snapshots.
-
 ## Develop
 
 Run development commands from the workspace directory:

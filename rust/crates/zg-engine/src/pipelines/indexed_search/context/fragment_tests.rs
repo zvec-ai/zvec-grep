@@ -21,7 +21,6 @@ fn hit_with_fragment(source: &str, start: usize, end: usize) -> SearchHit {
         ..fragment.clone()
     };
     SearchHit {
-        untraced_recall: Vec::new(),
         entity: Entity::new(
             id,
             file_id,

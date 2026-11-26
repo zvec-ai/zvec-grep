@@ -70,16 +70,6 @@ pub(crate) struct SearchHit {
     pub score: f64,
     pub matched_by: MatchedBy,
     pub trace: Option<SearchHitTrace>,
-    /// Retain the same recall ranks for untraced ranking without copying the trace.
-    pub untraced_recall: Vec<SearchRecallTrace>,
-}
-
-impl SearchHit {
-    pub(super) fn recall(&self) -> &[SearchRecallTrace] {
-        self.trace
-            .as_ref()
-            .map_or(&self.untraced_recall, |trace| &trace.recall)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -581,7 +571,7 @@ fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
                 .recall
                 .iter()
                 .filter_map(|trace| trace.rank)
-                .map(reciprocal_rank)
+                .map(|rank| 1.0 / (RRF_K + rank_as_f64(rank)))
                 .sum();
             candidate
         })
@@ -626,7 +616,7 @@ fn load_candidates(
 }
 
 fn candidate_to_hit(
-    mut candidate: Candidate,
+    candidate: Candidate,
     limit: usize,
     trace: bool,
     data: &mut StoredSearchData,
@@ -682,8 +672,8 @@ fn candidate_to_hit(
         rank: candidate.rank,
         score: candidate.score,
         matched_by,
-        trace: trace.then(|| SearchHitTrace {
-            recall: std::mem::take(&mut candidate.recall),
+        trace: trace.then_some(SearchHitTrace {
+            recall: candidate.recall,
             ranking: None,
             fusion: SearchFusionTrace {
                 rank: candidate.rank,
@@ -695,7 +685,6 @@ fn candidate_to_hit(
                 cutoff_rank: limit,
             },
         }),
-        untraced_recall: candidate.recall,
     }))
 }
 
@@ -893,10 +882,6 @@ fn filter_matches_no_files(filter: Option<&StorageSearchFilter>) -> bool {
         filter.file_ids.as_ref().is_some_and(Vec::is_empty)
             || filter.path == Some(StoragePathFilter::None)
     })
-}
-
-pub(super) fn reciprocal_rank(rank: usize) -> f64 {
-    1.0 / (RRF_K + rank_as_f64(rank))
 }
 
 fn rank_as_f64(rank: usize) -> f64 {

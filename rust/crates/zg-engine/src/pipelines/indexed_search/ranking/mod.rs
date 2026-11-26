@@ -1,14 +1,9 @@
 //! Rerank recalled code within the positions assigned to code by fusion.
 mod paths;
 mod query;
-mod recall;
-mod source;
 mod support;
 
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashMap},
-};
+use std::{cmp::Ordering, collections::HashMap};
 
 use super::{
     pipeline::{ResolvedSearchRoute, SearchHit},
@@ -16,10 +11,10 @@ use super::{
 };
 use crate::{
     api::context::{options::QueryFilter, result::SearchRankingTrace},
-    domain::{Content, ContentKind, EntityMetadata, FileId, Range},
+    domain::{ContentKind, EntityMetadata, FileId},
 };
 use paths::Roles;
-use query::{QueryFeatures, SourceLookup};
+use query::QueryFeatures;
 
 const FILE_DECAY: f64 = 0.50;
 
@@ -30,7 +25,6 @@ struct Policy {
     path_weight: f64,
     weak_names: bool,
     definition_intent: bool,
-    supplemental_factor: f64,
     support_weight: f64,
     bonus_cap: f64,
 }
@@ -41,7 +35,6 @@ impl Policy {
         path_weight: 0.35,
         weak_names: true,
         definition_intent: true,
-        supplemental_factor: 0.5,
         support_weight: 0.15,
         bonus_cap: 1.25,
     };
@@ -52,7 +45,6 @@ impl Policy {
         path_weight: 0.0,
         weak_names: false,
         definition_intent: false,
-        supplemental_factor: 1.0,
         support_weight: 0.0,
         bonus_cap: 0.50,
     };
@@ -61,13 +53,10 @@ impl Policy {
 struct Scored {
     hit: SearchHit,
     base: f64,
-    raw_base: f64,
-    adjusted_route_ranks: BTreeMap<String, usize>,
     static_score: f64,
     symbol_match: &'static str,
     symbol_bonus: f64,
     definition_bonus: f64,
-    supplemental_factor: Option<f64>,
     path_bonus: f64,
     support_bonus: f64,
     support_count: u32,
@@ -162,14 +151,7 @@ fn score_code(
     let mut queries = routes.iter().map(|r| r.query.as_str()).collect::<Vec<_>>();
     queries.sort_unstable();
     queries.dedup();
-    let query_text = queries.join("\n");
-    let query = QueryFeatures::new(&query_text);
-    let supplemental_ranks =
-        recall::SupplementalRanks::for_query(&hits, &query.source_lookup, &query_text);
-    let literal_phrase = source::literal_phrase(&query_text);
-    let competes_with_symbols = hits.iter().any(|hit| {
-        matches!(hit.entity.metadata(), Some(EntityMetadata::Code(code)) if code.symbol_name.is_some())
-    });
+    let query = QueryFeatures::new(&queries.join("\n"));
     let mut overrides = Roles::overrides(&query, filter);
     let roles = hits
         .iter()
@@ -181,41 +163,11 @@ fn score_code(
         .into_iter()
         .zip(roles)
         .map(|(hit, roles)| {
-            let mut overrides = overrides;
-            if roles.tests
-                && !overrides.tests
-                && literal_phrase.is_some_and(|phrase| source::has_literal_argument(&hit, phrase))
-            {
-                overrides.tests = true;
-            }
             let (symbol_match, symbol_bonus, definition_bonus) = match hit.entity.metadata() {
                 Some(EntityMetadata::Code(code)) => query.symbol_bonus_with(code, policy),
                 _ => ("none", 0.0, 0.0),
             };
-            let supplemental_factor = match hit.entity.metadata() {
-                Some(EntityMetadata::Code(code))
-                    if code.is_supplemental && code.symbol_name.is_none() =>
-                {
-                    Some(
-                        if competes_with_symbols
-                            && !matches_source_lookup(
-                                &hit,
-                                code.signature.as_deref(),
-                                &query.source_lookup,
-                                &query_text,
-                            )
-                        {
-                            policy.supplemental_factor
-                        } else {
-                            1.0
-                        },
-                    )
-                }
-                _ => None,
-            };
-            let raw_base = hit.score / maximum_rrf;
-            let (ranking_rrf, adjusted_route_ranks) = supplemental_ranks.adjust(&hit);
-            let base = ranking_rrf / maximum_rrf;
+            let base = hit.score / maximum_rrf;
             let mut path_bonus = policy.path_weight
                 * query.path_affinity(&hit.file.relative_path().display().to_string());
             // Weak lexical coverage is one signal even when repeated in the path.
@@ -224,18 +176,14 @@ fn score_code(
             }
             let static_score = (base
                 + (symbol_bonus + definition_bonus + path_bonus).min(policy.bonus_cap))
-                * roles.factor(overrides)
-                * supplemental_factor.unwrap_or(1.0);
+                * roles.factor(overrides);
             Scored {
                 hit,
                 base,
-                raw_base,
-                adjusted_route_ranks,
                 static_score,
                 symbol_match,
                 symbol_bonus,
                 definition_bonus,
-                supplemental_factor,
                 path_bonus,
                 support_bonus: 0.0,
                 support_count: 0,
@@ -248,46 +196,6 @@ fn score_code(
         support::apply(&mut scored, policy.support_weight);
     }
     (query, scored)
-}
-
-/// Recognize unquoted source pasted into search without reading the whole
-/// entity. The leading recall evidence identifies the best matching fragment.
-fn matches_source_lookup(
-    hit: &SearchHit,
-    binding: Option<&str>,
-    lookup: &SourceLookup,
-    query: &str,
-) -> bool {
-    let (query, whole_identifier) = match lookup {
-        SourceLookup::Literal => return true,
-        SourceLookup::Identifier(name) if name.is_ascii() || binding == Some(name.as_str()) => {
-            return true;
-        }
-        // Without whitespace, a Unicode identifier can also read like a sentence.
-        SourceLookup::Identifier(name) => (name.as_str(), true),
-        SourceLookup::General => (query.trim(), false),
-    };
-    if query.is_empty() || query.len() > source::MAX_BYTES {
-        return false;
-    }
-    let Some(fragment) = source::best_fragment(hit) else {
-        return false;
-    };
-    let searchable = &fragment[..fragment.floor_char_boundary(source::MAX_BYTES)];
-    if !whole_identifier {
-        return searchable.contains(query);
-    }
-    let identifier_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '_' | '$');
-    searchable.match_indices(query).any(|(start, _)| {
-        !fragment[..start]
-            .chars()
-            .next_back()
-            .is_some_and(identifier_char)
-            && !fragment[start + query.len()..]
-                .chars()
-                .next()
-                .is_some_and(identifier_char)
-    })
 }
 
 fn compare(a: &Scored, b: &Scored, a_score: f64, b_score: f64) -> Ordering {
@@ -338,12 +246,10 @@ fn select(
             trace.ranking = Some(SearchRankingTrace {
                 policy: policy.name.to_owned(),
                 query_features: query.describe(),
-                normalized_base: item.raw_base,
-                adjusted_route_ranks: item.adjusted_route_ranks,
+                normalized_base: item.base,
                 symbol_match: item.symbol_match.to_owned(),
                 symbol_bonus: item.symbol_bonus,
                 definition_bonus: item.definition_bonus,
-                supplemental_factor: item.supplemental_factor,
                 path_bonus: item.path_bonus,
                 file_support_bonus: item.support_bonus,
                 file_support_count: item.support_count,

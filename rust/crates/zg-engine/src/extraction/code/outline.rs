@@ -409,7 +409,6 @@ mod tests {
 
     fn metadata(kind: SymbolType, name: &str) -> EntityMetadata {
         EntityMetadata::Code(CodeMetadata {
-            is_supplemental: false,
             symbol_type: Some(kind),
             symbol_name: Some(name.into()),
             scope: None,

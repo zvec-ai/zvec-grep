@@ -333,15 +333,9 @@ pub mod result {
         pub policy: String,
         pub query_features: Vec<String>,
         pub normalized_base: f64,
-        /// Effective vector ranks for code scoring where supplemental entities preceded this hit.
-        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-        pub adjusted_route_ranks: std::collections::BTreeMap<String, usize>,
         pub symbol_match: String,
         pub symbol_bonus: f64,
         pub definition_bonus: f64,
-        /// Applied to supplemental module statements when they compete with named code.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub supplemental_factor: Option<f64>,
         #[serde(default)]
         pub path_bonus: f64,
         #[serde(default)]

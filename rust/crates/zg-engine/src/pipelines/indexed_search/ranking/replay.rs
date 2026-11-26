@@ -18,18 +18,18 @@ struct Candidate {
     symbol: Option<String>,
     scope: Option<String>,
     kind: Option<String>,
-    #[serde(default)]
-    is_supplemental: bool,
-    signature: Option<String>,
-    #[serde(default)]
-    recall: Vec<crate::api::context::result::SearchRecallTrace>,
-    best_fragment: Option<String>,
     score: f64,
     rank: usize,
 }
 
-fn ablation_policies() -> impl IntoIterator<Item = (&'static str, Policy)> {
-    [
+#[test]
+#[ignore = "requires local fixed candidate snapshots"]
+fn replay_rule_ablation() {
+    let directory =
+        std::path::PathBuf::from(std::env::var_os("ZG_RANK_REPLAY").expect("snapshot directory"));
+    let input = std::fs::read(directory.join("pools.json")).expect("read pools");
+    let cases: Vec<Case> = serde_json::from_slice(&input).expect("decode pools");
+    let variants = [
         ("baseline", Policy::BASELINE),
         (
             "path",
@@ -62,13 +62,6 @@ fn ablation_policies() -> impl IntoIterator<Item = (&'static str, Policy)> {
         ),
         ("all", Policy::CURRENT),
         (
-            "no_supplemental",
-            Policy {
-                supplemental_factor: 1.0,
-                ..Policy::CURRENT
-            },
-        ),
-        (
             "no_weak",
             Policy {
                 weak_names: false,
@@ -96,16 +89,7 @@ fn ablation_policies() -> impl IntoIterator<Item = (&'static str, Policy)> {
                 ..Policy::CURRENT
             },
         ),
-    ]
-}
-
-#[test]
-#[ignore = "requires local fixed candidate snapshots"]
-fn replay_rule_ablation() {
-    let directory =
-        std::path::PathBuf::from(std::env::var_os("ZG_RANK_REPLAY").expect("snapshot directory"));
-    let input = std::fs::read(directory.join("pools.json")).expect("read pools");
-    let cases: Vec<Case> = serde_json::from_slice(&input).expect("decode pools");
+    ];
     let mut output = Vec::new();
     for case in cases {
         let candidates = snapshot_candidates(&case);
@@ -114,7 +98,7 @@ fn replay_rule_ablation() {
             mode: crate::api::context::options::ContextRouteMode::Fts,
             query: case.query.clone(),
         }];
-        for (name, policy) in ablation_policies() {
+        for (name, policy) in variants {
             let hits = rank_with_policy(
                 candidates.clone(),
                 &routes,
@@ -156,15 +140,25 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 "value" => Some(SymbolType::Value),
                 _ => None,
             });
-            let metadata =
-                (candidate.symbol.is_some() || candidate.is_supplemental).then(|| CodeMetadata {
-                    symbol_type: kind,
-                    symbol_name: candidate.symbol.clone(),
-                    scope: candidate.scope.clone(),
-                    is_supplemental: candidate.is_supplemental,
-                    signature: candidate.signature.clone(),
-                    ..CodeMetadata::default()
-                });
+            let metadata = candidate.symbol.as_ref().map(|name| CodeMetadata {
+                symbol_type: kind,
+                symbol_name: Some(name.clone()),
+                scope: candidate.scope.clone(),
+                signature: None,
+                documentation: None,
+                visibility: None,
+                language: None,
+                arity: None,
+                is_exported: false,
+                is_declaration: false,
+                package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
+            });
             let mut result = hit(
                 &i.to_string(),
                 file_id,
@@ -173,12 +167,6 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 candidate.rank,
                 metadata,
             );
-            result
-                .trace
-                .as_mut()
-                .expect("snapshot trace")
-                .recall
-                .clone_from(&candidate.recall);
             // Line intervals are conservative for same-line overlap in CLI snapshots.
             result.entity = Entity::new(
                 result.entity.id().clone(),
@@ -186,21 +174,11 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 Range::Byte(
                     ByteRange::new(candidate.start, candidate.end + 1).expect("snapshot range"),
                 ),
-                candidate.best_fragment.as_ref().map_or_else(
-                    || result.entity.content().clone(),
-                    |text| Content::Code(text.clone()),
-                ),
+                result.entity.content().clone(),
                 result.entity.metadata().cloned(),
                 result.entity.fragments().to_vec(),
             )
             .expect("entity");
-            if candidate.best_fragment.is_some() {
-                result
-                    .evidence
-                    .push(super::super::pipeline::SearchEvidence {
-                        fragment: result.entity.fragments()[0].clone(),
-                    });
-            }
             result
         })
         .collect::<Vec<_>>()

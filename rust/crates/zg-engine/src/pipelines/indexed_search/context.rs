@@ -671,7 +671,6 @@ mod tests {
             range: Range::Full,
         };
         let mut hit = SearchHit {
-            untraced_recall: Vec::new(),
             entity: Entity::new(
                 entity_id,
                 file_id,
@@ -776,7 +775,6 @@ mod tests {
                 panic!("chunked source")
             };
             let hit = SearchHit {
-                untraced_recall: Vec::new(),
                 entity: Entity::new(
                     id,
                     file_id,
@@ -877,7 +875,6 @@ mod tests {
             routes: Vec::new(),
             stage_trace: None,
             hits: vec![SearchHit {
-                untraced_recall: Vec::new(),
                 entity: Entity::new(id, source.id(), source_range, content, None, vec![fragment])
                     .expect("entity"),
                 file: file.clone(),
