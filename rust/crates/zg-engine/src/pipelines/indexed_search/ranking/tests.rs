@@ -600,6 +600,40 @@ fn function_anchors_match_complete_paths_stems_and_scope_components() {
     );
 }
 
+#[test]
+fn explicit_paths_do_not_contribute_standalone_names() {
+    for literal in ["src/admin/user_service.py", r"src\admin\user_service.py"] {
+        let query = QueryFeatures::new(&format!("inspect `{literal}` with OtherService"));
+        assert!(query.names_function_file_or_scope("project/src/admin/user_service.py", None));
+        assert!(!query.names_function_file_or_scope("src/public/user_service.py", None));
+        assert!(!query.names_function_file_or_scope("other.py", Some("user_service")));
+        assert!(query.names_function_file_or_scope("src/other_service.rs", None));
+    }
+}
+
+#[test]
+fn qualified_scopes_require_the_whole_component_suffix() {
+    let query = QueryFeatures::new("methods of admin::Router");
+    for scope in ["admin::Router", "pkg::admin.Router"] {
+        assert!(query.names_function_file_or_scope("dispatch.rs", Some(scope)));
+    }
+    for scope in ["legacy::Router", "notadmin::Router", "Router"] {
+        assert!(!query.names_function_file_or_scope("router.rs", Some(scope)));
+    }
+}
+
+#[test]
+fn leading_qualified_types_anchor_their_methods() {
+    for query in [
+        "Router::{connect, disconnect}",
+        "Router.connect",
+        "Router::connect",
+    ] {
+        let query = QueryFeatures::new(query);
+        assert!(query.names_function_file_or_scope("dispatch.rs", Some("net::Router")));
+    }
+}
+
 fn with_range(mut hit: SearchHit, start: u64, end: u64) -> SearchHit {
     hit.entity = Entity::new(
         hit.entity.id().clone(),
@@ -661,7 +695,12 @@ fn only_independent_anchored_functions_keep_their_scores() {
         ),
         with_range(hit("other-file", 2, "lib.rs", 0.8, 7, None), 0, 7),
     ];
-    let out = run("methods of Router", candidates, &QueryFilter::default(), 7);
+    let out = run(
+        "Router::{first, next}",
+        candidates,
+        &QueryFilter::default(),
+        7,
+    );
     let ids: Vec<_> = out.iter().map(|hit| hit.entity.id().as_str()).collect();
     assert_eq!(&ids[..3], ["lead", "sibling", "other-file"]);
     let trace = |index: usize| {

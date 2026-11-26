@@ -262,9 +262,11 @@ impl QueryFeatures {
 
     pub(super) fn names_function_file_or_scope(&self, path: &str, scope: Option<&str>) -> bool {
         if scope.is_some_and(|scope| {
-            let leaf = scope.rsplit("::").next().unwrap_or(scope);
-            self.scope_names
-                .contains(leaf.rsplit('.').next().unwrap_or(leaf))
+            let scope = scope.replace('.', "::");
+            self.scope_names.contains(&scope)
+                || scope
+                    .match_indices("::")
+                    .any(|(i, _)| self.scope_names.contains(&scope[i + 2..]))
         }) {
             return true;
         }
@@ -331,33 +333,53 @@ impl QueryFeatures {
 }
 
 fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
-    // A capitalized first word in a sentence is often just prose.
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let mut scope_names: HashSet<String> = query
-        .split(|c| !is_word(c))
-        .filter(|word| !word.is_empty())
-        .enumerate()
-        .filter(|(index, word)| {
-            word.contains('_')
-                || word.chars().skip(1).any(char::is_uppercase)
-                || ((*index > 0 || query.trim() == *word) && word.starts_with(char::is_uppercase))
-        })
-        .map(|(_, word)| word.to_owned())
+    let mut scope_names = HashSet::new();
+    let mut standalone_names: HashSet<&str> = query
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|word| !word.is_empty() && word.chars().all(is_word))
         .collect();
-    scope_names.extend(
-        query
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .filter(|word| !word.is_empty() && word.chars().all(is_word))
-            .map(str::to_owned),
-    );
-    let file_stems = scope_names
+    let terms = query.split(|c: char| c.is_whitespace() || "`'\"(),;[]{}".contains(c));
+    for (i, term) in terms.filter(|term| !term.is_empty()).enumerate() {
+        // A directory-qualified path is already matched literally, as a whole.
+        if term.contains(['/', '\\']) {
+            continue;
+        }
+        let words = term.split(|c| !is_word(c) && !matches!(c, ':' | '.'));
+        for (j, raw) in words.filter(|word| word.chars().any(is_word)).enumerate() {
+            let word = raw.trim_matches([':', '.']);
+            if raw.contains("::") || word.contains('.') {
+                let qualified = word.replace('.', "::");
+                // Member syntax can also name the enclosing type (Router.Dial or Router::dial).
+                if let Some((owner, member)) = qualified.rsplit_once("::")
+                    && !raw.ends_with("::")
+                    && owner
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|name| name.starts_with(char::is_uppercase))
+                    && (word.contains('.') || member.starts_with(char::is_lowercase))
+                {
+                    scope_names.insert(owner.to_owned());
+                }
+                scope_names.insert(qualified);
+            } else if word.contains('_')
+                || word.chars().skip(1).any(char::is_uppercase)
+                // A capitalized first word in a sentence is often just prose.
+                || ((i > 0 || j > 0 || query.trim() == word) && word.starts_with(char::is_uppercase))
+            {
+                standalone_names.insert(word);
+            }
+        }
+    }
+    let file_stems = standalone_names
         .iter()
         .filter(|word| word.chars().count() >= 3)
         .map(|word| normalized_stem(word))
         .filter(|stem| !stem.is_empty())
         .collect();
+    scope_names.extend(standalone_names.into_iter().map(str::to_owned));
     (scope_names, file_stems)
 }
 
