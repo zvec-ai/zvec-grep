@@ -211,16 +211,12 @@ jobs:
         if: ${{ !matrix.cuda }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          # v4 excludes Cargo caches whose PDFium build metadata points at an
-          # SDK that was not saved alongside the compiled dependency.
           prefix-key: rust-ci-v4-test
           workspaces: rust -> target
           cache-directories: |
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-sources/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-runtimes/
-            ~/.cache/pdfium-rs/
-            ~/Library/Caches/pdfium-rs/
-            ~/AppData/Local/pdfium-rs/
+            ${{ runner.os == 'macOS' && '~/Library/Caches' || runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
@@ -241,8 +237,7 @@ jobs:
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/
             ${{ env.LLAMA_CPP_RUNTIME_CACHE }}/
-            ~/.cache/pdfium-rs/
-            ~/AppData/Local/pdfium-rs/
+            ${{ runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
             rust/target/
             !rust/target/cuda-tests.tgz
             !rust/target/cuda-tests/
@@ -267,8 +262,7 @@ jobs:
         run: |
           # Keep the shared log parent runner-owned: the container writes a
           # subdirectory, then later host-side tee writes sibling CPU logs.
-          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$ZVEC_GREP_MODEL_CACHE"
-          mkdir -p "$HOME/.cache/pdfium-rs"
+          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs" "$ZVEC_GREP_MODEL_CACHE"
           docker build --platform linux/amd64 --file rust/scripts/cuda/cuda-builder.Dockerfile \
             --build-arg CUDA_IMAGE=ubuntu:24.04 \
             --build-arg RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust/rust-toolchain.toml)" \
@@ -640,8 +634,8 @@ jobs:
         if: ${{ always() && matrix.cuda && runner.os == 'Linux' }}
         shell: bash
         run: |
-          mkdir -p target "$HOME/.cargo/registry" "$HOME/.cargo/git"
-          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          mkdir -p target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"
+          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"
           if [ -n "${ZVEC_GREP_MODEL_CACHE:-}" ]; then
             mkdir -p "$ZVEC_GREP_MODEL_CACHE"
             sudo chown -R "$(id -u):$(id -g)" "$ZVEC_GREP_MODEL_CACHE"

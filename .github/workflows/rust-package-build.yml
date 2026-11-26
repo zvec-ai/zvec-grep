@@ -103,9 +103,10 @@ jobs:
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/src/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/db/
             rust/target/release/
+            ${{ runner.os == 'macOS' && '~/Library/Caches' || runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
           # Per-commit keys would exhaust the 10 GB repository cache quota and evict Rust CI caches.
           # Keep objects linked against newer glibc out of the release cache.
-          key: rust-release-${{ runner.os == 'Linux' && 'v6-manylinux2.28' || 'v3' }}-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/release-builder.Dockerfile') }}
+          key: rust-release-${{ runner.os == 'Linux' && 'v6-manylinux2.28' || 'v3' }}-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/release-builder.Dockerfile', 'rust/scripts/prepare-pdfium.py') }}
       - name: Cache the pinned llama native SDK
         uses: actions/cache@v5
         with:
@@ -140,12 +141,13 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
         run: |
-          mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"
           docker run --rm --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }} \
             --volume "${GITHUB_WORKSPACE}:/work:ro" \
             --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
             --volume "$HOME/.cargo/registry:/root/.cargo/registry" \
             --volume "$HOME/.cargo/git:/root/.cargo/git" \
+            --volume "$HOME/.cache/pdfium-rs:/root/.cache/pdfium-rs" \
             --env CARGO_TARGET_DIR=/work-target \
             --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
             --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work-target/llama-runtimes \
@@ -191,7 +193,7 @@ jobs:
         if: ${{ always() && runner.os == 'Linux' }}
         run: |
           # Docker writes as root. Host packaging/cache save must retain access.
-          for directory in target "$HOME/.cargo/registry" "$HOME/.cargo/git"; do
+          for directory in target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"; do
             if [[ -d "$directory" ]]; then
               sudo chown -R "$(id -u):$(id -g)" "$directory"
             fi
@@ -228,6 +230,7 @@ jobs:
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/src/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/db/
             rust/target/release/
+            ${{ runner.os == 'macOS' && '~/Library/Caches' || runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: Audit the Windows CPU/CUDA bundle
         if: inputs.target == 'win32-x64-msvc'
