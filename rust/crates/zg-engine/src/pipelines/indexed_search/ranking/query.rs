@@ -2,7 +2,7 @@
 use std::{borrow::Cow, collections::HashSet};
 
 use super::Policy;
-use crate::domain::{CodeMetadata, SymbolType};
+use crate::domain::{CodeMetadata, FileCategory, FileFormat, SymbolType};
 
 #[derive(Default)]
 // These independent features may all apply at once.
@@ -50,7 +50,9 @@ impl QueryFeatures {
         );
         explicit_names.sort();
         explicit_names.dedup();
-        let (scope_names, file_stems) = function_anchor_names(query);
+        let mut generic_names = HashSet::new();
+        let anchor_query = without_type_arguments(query, Some(&mut generic_names));
+        let (scope_names, file_stems) = function_anchor_names(&anchor_query, &generic_names);
         let requested_kind = [
             ("class", SymbolType::Class),
             ("function", SymbolType::Function),
@@ -78,7 +80,7 @@ impl QueryFeatures {
                 .flat_map(|s| tokens(s))
                 .filter(|s| informative(s))
                 .collect(),
-            paths: query
+            paths: anchor_query
                 .split_whitespace()
                 .map(|s| s.trim_matches(['`', '\'', '"', ',', ';']))
                 .filter(|s| s.contains(['/', '\\', '.']))
@@ -332,7 +334,10 @@ impl QueryFeatures {
     }
 }
 
-fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
+fn function_anchor_names(
+    query: &str,
+    generic_names: &HashSet<&str>,
+) -> (HashSet<String>, HashSet<String>) {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut scope_names = HashSet::new();
     let mut standalone_names: HashSet<&str> = query
@@ -343,8 +348,14 @@ fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
         .collect();
     let terms = query.split(|c: char| c.is_whitespace() || "`'\"(),;[]{}".contains(c));
     for (i, term) in terms.filter(|term| !term.is_empty()).enumerate() {
-        // A directory-qualified path is already matched literally, as a whole.
-        if term.contains(['/', '\\']) {
+        // Paths and recognized source filenames are matched literally, as a whole.
+        let literal = term.trim_end_matches(['.', '?', '!', ':']);
+        if term.contains(['/', '\\'])
+            || (literal.contains('.')
+                && FileFormat::from_file_name(literal.as_ref())
+                    .iter()
+                    .any(|format| format.categories().contains(&FileCategory::Code)))
+        {
             continue;
         }
         let words = term.split(|c| !is_word(c) && !matches!(c, ':' | '.'));
@@ -364,7 +375,8 @@ fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
                     scope_names.insert(owner.to_owned());
                 }
                 scope_names.insert(qualified);
-            } else if word.contains('_')
+            } else if generic_names.contains(word)
+                || word.contains('_')
                 || word.chars().skip(1).any(char::is_uppercase)
                 // A capitalized first word in a sentence is often just prose.
                 || ((i > 0 || j > 0 || query.trim() == word) && word.starts_with(char::is_uppercase))
@@ -385,26 +397,66 @@ fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
 
 /// Keep the qualified type name from extracted scopes such as `jsonc::Parser<'a>`.
 fn scope_type_name(scope: &str) -> Cow<'_, str> {
-    if !scope.contains(['.', '<']) {
-        return Cow::Borrowed(scope);
+    let name = without_type_arguments(scope, None);
+    if name.contains('.') {
+        Cow::Owned(name.replace('.', "::"))
+    } else {
+        name
     }
-    let mut name = String::with_capacity(scope.len());
+}
+
+/// Elide balanced argument lists. In queries, also record explicitly named types
+/// so the sentence-initial filter can distinguish `Vec<T>` from a prose word.
+fn without_type_arguments<'a>(
+    text: &'a str,
+    mut query_names: Option<&mut HashSet<&'a str>>,
+) -> Cow<'a, str> {
+    if !text.contains('<') {
+        return Cow::Borrowed(text);
+    }
+    let mut result = String::new();
+    let mut copied = 0;
+    let mut prefix = "";
+    let mut name = "";
     let mut depth = 0;
-    for (i, ch) in scope.char_indices() {
+    for (i, ch) in text.char_indices() {
         match ch {
+            '<' if depth > 0 => depth += 1,
             '<' => {
-                if depth == 0 {
-                    name.truncate(name.trim_end().len());
+                let before = &text[copied..i];
+                prefix = before.trim_end().trim_end_matches("::");
+                name = prefix
+                    .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or_default();
+                // A spaced comparison in prose should leave the following terms visible.
+                if query_names.is_none()
+                    || (!name.is_empty()
+                        && (!before.ends_with(char::is_whitespace)
+                            || name.starts_with(char::is_uppercase)))
+                {
+                    depth = 1;
                 }
-                depth += 1;
             }
-            '>' if depth > 0 && !scope[..i].ends_with('-') => depth -= 1,
-            _ if depth > 0 => {}
-            '.' => name.push_str("::"),
-            _ => name.push(ch),
+            '>' if depth > 0 && !text[..i].ends_with('-') => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(names) = query_names.as_deref_mut() {
+                        names.insert(name);
+                    }
+                    result.push_str(prefix);
+                    copied = i + 1;
+                }
+            }
+            _ => {}
         }
     }
-    Cow::Owned(name)
+    if copied == 0 {
+        Cow::Borrowed(text)
+    } else {
+        result.push_str(&text[copied..]);
+        Cow::Owned(result)
+    }
 }
 
 fn normalized_stem(name: &str) -> String {

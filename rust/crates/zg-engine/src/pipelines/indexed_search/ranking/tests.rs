@@ -612,6 +612,40 @@ fn explicit_paths_do_not_contribute_standalone_names() {
 }
 
 #[test]
+fn source_filenames_anchor_only_the_named_file() {
+    for name in ["Router.cpp", "Router.test.cpp", "User-Router.cpp"] {
+        let query = QueryFeatures::new(&format!("list methods in {name}"));
+        assert!(query.names_function_file_or_scope(&format!("src/{name}"), None));
+        assert!(!query.names_function_file_or_scope("include/Router.h", Some("net::Router")));
+        assert!(!query.names_function_file_or_scope("include/User.h", Some("User")));
+    }
+    assert!(
+        QueryFeatures::new("Router.Dial")
+            .names_function_file_or_scope("dispatch.go", Some("net::Router"))
+    );
+}
+
+#[test]
+fn generic_queries_anchor_the_container_only() {
+    for query in [
+        "Vec<String>",
+        "Vec::<String>",
+        "inspect `Vec<Result<String, Error>>` methods",
+    ] {
+        let query = QueryFeatures::new(query);
+        assert!(query.names_function_file_or_scope("collections.rs", Some("alloc::Vec<T>")));
+        assert!(query.names_function_file_or_scope("vec.rs", None));
+        assert!(!query.names_function_file_or_scope("string.rs", None));
+        assert!(!query.names_function_file_or_scope("other.rs", Some("String")));
+        assert!(!query.names_function_file_or_scope("result.rs", Some("Error")));
+    }
+    let query = QueryFeatures::new("alloc::Vec<String> and OtherType");
+    assert!(query.names_function_file_or_scope("collections.rs", Some("alloc::Vec<T>")));
+    assert!(!query.names_function_file_or_scope("vec.rs", Some("legacy::Vec<T>")));
+    assert!(query.names_function_file_or_scope("other_type.rs", None));
+}
+
+#[test]
 fn qualified_scopes_require_the_whole_component_suffix() {
     let query = QueryFeatures::new("methods of admin::Router");
     for scope in ["admin::Router", "pkg::admin.Router"] {
