@@ -395,7 +395,9 @@ existing content, and content-identical updates refresh timestamps without
 embedding again.
 
 Explicit index device and model-cache options are saved as workspace defaults;
-omitted options preserve them. Each operation resolves these settings from
+omitted options preserve them. The model cache is shared by embedding and PDF
+layout models and survives switching embedding models with `--rebuild`;
+endpoints and credentials remain per model. Each operation resolves settings from
 explicit options, environment, workspace defaults, global configuration, then
 backend defaults. After moving a workspace, override incompatible preferences
 with `zg --index --device cpu --model-cache <path>`; no rebuild is required.

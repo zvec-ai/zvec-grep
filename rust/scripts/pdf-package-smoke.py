@@ -64,6 +64,7 @@ def remote_layout_cache_smoke(execute, workspace, home, env, cache, provider):
     config_dir.mkdir(parents=True, exist_ok=True)
     unavailable_cache = isolated_home / "not-a-directory"
     unavailable_cache.write_text("An ignored --model-cache must fail without downloading.", encoding="utf-8")
+    (config_dir / "models").write_text("Do not download models when a saved cache is lost.", encoding="utf-8")
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -112,21 +113,43 @@ def remote_layout_cache_smoke(execute, workspace, home, env, cache, provider):
                 check("Downloading model" not in err, "Expected cached PP-S: " + err)
                 check(len(requests) > before, f"{provider} embedding fixture received no request")
 
-            def saved_config(cwd=root):
+            def saved_cache(cwd=root):
                 manifest = json.loads((cwd / ".zvec-grep/manifest.json").read_text(encoding="utf-8"))
-                return manifest["index"]["descriptor"]["embeddingConfigs"][reference]
+                check(all("cacheDir" not in model for model in
+                          manifest["index"]["descriptor"]["embeddingConfigs"].values()),
+                      "Model cache must be stored once at workspace level")
+                return manifest.get("modelCacheDir")
 
             index(f"{provider}-cache-explicit", arguments + ["--model-cache", str(cache)], ["1 scanned", "1 added"])
-            check(saved_config().get("cacheDir") == str(cache), "Explicit model cache was not saved")
+            check(saved_cache() == str(cache), "Explicit model cache was not saved")
             # A fresh process must reuse the workspace preference without any
             # explicit cache, environment fallback, or global configuration.
             isolated_env.pop("ZVEC_GREP_MODEL_CACHE", None)
             config_path.unlink()
             fixture(root / "added.pdf", [["Cobalt verification completes the recovery."]])
             index(f"{provider}-cache-incremental", ["--index", "--allow-remote"], ["2 scanned", "1 added", "1 unchanged"])
-            check(saved_config().get("cacheDir") == str(cache), "Incremental index lost the saved model cache")
+            check(saved_cache() == str(cache), "Incremental index lost the saved model cache")
             out, _ = execute(f"{provider}-cache-rg", ["--rg", "-F", "Cobalt verification"], cwd=root, environment=isolated_env)
             check("added.pdf" in out and re.search(r"pages:\s*1\s*\n", out), out)
+
+            if provider == "http":
+                # Configure only model B, with no global cache preference. The
+                # workspace cache must survive selecting B instead of A.
+                replacement = "http/fixture-b"
+                replacement_config = {"version": 1, "models": {replacement: {
+                    **config["models"][reference], "model": "fixture-b"}}}
+                config_path.write_text(json.dumps(replacement_config), encoding="utf-8")
+                index("http-cache-switch-rebuild",
+                      ["--index", "--rebuild", "--embedding", replacement, "--allow-remote"],
+                      ["2 scanned", "2 added"])
+                check(saved_cache() == str(cache), "Switching models lost the workspace cache")
+                check(requests[-1]["model"] == "fixture-b", "Rebuild did not use model B")
+                config_path.unlink()
+                fixture(root / "third.pdf", [["Amber confirmation finishes the checklist."]])
+                index("http-cache-switch-incremental", ["--index", "--allow-remote"],
+                      ["3 scanned", "1 added", "2 unchanged"])
+                check(saved_cache() == str(cache), "Model B did not retain the workspace cache")
+                check(requests[-1]["model"] == "fixture-b", "Incremental index did not use model B")
 
             # Exercise the global fallback in a separate workspace with no saved preference.
             global_root = workspace / f"{provider}-global-cache"
@@ -135,7 +158,7 @@ def remote_layout_cache_smoke(execute, workspace, home, env, cache, provider):
             config["defaults"] = {"modelCacheDir": str(cache)}
             config_path.write_text(json.dumps(config), encoding="utf-8")
             index(f"{provider}-cache-global", arguments, ["1 scanned", "1 added"], cwd=global_root)
-            check("cacheDir" not in saved_config(global_root), "Global cache must not become a saved override")
+            check(saved_cache(global_root) is None, "Global cache must not become a saved override")
         finally:
             server.shutdown()
             worker.join()

@@ -15,6 +15,7 @@ use crate::{
 struct ManifestFields {
     source_root: SourceRoot,
     scan: ScanRules,
+    model_cache_dir: Option<PathBuf>,
     index_version: u32,
     storage_generation: Option<String>,
     created_time: u64,
@@ -38,6 +39,7 @@ impl ManifestFields {
             self.created_time,
             self.updated_time,
             self.index,
+            self.model_cache_dir,
         )
     }
 }
@@ -1216,6 +1218,7 @@ mod tests {
         .expect("workspace");
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
         let mut original = serde_json::to_value(&manifest).expect("JSON");
+        original["modelCacheDir"] = serde_json::json!(directory.path().join("shared-models"));
         let key = crate::domain::model::EncryptedApiKey {
             nonce: vec![1; 24],
             ciphertext: vec![2; 32],
@@ -1238,6 +1241,7 @@ mod tests {
                 .expect("load relocated metadata")
                 .expect("manifest");
             let descriptor = loaded.index().descriptor().expect("enabled index");
+            assert_eq!(loaded.model_cache_dir(), None);
             let config = &descriptor.embedding_configs()["local/minilm"];
             assert_eq!(config.device, None);
             assert_eq!(config.cache_dir, None);
@@ -1303,12 +1307,30 @@ mod tests {
             config.remove("cacheDir");
         }
         assert_eq!(serde_json::to_value(&restored).expect("JSON"), expected);
+        let expected_cache =
+            expected["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["cacheDir"]
+                .as_str()
+                .map(Path::new);
+        assert_eq!(restored.model_cache_dir(), expected_cache);
         manifest
             .index()
             .descriptor()
             .expect("index")
             .ensure_index_compatible(restored.index().descriptor().expect("index"))
             .expect("runtime preferences do not require rebuilding");
+        let shared_cache = directory.path().join("shared-models");
+        json["modelCacheDir"] = serde_json::json!(shared_cache);
+        let shared = decode_manifest(&json, manifest.layout()).expect("shared cache preference");
+        assert_eq!(
+            shared.model_cache_dir(),
+            expected_cache.map(|_| shared_cache.as_path())
+        );
+        manifest
+            .index()
+            .descriptor()
+            .expect("index")
+            .ensure_index_compatible(shared.index().descriptor().expect("index"))
+            .expect("shared cache does not change the stored vectors");
         json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["apiKey"] =
             serde_json::json!("plaintext-secret");
         assert!(decode_manifest(&json, manifest.layout()).is_err());
