@@ -156,6 +156,8 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
           },
         );
       }
+      // A previous writer may have stopped after sealing a full DiskANN segment.
+      this.needsOptimize = this.isDiskann && !readOnly;
       this.vectorMetric = vector.indexParams.metricType ?? ZVecMetricType.IP;
     } catch (error) {
       // Opening the entity collection can fail after metadata acquired its lock.

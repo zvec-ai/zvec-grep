@@ -1,0 +1,141 @@
+--- a/src/db/collection.cc
++++ b/src/db/collection.cc
+@@ -175,6 +175,7 @@
+       const SearchQuery &query, bool return_scores) const;
+ 
+   void prepare_schema();
++  void configure_zg_diskann_segments();
+ 
+   Status close_internal();
+   Status close_locked();
+@@ -315,6 +316,7 @@
+   std::atomic<bool> closed_{false};
+ 
+   CollectionSchema::Ptr schema_;
++  bool full_diskann_segments_{false};
+ 
+   CollectionOptions options_;
+ 
+@@ -394,6 +396,20 @@
+                                const CollectionSchema &schema)
+     : path_(path), schema_(std::make_shared<CollectionSchema>(schema)) {
+   prepare_schema();
++  configure_zg_diskann_segments();
++}
++
++// This runtime is shared by zg's Rust and Node bindings. Only their embedding
++// collections opt in; metadata collections and HNSW keep native maintenance.
++void CollectionImpl::configure_zg_diskann_segments() {
++  const auto name = schema_->name();
++  const auto *field = schema_->get_vector_field("embedding");
++  full_diskann_segments_ =
++      (name == "fragments" || name == "zvec_grep_entities") && field &&
++      field->index_type() == IndexType::DISKANN;
++  if (full_diskann_segments_) {
++    schema_->set_max_doc_count_per_segment(200000);
++  }
+ }
+ 
+ void CollectionImpl::prepare_schema() {
+@@ -968,11 +984,13 @@
+     CHECK_DESTROY_RETURN_STATUS(destroyed_, false);
+     CHECK_CLOSED_RETURN_STATUS(closed_, false);
+ 
+-    if (writing_segment_->has_record()) {
++    if (full_diskann_segments_ && !need_switch_to_new_segment()) {
++      // Publish WAL, Flat blocks and FTS, but keep appending to this segment.
++      auto s = flush_unsafe();
++      CHECK_RETURN_STATUS(s);
++    } else if (writing_segment_->has_record()) {
+       auto s = switch_to_new_segment_for_writing();
+-      if (!s.ok()) {
+-        return s;
+-      }
++      CHECK_RETURN_STATUS(s);
+     }
+ 
+     persist_segments =
+@@ -988,6 +1006,7 @@
+   auto tasks =
+       build_compact_task(schema_, persist_segments, options.concurrency_,
+                          delete_store_clone->make_filter());
++  if (full_diskann_segments_ && tasks.empty()) return Status::OK();
+   auto s = execute_compact_task(tasks);
+   CHECK_RETURN_STATUS(s);
+ 
+@@ -1129,6 +1148,22 @@
+     const IndexFilter::Ptr filter) {
+   std::vector<SegmentTask::Ptr> tasks;
+   if (segments.empty()) return tasks;
++
++  if (full_diskann_segments_) {
++    for (const auto &seg : segments) {
++      if (seg->doc_count(filter) == 0) {
++        // Retire a fully deleted segment through the usual version commit.
++        tasks.push_back(SegmentTask::CreateCompactTask(CompactTask{
++            path_, schema, {seg}, allocate_segment_id_for_tmp_segment(),
++            filter, !options_.enable_mmap_, concurrency}));
++      } else if (seg->doc_count() >= schema->max_doc_count_per_segment() &&
++                 !seg->all_vector_index_ready()) {
++        tasks.push_back(SegmentTask::CreateCreateVectorIndexTask(
++            CreateVectorIndexTask{seg, "", nullptr, concurrency}));
++      }
++    }
++    return tasks;
++  }
+ 
+   size_t current_physical_doc_count = 0;
+   size_t current_live_doc_count = 0;
+@@ -1662,7 +1697,7 @@
+   }
+ 
+   // TODO: The granularity of the write_lock is too coarse.
+-  std::lock_guard write_lock(write_mtx_);
++  std::unique_lock write_lock(write_mtx_);
+ 
+   WriteResults results;
+   // validate write batch size
+@@ -1672,8 +1707,10 @@
+         kMaxWriteBatchSize));
+   }
+ 
++  bool rolled_over = false;
+   for (auto &&doc : docs) {
+     if (need_switch_to_new_segment()) {
++      rolled_over = true;
+       auto s = switch_to_new_segment_for_writing();
+       CHECK_RETURN_STATUS_EXPECTED(s);
+     }
+@@ -1697,6 +1734,14 @@
+     results.push_back(s);
+   }
+ 
++  if (full_diskann_segments_ && (rolled_over || need_switch_to_new_segment())) {
++    // Also build when the last row of the batch exactly fills the segment.
++    // optimize takes maintenance -> schema -> write locks in that order.
++    write_lock.unlock();
++    lock.unlock();
++    auto s = optimize(OptimizeOptions{});
++    CHECK_RETURN_STATUS_EXPECTED(s);
++  }
+   return results;
+ }
+ 
+@@ -1769,6 +1814,9 @@
+   }
+ 
+   Version version = version_manager_->get_current_version();
++  if (full_diskann_segments_) {
++    version.set_schema(*schema_);  // also persist the capacity of older zg indexes
++  }
+   auto writing_segment_meta = writing_segment_->meta();
+   writing_segment_->remove_writing_forward_block();
+   s = version.add_persisted_segment_meta(writing_segment_meta);
+@@ -2350,6 +2398,7 @@
+   version_manager_ = version_manager.value();
+   const auto v = version_manager_->get_current_version();
+   schema_ = std::make_shared<CollectionSchema>(v.schema());
++  configure_zg_diskann_segments();
+   options_.enable_mmap_ = v.enable_mmap();
+   s = recover_idmap_and_delete_store();
+   CHECK_RETURN_STATUS(s);

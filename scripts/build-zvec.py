@@ -11,6 +11,7 @@ import tarfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+SEGMENT_PATCH = ROOT / "scripts/zg-diskann-segments.patch"
 ZVEC_COMMIT = "e64c02eaa70eae0aaea2a683bee6298121df1ef0"
 NODE_COMMIT = "51c542807815a90275a5a14066a575cf991c65d8"
 
@@ -32,6 +33,19 @@ def source(path, url, commit):
         raise SystemExit(f"Expected {path} at {commit}; refusing a different native runtime")
     if output(["git", "-C", path, "status", "--porcelain", "--untracked-files=no"]):
         raise SystemExit(f"Native source has uncommitted changes: {path}")
+
+
+def prepare_collection_source(src, build):
+    # Compile the private runtime overlay without modifying the pinned checkout.
+    overlay = build / "zg-overlay"
+    relative = Path("src/db/collection.cc")
+    target = overlay / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("wb") as source_file:
+        run(["git", "-C", src, "show", f"HEAD:{relative.as_posix()}"], stdout=source_file)
+    run(["git", "-c", "core.autocrlf=false", "apply", "--no-index", "--whitespace=error", SEGMENT_PATCH], cwd=overlay,
+        env={**os.environ, "GIT_CEILING_DIRECTORIES": str(build)})
+    return target
 
 
 def windows_node_sdk(directory, version, arch):
@@ -58,6 +72,8 @@ def verify_native(directory, arch):
     if (manifest["zvec_commit"], manifest["node_commit"], manifest["platform"], manifest["arch"]) != (
             ZVEC_COMMIT, NODE_COMMIT, sys.platform, arch):
         raise SystemExit("Native runtime identity mismatch")
+    if manifest.get("segment_policy_sha256") != hashlib.sha256(SEGMENT_PATCH.read_bytes()).hexdigest():
+        raise SystemExit("Native runtime has a different DiskANN segment policy")
     names = {"zvec_node_binding.node", library_name()}
     if sys.platform == "win32":
         names.add("zvec_c_api.lib")
@@ -109,11 +125,13 @@ def main():
         raise SystemExit("Node development headers missing; provide --node-headers")
     # CMake re-parses these paths in generated files; Windows backslashes can
     # become escapes such as \a. CMake accepts forward slashes on every host.
+    collection_source = prepare_collection_source(src, build)
     configure = ["cmake", "-S", src.as_posix(), "-B", build.as_posix(), "-DCMAKE_BUILD_TYPE=Release",
                  "-DBUILD_C_BINDINGS=ON", "-DBUILD_PYTHON_BINDINGS=OFF", "-DBUILD_TESTING=OFF",
                  "-DBUILD_TOOLS=OFF", "-DBUILD_CPP_EXAMPLES=OFF", "-DBUILD_ZVEC_SHARED=OFF",
                  "-DBUILD_ZVEC_CORE_SHARED=OFF", "-DBUILD_ZVEC_AILEGO_SHARED=OFF",
                  f"-DCMAKE_PROJECT_zvec_INCLUDE={(ROOT / 'scripts/zvec-node.cmake').as_posix()}",
+                 f"-DZG_COLLECTION_SOURCE={collection_source.as_posix()}",
                  f"-DZG_NODE_SOURCE={node_src.as_posix()}", f"-DZG_NODE_API={node_api.as_posix()}",
                  f"-DZG_NODE_HEADERS={headers.resolve().as_posix()}"]
     if sys.platform == "win32":
@@ -137,7 +155,8 @@ def main():
     shutil.copy2(src / "LICENSE", destination / "LICENSE.zvec")
     shutil.copy2(node_src / "LICENSE", destination / "LICENSE.zvec-node")
     manifest = dict(zvec_commit=ZVEC_COMMIT, node_commit=NODE_COMMIT,
-                    platform=sys.platform, arch=arch, files=files)
+                    platform=sys.platform, arch=arch, files=files,
+                    segment_policy_sha256=hashlib.sha256(SEGMENT_PATCH.read_bytes()).hexdigest())
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     verify_native(destination, arch)
 

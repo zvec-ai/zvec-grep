@@ -1,3 +1,15 @@
+# The zg-specific segment policy applies to both native entry points.
+function(zg_use_collection_source)
+    get_target_property(sources zvec SOURCES)
+    set(original "${CMAKE_SOURCE_DIR}/src/db/collection.cc")
+    if(NOT original IN_LIST sources)
+        message(FATAL_ERROR "Pinned zvec collection source missing from target")
+    endif()
+    list(REMOVE_ITEM sources "${original}")
+    set_property(TARGET zvec PROPERTY SOURCES "${sources};${ZG_COLLECTION_SOURCE}")
+endfunction()
+cmake_language(DEFER CALL zg_use_collection_source)
+
 # Build the Node binding and the C API against the same zvec targets.
 file(GLOB ZG_NODE_SOURCES CONFIGURE_DEPENDS "${ZG_NODE_SOURCE}/src/binding/*.cc")
 add_library(zvec_node_binding SHARED ${ZG_NODE_SOURCES})

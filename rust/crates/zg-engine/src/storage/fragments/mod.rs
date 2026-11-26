@@ -178,6 +178,11 @@ impl Fragments {
     }
 
     pub(super) fn needs_optimize(&self) -> EngineResult<bool> {
+        // A searchable Flat tail intentionally keeps DiskANN completeness below
+        // 1. Pending or interrupted writes are tracked by the store's durable marker.
+        if self.vector_engine == VectorEngine::Diskann {
+            return Ok(false);
+        }
         for index in self.indexes.values() {
             let stats = native(index.stats(), "inspect fragment indexes")?;
             if stats.indexes.iter().any(|stat| stat.completeness < 1.0) {

@@ -704,7 +704,14 @@ fn verify_fp16_index(engine: VectorEngine, index_type: IndexType) {
     assert_eq!(field.index_type, index_type);
     assert_eq!(field.data_type, DataType::VectorFp16);
     assert_eq!(field.dimension, 3);
-    store.optimize().expect("build vector index");
+    store.optimize().expect("finalize writes");
+    let stats = collection.stats().expect("fragment stats");
+    let expected = if engine == VectorEngine::Diskann {
+        0.0
+    } else {
+        1.0
+    };
+    assert!((stats.indexes[0].completeness - expected).abs() < f32::EPSILON);
     drop(store);
     let store = Fragments::open(home.path(), &[model()], true, engine).expect("reopen read-only");
 
@@ -714,6 +721,129 @@ fn verify_fp16_index(engine: VectorEngine, index_type: IndexType) {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
     assert_eq!(hits[0].path, StorageSearchPath::Vector);
+}
+
+fn append_segment_fixture(
+    store: &Fragments,
+    rows: std::ops::Range<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for start in (rows.start..rows.end).step_by(1024) {
+        let mut docs = Vec::new();
+        for id in start..rows.end.min(start + 1024) {
+            let key = format!("v{id}");
+            let mut doc = Doc::new()?;
+            doc.set_pk(&key);
+            doc.add_string("document_id", &key)?;
+            doc.add_string("entity_id", &key)?;
+            doc.add_u32("file_id", 1)?;
+            doc.add_array_u32("ancestor_directory_ids", &[1])?;
+            doc.add_string("file_name", "test.rs")?;
+            doc.add_string("text", "fruit")?;
+            let seed = id.wrapping_mul(2_654_435_761).to_le_bytes();
+            let vector = match id {
+                0 => [-1.0, 0.0, 0.0],
+                400_000 => [0.0, -1.0, 0.0],
+                _ => {
+                    let mut direction =
+                        [f32::from(seed[0]), f32::from(seed[1]), f32::from(seed[2])];
+                    direction[usize::from(id >= 200_000)] += 512.0;
+                    direction
+                }
+            };
+            zg_zvec_fp16::add_embedding(&mut doc, "embedding", &vector)?;
+            docs.push(doc);
+        }
+        store.write(&BTreeMap::from([("fixture/fixture".to_owned(), docs)]))?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "builds two production-size DiskANN segments"]
+fn diskann_promotes_full_segments_and_preserves_the_flat_tail()
+-> Result<(), Box<dyn std::error::Error>> {
+    const MODEL: &str = "fixture/fixture";
+    const CAPACITY: u32 = 200_000;
+    fn check(
+        store: &Fragments,
+        indexed: u32,
+        total: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let stats = store.collection(MODEL)?.stats()?;
+        assert_eq!(stats.doc_count, u64::from(total));
+        assert!(
+            (f64::from(stats.indexes[0].completeness) * f64::from(total) - f64::from(indexed))
+                .abs()
+                < 0.1
+        );
+        Ok(())
+    }
+
+    super::super::zvec::initialize()?;
+    let root = tempfile::tempdir()?;
+    let open =
+        |read_only| Fragments::open(root.path(), &[model()], read_only, VectorEngine::Diskann);
+    let store = open(false)?;
+    append_segment_fixture(&store, 0..100_000)?;
+    store.optimize()?;
+    check(&store, 0, 100_000)?;
+    drop(store);
+
+    let store = open(false)?;
+    append_segment_fixture(&store, 100_000..CAPACITY - 1)?;
+    store.optimize()?;
+    check(&store, 0, CAPACITY - 1)?;
+    store
+        .collection(MODEL)?
+        .delete_by_filter("document_id = 'v1'")?;
+    append_segment_fixture(&store, CAPACITY - 1..CAPACITY)?;
+    check(&store, CAPACITY - 1, CAPACITY - 1)?;
+    append_segment_fixture(&store, CAPACITY..2 * CAPACITY - 1)?;
+    store.optimize()?;
+    check(&store, CAPACITY - 1, 2 * CAPACITY - 2)?;
+    append_segment_fixture(&store, 2 * CAPACITY - 1..2 * CAPACITY + 1)?;
+    store.optimize()?;
+    drop(store);
+
+    let store = open(true)?;
+    check(&store, 2 * CAPACITY - 1, 2 * CAPACITY)?;
+    // Each graph has a different cluster, and the single Flat row a third direction.
+    for (vector, ids) in [
+        ([1.0, 0.1, 0.1], 0..CAPACITY),
+        ([0.1, 1.0, 0.1], CAPACITY..2 * CAPACITY),
+    ] {
+        let hits = store.search_vector(MODEL, &vector, 1, None)?;
+        assert!(hits[0].score > 0.99);
+        let id = hits[0]
+            .document_id
+            .strip_prefix('v')
+            .expect("fixture key")
+            .parse::<u32>()?;
+        assert!(ids.contains(&id));
+    }
+    let tail = store.search_vector(MODEL, &[0.0, -1.0, 0.0], 1, None)?;
+    assert_eq!(tail[0].document_id, "v400000");
+    drop(store);
+
+    let store = open(false)?;
+    append_segment_fixture(&store, 0..1)?; // replace a built row with a new Flat version
+    store
+        .collection(MODEL)?
+        .delete_by_filter("document_id = 'v400000'")?;
+    store.optimize()?;
+    drop(store);
+    let store = open(true)?;
+    check(&store, 2 * CAPACITY - 2, 2 * CAPACITY - 1)?;
+    let updated = store.search_vector(MODEL, &[-1.0, 0.0, 0.0], 1, None)?;
+    assert_eq!(updated[0].document_id, "v0");
+    let deleted = store.search_vector(
+        MODEL,
+        &[0.0, -1.0, 0.0],
+        10,
+        Some("document_id IN ('v1', 'v400000')"),
+    )?;
+    assert!(deleted.is_empty());
+    Ok(())
 }
 
 #[test]

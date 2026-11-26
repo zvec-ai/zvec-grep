@@ -44,7 +44,7 @@ jobs:
         id: runtime
         with:
           path: native/
-          key: zvec-native-v1-${{ matrix.target }}-${{ hashFiles('scripts/build-zvec.py', 'scripts/zvec-node.cmake', 'package-lock.json', '.github/workflows/zvec-native.yml') }}
+          key: zvec-native-v1-${{ matrix.target }}-${{ hashFiles('scripts/build-zvec.py', 'scripts/zvec-node.cmake', 'scripts/zg-diskann-segments.patch', 'package-lock.json', '.github/workflows/zvec-native.yml') }}
       - name: Install Linux build and I/O dependencies
         if: runner.os == 'Linux'
         run: |

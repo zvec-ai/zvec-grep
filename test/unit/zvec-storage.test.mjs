@@ -106,7 +106,7 @@ test("default HNSW vectors persist, respect metadata filters, and follow replace
   }
 });
 
-test("zvec builds on-disk DiskANN and PQ segments and searches them after reopen", async (t) => {
+test("DiskANN sync keeps a partial segment searchable as Flat after reopen", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "zvec-grep-native-diskann-"));
   t.after(() => rm(parent, { recursive: true, force: true }));
   useTemporaryHome(t, parent);
@@ -137,7 +137,7 @@ test("zvec builds on-disk DiskANN and PQ segments and searches them after reopen
   try {
     writer.replaceFile(file, entries);
     await writer.finalizeWrites();
-    assert.equal(writer.collection.stats.indexCompleteness.embedding, 1);
+    assert.equal(writer.collection.stats.indexCompleteness.embedding, 0);
   } finally {
     writer.close();
   }
@@ -149,18 +149,16 @@ test("zvec builds on-disk DiskANN and PQ segments and searches them after reopen
   const segments = await Promise.all(
     files.map((path) => readFile(join(root, path))),
   );
+  assert.ok(segments.length > 0);
   assert.ok(
-    segments.some((bytes) => bytes.includes(Buffer.from("diskann.pq_data"))),
-    "must materialize zvec DiskANN PQ data, not only declare the schema",
-  );
-  assert.ok(
-    segments.some((bytes) => bytes.includes(Buffer.from("diskann.vector"))),
+    segments.every((bytes) => !bytes.includes(Buffer.from("diskann.pq_data"))),
   );
   const reader = createWorkspaceIndexStorage({
     storagePath: options.storagePath,
     readOnly: true,
   });
   try {
+    assert.equal(reader.searchFts("orchard", 10).length, 10);
     for (const entry of entries.slice(0, 20)) {
       const hits = reader.searchVector(entry.vector, 10, {
         fileIds: [file.id],

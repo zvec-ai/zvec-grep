@@ -22,6 +22,12 @@ for (const directory of directories) {
   const manifest = JSON.parse(readFileSync(join(directory, "manifest.json")));
   assert.equal(manifest.zvec_commit, zvecCommit, "Wrong zvec source revision");
   assert.equal(manifest.node_commit, nodeCommit, "Wrong Node binding revision");
+  const policy = readFileSync(join(root, "scripts/zg-diskann-segments.patch"));
+  assert.equal(
+    manifest.segment_policy_sha256,
+    createHash("sha256").update(policy).digest("hex"),
+    "Wrong DiskANN segment policy",
+  );
   const target = `${manifest.platform}-${manifest.arch}`;
   if (directory !== native) {
     assert.equal(directory, join(native, `zvec-native-${target}`));
