@@ -82,6 +82,7 @@ fn fixture_hit(
         range: Range::Full,
     };
     SearchHit {
+        untraced_recall: Vec::new(),
         entity: Entity::new(
             id,
             FileId::new(file_id),
@@ -157,6 +158,173 @@ fn documents_keep_fusion_order_and_scores_across_paths_and_repeated_files() {
         assert!(trace.ranking.is_none());
         assert!(trace.final_selection.returned_by_limit);
         assert_eq!(trace.final_selection.cutoff_rank, 2);
+    }
+}
+
+fn supplemental_recall_pool() -> Vec<SearchHit> {
+    use super::super::pipeline::{SearchEvidence, reciprocal_rank};
+    use crate::api::context::result::SearchRecallTrace;
+    fn routes(mut hit: SearchHit, entries: &[(&str, usize)]) -> SearchHit {
+        let trace = hit.trace.as_mut().expect("raw trace");
+        for &(id, rank) in entries {
+            trace.recall.push(SearchRecallTrace {
+                path: if id == "vector" {
+                    ContextRouteMode::Vector
+                } else {
+                    ContextRouteMode::Fts
+                },
+                route_id: id.into(),
+                query: "query".into(),
+                found: true,
+                rank: Some(rank),
+                score: Some(1.0),
+                forced: false,
+                reason: None,
+            });
+        }
+        hit.score = entries.iter().map(|(_, rank)| reciprocal_rank(*rank)).sum();
+        trace.fusion.score = hit.score;
+        hit
+    }
+    let marker = CodeMetadata {
+        is_supplemental: true,
+        ..CodeMetadata::default()
+    };
+    let mut first = routes(
+        hit("statement-1", 1, "a.rs", 0.0, 3, Some(marker.clone())),
+        &[("fts", 1), ("vector", 7)],
+    );
+    // Multiple matching fragments from this statement still supply one FTS rank.
+    let evidence = SearchEvidence {
+        fragment: first.entity.fragments()[0].clone(),
+    };
+    first.evidence = vec![evidence.clone(), evidence];
+    let second = routes(
+        hit("statement-2", 1, "a.rs", 0.0, 4, Some(marker)),
+        &[("fts", 3)],
+    );
+    let mut named = routes(
+        fixture_hit(
+            "symbol",
+            1,
+            "a.rs",
+            0.0,
+            2,
+            Content::Code("lookup(name, id)".into()),
+            Some(code(SymbolType::Function, "dispatch", None)),
+        ),
+        &[("fts", 4), ("fts-2", 2), ("vector", 8)],
+    );
+    named.evidence.push(SearchEvidence {
+        fragment: named.entity.fragments()[0].clone(),
+    });
+    vec![
+        document("guide", 2, "guide.md", 1.0, 1),
+        named,
+        first,
+        second,
+    ]
+}
+
+#[test]
+fn general_queries_adjust_independent_route_ranks_once_per_supplemental_entity() {
+    use super::super::pipeline::reciprocal_rank;
+    let pool = supplemental_recall_pool();
+    let original = pool[1].score;
+    for (query, changes) in [
+        ("How does this work?", true),
+        ("KEY_NAME", false),
+        ("Where is KEY_NAME defined?", false),
+        ("\"some phrase\"", false),
+        ("lookup(name, id)", false),
+        ("甲与乙如何协作", false),
+    ] {
+        let result = run(query, pool.clone(), &QueryFilter::default(), 4);
+        assert_eq!(result[0].entity.id().as_str(), "guide");
+        let hit = result
+            .iter()
+            .find(|h| h.entity.id().as_str() == "symbol")
+            .expect("regular code");
+        let raw = hit.trace.as_ref().expect("raw trace");
+        assert_eq!(raw.fusion.score, original);
+        assert_eq!(raw.fusion.rank, 2);
+        assert_eq!(raw.recall[0].rank, Some(4));
+        let ranked = raw.ranking.as_ref().expect("ranking");
+        assert_eq!(ranked.normalized_base, original);
+        if changes {
+            assert_eq!(
+                ranked.adjusted_route_ranks,
+                BTreeMap::from([("fts".into(), 2), ("vector".into(), 7)])
+            );
+            assert_eq!(
+                ranked.static_score,
+                reciprocal_rank(2) + reciprocal_rank(2) + reciprocal_rank(7)
+            );
+        } else {
+            assert!(ranked.adjusted_route_ranks.is_empty(), "{query}");
+        }
+        let untraced = pool
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.untraced_recall = item.trace.take().expect("fixture trace").recall;
+                item
+            })
+            .collect();
+        let without = run(query, untraced, &QueryFilter::default(), 4);
+        assert!(
+            result
+                .iter()
+                .zip(&without)
+                .all(|(a, b)| a.entity.id() == b.entity.id() && a.score == b.score)
+        );
+    }
+}
+
+#[test]
+fn a_complete_test_title_waives_only_the_matching_test_path_penalty() {
+    let mut target = fixture_hit(
+        "callback",
+        1,
+        "tests/selection.ts",
+        0.96,
+        2,
+        Content::Code("it('keeps all original ranks', () => {});".into()),
+        None,
+    );
+    target
+        .evidence
+        .push(super::super::pipeline::SearchEvidence {
+            fragment: target.entity.fragments()[0].clone(),
+        });
+    let competing = hit("function", 2, "src/selection.ts", 0.75, 1, None);
+    for (q, target_wins) in [
+        ("keeps all original ranks", true),
+        ("\"keeps all original ranks\"", true),
+        ("all original ranks", false),
+        ("How does selection keep the original ranks?", false),
+        ("ranks", false),
+    ] {
+        let out = run(
+            q,
+            vec![competing.clone(), target.clone()],
+            &QueryFilter::default(),
+            2,
+        );
+        let index = usize::from(!target_wins);
+        let trace = out[index]
+            .trace
+            .as_ref()
+            .expect("search trace")
+            .ranking
+            .as_ref()
+            .expect("code ranking");
+        assert_eq!(out[index].entity.id().as_str(), "callback", "{q}");
+        assert_eq!(
+            trace.path_overrides.contains(&"test".to_owned()),
+            target_wins,
+            "{q}"
+        );
     }
 }
 

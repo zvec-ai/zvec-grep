@@ -21,6 +21,8 @@ struct Candidate {
     #[serde(default)]
     is_supplemental: bool,
     signature: Option<String>,
+    #[serde(default)]
+    recall: Vec<crate::api::context::result::SearchRecallTrace>,
     best_fragment: Option<String>,
     score: f64,
     rank: usize,
@@ -171,6 +173,12 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 candidate.rank,
                 metadata,
             );
+            result
+                .trace
+                .as_mut()
+                .expect("snapshot trace")
+                .recall
+                .clone_from(&candidate.recall);
             // Line intervals are conservative for same-line overlap in CLI snapshots.
             result.entity = Entity::new(
                 result.entity.id().clone(),

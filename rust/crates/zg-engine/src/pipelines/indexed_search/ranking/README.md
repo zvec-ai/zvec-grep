@@ -41,6 +41,14 @@ full score when its best matching fragment contains the complete, case-sensitive
 8 KiB. Mentioning several identifiers in a question does not trigger an exemption.
 Existing anonymous chunks keep their original scores.
 
+For a general query, code scoring subtracts earlier supplemental entities
+from each other code entity's rank on that same recall route. Each supplemental
+entity contributes its best fragment rank once per route. The rule preserves
+the original fusion positions reserved for documents. Explicit source
+lookups use the original ranks. The ranking trace's `adjusted_route_ranks`
+lists changed ranks used for code scoring, alongside the original recall and
+fusion scores.
+
 For a single identifier or explicit single-target value or declaration lookup,
 an exact, case-sensitive match to a supplemental statement's extracted binding
 earns the exact name and definition bonuses. The trace labels this match
@@ -48,7 +56,9 @@ earns the exact name and definition bonuses. The trace labels this match
 
 Path roles use workspace-relative components and explicit filename patterns.
 Test/example/dependency intent and narrowly targeted include globs can waive a
-role penalty. A common dependency penalty is neutralized when all code candidates
+role penalty. A pasted multiword test title waives the test path penalty for a
+candidate whose leading evidence contains the entire string as a call argument.
+A common dependency penalty is neutralized when all code candidates
 are dependency code. Neither `dist/` nor `.d.ts` alone implies generated code.
 
 Final selection is greedy: after each selected entity, remaining entities from

@@ -1,9 +1,14 @@
 //! Rerank recalled code within the positions assigned to code by fusion.
 mod paths;
 mod query;
+mod recall;
+mod source;
 mod support;
 
-use std::{cmp::Ordering, collections::HashMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap},
+};
 
 use super::{
     pipeline::{ResolvedSearchRoute, SearchHit},
@@ -56,6 +61,8 @@ impl Policy {
 struct Scored {
     hit: SearchHit,
     base: f64,
+    raw_base: f64,
+    adjusted_route_ranks: BTreeMap<String, usize>,
     static_score: f64,
     symbol_match: &'static str,
     symbol_bonus: f64,
@@ -157,6 +164,9 @@ fn score_code(
     queries.dedup();
     let query_text = queries.join("\n");
     let query = QueryFeatures::new(&query_text);
+    let supplemental_ranks =
+        recall::SupplementalRanks::for_query(&hits, &query.source_lookup, &query_text);
+    let literal_phrase = source::literal_phrase(&query_text);
     let competes_with_symbols = hits.iter().any(|hit| {
         matches!(hit.entity.metadata(), Some(EntityMetadata::Code(code)) if code.symbol_name.is_some())
     });
@@ -171,6 +181,13 @@ fn score_code(
         .into_iter()
         .zip(roles)
         .map(|(hit, roles)| {
+            let mut overrides = overrides;
+            if roles.tests
+                && !overrides.tests
+                && literal_phrase.is_some_and(|phrase| source::has_literal_argument(&hit, phrase))
+            {
+                overrides.tests = true;
+            }
             let (symbol_match, symbol_bonus, definition_bonus) = match hit.entity.metadata() {
                 Some(EntityMetadata::Code(code)) => query.symbol_bonus_with(code, policy),
                 _ => ("none", 0.0, 0.0),
@@ -196,7 +213,9 @@ fn score_code(
                 }
                 _ => None,
             };
-            let base = hit.score / maximum_rrf;
+            let raw_base = hit.score / maximum_rrf;
+            let (ranking_rrf, adjusted_route_ranks) = supplemental_ranks.adjust(&hit);
+            let base = ranking_rrf / maximum_rrf;
             let mut path_bonus = policy.path_weight
                 * query.path_affinity(&hit.file.relative_path().display().to_string());
             // Weak lexical coverage is one signal even when repeated in the path.
@@ -210,6 +229,8 @@ fn score_code(
             Scored {
                 hit,
                 base,
+                raw_base,
+                adjusted_route_ranks,
                 static_score,
                 symbol_match,
                 symbol_bonus,
@@ -237,7 +258,6 @@ fn matches_source_lookup(
     lookup: &SourceLookup,
     query: &str,
 ) -> bool {
-    const MAX_BYTES: usize = 8 * 1024;
     let (query, whole_identifier) = match lookup {
         SourceLookup::Literal => return true,
         SourceLookup::Identifier(name) if name.is_ascii() || binding == Some(name.as_str()) => {
@@ -247,30 +267,13 @@ fn matches_source_lookup(
         SourceLookup::Identifier(name) => (name.as_str(), true),
         SourceLookup::General => (query.trim(), false),
     };
-    if query.is_empty() || query.len() > MAX_BYTES {
+    if query.is_empty() || query.len() > source::MAX_BYTES {
         return false;
     }
-    let (Content::Code(source), Some(evidence)) = (hit.entity.content(), hit.evidence.first())
-    else {
+    let Some(fragment) = source::best_fragment(hit) else {
         return false;
     };
-    let fragment = match evidence.fragment.range {
-        Range::Full => source.as_str(),
-        Range::Byte(range) => {
-            let (Ok(start), Ok(end)) = (
-                usize::try_from(range.start_offset()),
-                usize::try_from(range.end_offset()),
-            ) else {
-                return false;
-            };
-            let Some(fragment) = source.get(start..end) else {
-                return false;
-            };
-            fragment
-        }
-        Range::Text(_) => return false,
-    };
-    let searchable = &fragment[..fragment.floor_char_boundary(MAX_BYTES)];
+    let searchable = &fragment[..fragment.floor_char_boundary(source::MAX_BYTES)];
     if !whole_identifier {
         return searchable.contains(query);
     }
@@ -335,7 +338,8 @@ fn select(
             trace.ranking = Some(SearchRankingTrace {
                 policy: policy.name.to_owned(),
                 query_features: query.describe(),
-                normalized_base: item.base,
+                normalized_base: item.raw_base,
+                adjusted_route_ranks: item.adjusted_route_ranks,
                 symbol_match: item.symbol_match.to_owned(),
                 symbol_bonus: item.symbol_bonus,
                 definition_bonus: item.definition_bonus,
