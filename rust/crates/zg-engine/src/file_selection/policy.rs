@@ -45,6 +45,12 @@ struct IgnoreCache {
     source_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+enum Ancestors {
+    Unchecked,
+    Traversed,
+}
+
 impl ScanPolicy {
     pub(crate) fn new(root: &Path, options: &ScanRules) -> EngineResult<Self> {
         Self::with_default_exclusions(root, options, true)
@@ -107,7 +113,12 @@ impl ScanPolicy {
         Ok(spec)
     }
 
-    fn selected(&self, path: &Path, directory: bool) -> Result<bool, HostError> {
+    fn selected(
+        &self,
+        path: &Path,
+        directory: bool,
+        ancestors: Ancestors,
+    ) -> Result<bool, HostError> {
         if path.starts_with(&self.index_path)
             || (self.options.follow_symlinks()
                 && std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(&self.index_path)))
@@ -126,18 +137,32 @@ impl ScanPolicy {
         {
             return Ok(false);
         }
-        // Direct incremental scans obey the same ancestor boundaries as full walks.
-        for parent in relative
-            .parent()
-            .into_iter()
-            .flat_map(Path::ancestors)
-            .take_while(|parent| !parent.as_os_str().is_empty())
-        {
-            if !self.selected_entry(&self.root.join(parent), true)? {
-                return Ok(false);
+        if let Ancestors::Unchecked = ancestors {
+            for parent in relative
+                .parent()
+                .into_iter()
+                .flat_map(Path::ancestors)
+                .take_while(|parent| !parent.as_os_str().is_empty())
+            {
+                if !self.selected_entry(&self.root.join(parent), true)? {
+                    return Ok(false);
+                }
             }
         }
         self.selected_entry(path, directory)
+    }
+
+    fn descend(&self, path: &Path, ancestors: Ancestors) -> Result<bool, HostError> {
+        if !self.selected(path, true, ancestors)? {
+            return Ok(false);
+        }
+        // Discover ignore-file symlinks even when scanning does not follow links.
+        if self.options.use_default_ignores() {
+            for name in IGNORE_NAMES {
+                self.rules(&path.join(name), false)?;
+            }
+        }
+        Ok(true)
     }
 
     fn selected_entry(&self, absolute: &Path, directory: bool) -> Result<bool, HostError> {
@@ -374,20 +399,19 @@ impl ScanPolicy {
 
 impl PathPolicy for ScanPolicy {
     fn includes_file(&self, absolute_path: &Path) -> Result<bool, HostError> {
-        self.selected(absolute_path, false)
+        self.selected(absolute_path, false, Ancestors::Unchecked)
     }
 
     fn can_descend(&self, absolute_path: &Path) -> Result<bool, HostError> {
-        if !self.selected(absolute_path, true)? {
-            return Ok(false);
-        }
-        // Discover ignore-file symlinks even when scanning does not follow links.
-        if self.options.use_default_ignores() {
-            for name in IGNORE_NAMES {
-                self.rules(&absolute_path.join(name), false)?;
-            }
-        }
-        Ok(true)
+        self.descend(absolute_path, Ancestors::Unchecked)
+    }
+
+    fn includes_child_file(&self, absolute_path: &Path) -> Result<bool, HostError> {
+        self.selected(absolute_path, false, Ancestors::Traversed)
+    }
+
+    fn can_descend_child(&self, absolute_path: &Path) -> Result<bool, HostError> {
+        self.descend(absolute_path, Ancestors::Traversed)
     }
 
     fn control_file_changed(&self, absolute_path: &Path) -> Result<Option<PathBuf>, HostError> {

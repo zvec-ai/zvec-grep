@@ -24,6 +24,22 @@ pub trait PathPolicy: Send + Sync + fmt::Debug {
     /// Returns an error when selection rules cannot be evaluated.
     fn can_descend(&self, absolute_path: &Path) -> Result<bool, HostError>;
 
+    /// Select a file encountered directly inside a directory admitted by this walk.
+    ///
+    /// # Errors
+    /// Returns an error when selection rules cannot be evaluated.
+    fn includes_child_file(&self, absolute_path: &Path) -> Result<bool, HostError> {
+        self.includes_file(absolute_path)
+    }
+
+    /// Select a directory encountered directly inside a directory admitted by this walk.
+    ///
+    /// # Errors
+    /// Returns an error when selection rules cannot be evaluated.
+    fn can_descend_child(&self, absolute_path: &Path) -> Result<bool, HostError> {
+        self.can_descend(absolute_path)
+    }
+
     /// Invalidate changed selection rules and return a root-relative rescan scope.
     ///
     /// # Errors

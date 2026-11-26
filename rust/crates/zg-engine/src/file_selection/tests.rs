@@ -219,6 +219,43 @@ async fn nested_repositories_are_selected_and_metadata_is_never_scanned() {
 }
 
 #[tokio::test]
+async fn walked_children_keep_file_rules_and_scoped_roots_check_their_ancestors() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path();
+    write(root, ".gitignore", "blocked/\n*.tmp\n");
+    write(root, "src/api/.gitignore", "!keep.tmp\n");
+    for path in [
+        "src/api/keep.tmp",
+        "src/api/drop.tmp",
+        "src/api/main.rs",
+        "blocked/api/main.rs",
+    ] {
+        write(root, path, "source");
+    }
+    let rules = ScanRules::default();
+    assert_eq!(
+        scan(root, &[], &rules, vec![]).await,
+        ["src/api/keep.tmp", "src/api/main.rs"].map(PathBuf::from)
+    );
+
+    for entry in ["blocked/api", "blocked/api/main.rs"] {
+        let mut spec = ScanPolicy::root_spec(root, &rules).expect("policy");
+        spec.path = root.join(entry);
+        let snapshot = NativeScanner::new()
+            .discover(
+                &ScanRequest {
+                    roots: vec![spec],
+                    scope_paths: vec![],
+                },
+                &TaskControl::default(),
+            )
+            .await
+            .expect("scan from nested entry");
+        assert!(snapshot.files.is_empty(), "{entry}");
+    }
+}
+
+#[tokio::test]
 async fn explicit_globs_override_ignores_but_scope_cannot_bypass_excluded_parents() {
     let temporary = tempfile::tempdir().expect("workspace");
     let root = temporary.path();

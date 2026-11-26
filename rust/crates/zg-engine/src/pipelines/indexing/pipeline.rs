@@ -244,6 +244,23 @@ pub(crate) async fn get_workspace_index_status(
     detailed: bool,
 ) -> Result<IndexStats, EngineError> {
     let stored_files = storage.list_files()?;
+    workspace_index_status_from_files(
+        workspace,
+        async { Ok(stored_files) },
+        scanner,
+        signal,
+        detailed,
+    )
+    .await
+}
+
+pub(super) async fn workspace_index_status_from_files(
+    workspace: &Workspace,
+    stored_files: impl Future<Output = Result<Vec<FileRecord>, EngineError>>,
+    scanner: &dyn WorkspaceScannerPort,
+    signal: Option<CancellationToken>,
+    detailed: bool,
+) -> Result<IndexStats, EngineError> {
     let control = task_control(signal);
     let snapshot = scanner
         .discover(
@@ -255,6 +272,7 @@ pub(crate) async fn get_workspace_index_status(
         )
         .await
         .map_err(map_host_error)?;
+    let stored_files = stored_files.await?;
     let (discovered_files, _) =
         classify_files(workspace, snapshot.files, &stored_files, &control).await?;
     let mut diff = compute_diff(discovered_files, &stored_files);

@@ -730,8 +730,20 @@ fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
         "--color",
         "never",
     ]);
-    let clean = fixture.success(&["--mode", "direct", "--fts", "needle", "--color", "never"]);
-    assert!(!String::from_utf8_lossy(&clean.stderr).contains("status:"));
+    let clean = success(
+        fixture
+            .command(&["--mode", "direct", "--fts", "needle", "--color", "never"])
+            .env("RUST_LOG", "zg_engine::storage::store=debug")
+            .output()
+            .expect("run direct query"),
+    );
+    let stderr = String::from_utf8_lossy(&clean.stderr);
+    assert!(!stderr.contains("status:"));
+    assert_eq!(
+        stderr.matches("opened index storage").count(),
+        1,
+        "{stderr}"
+    );
     fs::write(
         fixture.root.path().join("unmatched.txt"),
         "unrelated contents",

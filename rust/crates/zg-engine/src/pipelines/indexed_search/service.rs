@@ -1,14 +1,20 @@
 //! Resolve the indexed workspace, refresh it when requested, and execute retrieval.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     EngineError,
     api::{
-        context::{ContextOptions, ContextResult},
+        context::{ContextOptions, ContextResult, result::ContextIndexingStatus},
         index::IndexOptions,
     },
-    domain::{IndexDescriptor, IndexState, Workspace, model::ModelConfig},
+    domain::{FileRecord, IndexDescriptor, IndexState, Workspace, model::ModelConfig},
     models::{ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest},
     pipelines::{
         indexing::service::{
@@ -70,7 +76,7 @@ pub(crate) async fn context(
     let allows_writer = options.refresh.map_or(!options.auto_update, |policy| {
         policy != crate::api::context::options::RefreshPolicy::Wait
     });
-    let _lock = match acquire_read_source(
+    let lock = match acquire_read_source(
         &source_root,
         &layout,
         &wait,
@@ -81,13 +87,13 @@ pub(crate) async fn context(
     .await?
     {
         ReadSource::Writer { lease, context } => {
-            return query_storage(
-                &context,
-                &lease.session.workspace,
-                &lease.session.storage,
-                options,
-                &request,
-            )
+            // The scan needs only the workspace snapshot after retrieval releases the writer.
+            let snapshot = Arc::clone(&lease.session.workspace);
+            let workspace = snapshot.as_ref();
+            return with_index_status(indexing, workspace, options, true, async move |files| {
+                let storage = &lease.session.storage;
+                query_storage(&context, workspace, storage, options, &request, files).await
+            })
             .await;
         }
         ReadSource::Read(lock) => lock,
@@ -113,26 +119,66 @@ pub(crate) async fn context(
             "index storage is missing",
         ));
     }
-    let acquired = query_models(models, &workspace, options, &request)?;
-    let graph_enabled = workspace
-        .index()
-        .descriptor()
-        .is_some_and(IndexDescriptor::graph_indexing);
-    let storage = match read_sessions {
-        Some(cache) => cache.acquire(
-            &layout,
-            workspace.layout().index_dir(),
-            workspace
-                .storage_generation()
-                .expect("published index generation"),
-            graph_enabled,
-        )?,
-        None => ReadSessionLease::open(workspace.layout().index_dir(), graph_enabled)?,
-    };
-    let result = query_storage(&acquired, &workspace, storage.storage(), options, &request).await;
-    let close = storage.close();
-    let result = result?;
-    close?;
+    with_index_status(indexing, &workspace, options, false, async |files| {
+        // The status scan owns its file records and can outlive this read session.
+        let _lock = lock;
+        let acquired = query_models(models, &workspace, options, &request)?;
+        let storage = ReadSessionLease::for_workspace(&workspace, read_sessions)?;
+        let result = query_storage(
+            &acquired,
+            &workspace,
+            storage.storage(),
+            options,
+            &request,
+            files,
+        )
+        .await;
+        let close = storage.close();
+        let result = result?;
+        close?;
+        Ok(result)
+    })
+    .await
+}
+
+async fn with_index_status(
+    indexing: &WorkspaceIndexService,
+    workspace: &Workspace,
+    options: &ContextOptions,
+    writer_active: bool,
+    query: impl AsyncFnOnce(
+        Option<oneshot::Sender<Vec<FileRecord>>>,
+    ) -> Result<ContextResult, EngineError>,
+) -> Result<ContextResult, EngineError> {
+    if !options.inspect_index_status {
+        return query(None).await;
+    }
+    let signal = options
+        .signal
+        .as_ref()
+        .map(CancellationToken::child_token)
+        .unwrap_or_default();
+    let _cancel_on_drop = signal.clone().drop_guard();
+    let (sender, records) = oneshot::channel();
+    let check_workspace = indexing.detailed_status(
+        workspace,
+        async {
+            records
+                .await
+                .map_err(|_| EngineError::cancelled("query ended before reading index files"))
+        },
+        Some(signal.clone()),
+    );
+    // Poll discovery first so the native scanner dispatches its walk before synchronous index loading.
+    let (stats, result) = tokio::join!(biased; check_workspace, async {
+        let result = query(Some(sender)).await;
+        if result.is_err() {
+            signal.cancel();
+        }
+        result
+    });
+    let mut result = result?;
+    result.indexing = ContextIndexingStatus::from_inspection(&stats?, writer_active);
     Ok(result)
 }
 
@@ -147,7 +193,7 @@ fn prepare_writer_context(
         let schema = workspace
             .index()
             .descriptor()
-            .map(crate::domain::IndexDescriptor::default_embedding_model)
+            .map(IndexDescriptor::default_embedding_model)
             .ok_or_else(|| {
                 workspace_index_unavailable(
                     workspace.source_root(),
@@ -201,7 +247,13 @@ async fn query_storage(
     storage: &IndexStore,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
+    status_files: Option<oneshot::Sender<Vec<FileRecord>>>,
 ) -> Result<ContextResult, EngineError> {
+    if let Some(sender) = status_files {
+        let _ = sender.send(storage.list_files()?);
+        // Let the status check start classifying files while retrieval uses the index.
+        tokio::task::yield_now().await;
+    }
     let runtimes = acquired
         .iter()
         .map(|model| RequestEmbeddingRuntime {
@@ -253,7 +305,7 @@ pub(in crate::pipelines) fn acquire_search_model(
     let schema = workspace
         .index()
         .descriptor()
-        .map(crate::domain::IndexDescriptor::default_embedding_model)
+        .map(IndexDescriptor::default_embedding_model)
         .ok_or_else(|| {
             workspace_index_unavailable(
                 workspace.layout().storage_dir(),

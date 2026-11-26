@@ -392,8 +392,8 @@ fn walk(
             if !root.follow {
                 continue;
             }
-            if !root.policy.includes_file(&absolute_path)?
-                && !root.policy.can_descend(&absolute_path)?
+            if !root.policy.includes_child_file(&absolute_path)?
+                && !root.policy.can_descend_child(&absolute_path)?
             {
                 continue;
             }
@@ -412,7 +412,7 @@ fn walk(
             }
             if !root.recursive
                 || root.max_depth.is_some_and(|maximum| depth + 1 >= maximum)
-                || !root.policy.can_descend(&absolute_path)?
+                || !root.policy.can_descend_child(&absolute_path)?
             {
                 continue;
             }
@@ -441,7 +441,7 @@ fn walk(
         }
         if !is_file
             || root.max_depth.is_some_and(|maximum| depth + 1 > maximum)
-            || !root.policy.includes_file(&absolute_path)?
+            || !root.policy.includes_child_file(&absolute_path)?
         {
             continue;
         }

@@ -5,7 +5,7 @@ use crate::{
         ContentRange, ContextContentRole, ContextItem, ContextItemKind, ContextItemStatus,
         MatchedBy,
     },
-    domain::{Content, Entity, IndexDescriptor, WorkspaceLayout},
+    domain::{Content, Entity, WorkspaceLayout},
     lexical::{
         extracted::{ExtractedFileState, ExtractedMatcher},
         types::{LexicalMatch, LexicalSearchRequest},
@@ -147,11 +147,7 @@ async fn search_workspace(
                 ..SearchResult::default()
             });
         };
-        let graph = workspace
-            .index()
-            .descriptor()
-            .is_some_and(IndexDescriptor::graph_indexing);
-        let lease = ReadSessionLease::open(workspace.layout().index_dir(), graph)?;
+        let lease = ReadSessionLease::for_workspace(&workspace, None)?;
         let result = run(lease.storage());
         let close = lease.close();
         let result = result?;

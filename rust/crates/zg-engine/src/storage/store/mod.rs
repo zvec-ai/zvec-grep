@@ -251,6 +251,7 @@ impl IndexStore {
             _lock: lock,
         });
         registry.insert(path, Arc::downgrade(&shared));
+        tracing::debug!(read_only, "opened index storage");
         Ok(Self {
             shared: Mutex::new(Some(shared)),
             read_only,
