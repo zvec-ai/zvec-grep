@@ -14,7 +14,7 @@ mod spi;
 mod text;
 
 pub(crate) use preparation::{
-    ExtractionOperation, ExtractionPort, ExtractionRequest, ExtractionService,
+    ExtractionError, ExtractionOperation, ExtractionPort, ExtractionRequest, ExtractionService,
 };
 
 pub(crate) use code::code_outline;

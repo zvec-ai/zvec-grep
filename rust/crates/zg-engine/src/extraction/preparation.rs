@@ -8,7 +8,7 @@ use crate::{
     EngineError, ErrorReport,
     domain::{FileFormat, SourcePath, model::ModelProgress},
     models::{LayoutModelConfig, ModelRuntimeManager},
-    utils::decode_index_text,
+    utils::{DecodeFailure, decode_index_text},
 };
 use async_trait::async_trait;
 use std::{
@@ -73,6 +73,12 @@ impl PreparedSource {
 pub(crate) enum ExtractionError {
     Document(EngineError),
     Dependency(EngineError),
+    /// The bytes carry no indexable text, so the caller skips the path instead
+    /// of failing it; the reason says which cause fired.
+    NoText {
+        path: SourcePath,
+        failure: DecodeFailure,
+    },
 }
 impl From<EngineError> for ExtractionError {
     fn from(error: EngineError) -> Self {
@@ -83,6 +89,10 @@ impl From<ExtractionError> for EngineError {
     fn from(error: ExtractionError) -> Self {
         match error {
             ExtractionError::Document(e) | ExtractionError::Dependency(e) => e,
+            ExtractionError::NoText { path, .. } => Self::invalid_argument(format!(
+                "cannot extract text from {}: binary content or malformed BOM-marked text",
+                path.display()
+            )),
         }
     }
 }
@@ -133,11 +143,11 @@ impl ExtractionPort for ExtractionService {
         } = request;
         match super::source_kind(formats) {
             Some(SourceKind::Text) => {
-                let text = decode_index_text(formats, &bytes).ok_or_else(|| {
-                    EngineError::invalid_argument(format!(
-                        "cannot extract text from {}: binary content or malformed BOM-marked text",
-                        path.display()
-                    ))
+                let text = decode_index_text(formats, &bytes).map_err(|failure| {
+                    ExtractionError::NoText {
+                        path: path.clone(),
+                        failure,
+                    }
                 })?;
                 Ok(PreparedSource::Text(TextSource {
                     relative_path: path.clone(),

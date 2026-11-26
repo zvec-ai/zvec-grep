@@ -7,6 +7,7 @@ mod hash;
 mod text;
 
 // Encoding.
+pub(crate) use encoding::DecodeFailure;
 pub(crate) use encoding::decode_index_text;
 pub(crate) use encoding::decode_text;
 

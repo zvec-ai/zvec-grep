@@ -776,6 +776,8 @@ pub mod result {
         pub entities_created: usize,
         pub duration_micros: u64,
         pub timings: Vec<TimingEntry>,
+        /// Bounded samples of paths whose content holds no indexable text,
+        /// covering both scan-time rejects and preparation-time decode failures.
         pub skipped: Vec<SkippedFile>,
         /// Full skip counts, independent of the bounded diagnostic samples.
         #[serde(default)]
@@ -796,7 +798,10 @@ pub mod result {
         Empty,
         TooLarge,
         Unsupported,
+        /// The bytes hold binary content rather than text.
         Binary,
+        /// A BOM-marked sample does not decode as the encoding it declares.
+        MalformedBom,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

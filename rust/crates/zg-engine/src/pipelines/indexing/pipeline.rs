@@ -40,8 +40,8 @@ use crate::{
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
-        ExtractedEntity, ExtractionOperation, ExtractionPort, ExtractionRequest, SourceKind,
-        source_kind, vector_content_for_fragment,
+        ExtractedEntity, ExtractionError, ExtractionOperation, ExtractionPort, ExtractionRequest,
+        SourceKind, source_kind, vector_content_for_fragment,
     },
     file_selection::ScanPolicy,
     models::{
@@ -49,7 +49,7 @@ use crate::{
         ModelRuntimeLease,
     },
     storage::types::IndexedFragment,
-    utils::{collapse_whitespace, sha256_hex},
+    utils::{DecodeFailure, collapse_whitespace, sha256_hex},
 };
 
 use super::{
@@ -328,6 +328,9 @@ struct IndexWriteStats {
     entities_created: usize,
     failed_files: Vec<PathBuf>,
     failed_reasons: Vec<String>,
+    /// Paths whose bytes held no indexable text, with bounded samples.
+    skipped: Vec<SkippedFile>,
+    skipped_counts: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Default)]
@@ -435,7 +438,8 @@ async fn run_index_pass(
         .map_err(map_host_error)?;
     let (scanned, classification_skips) =
         classify_files(context.workspace, snapshot.files, &all_stored, &control).await?;
-    let (skipped, skipped_counts) = collect_skips(&snapshot.diagnostics, classification_skips);
+    let (mut skipped, mut skipped_counts) =
+        collect_skips(&snapshot.diagnostics, classification_skips);
     let mut scanned = scope.filter_scanned(root, scanned);
     resolve_scanned_identities(context.storage, &mut scanned)?;
     timings.record("index_scan", scan_started.elapsed(), scanned.len());
@@ -468,7 +472,7 @@ async fn run_index_pass(
         diff.deleted.len(),
     );
 
-    let stats = index_candidates(
+    let mut stats = index_candidates(
         context,
         &control,
         &mut diff,
@@ -477,6 +481,13 @@ async fn run_index_pass(
         model_prepared,
     )
     .await?;
+    // Preparation-time skips join the samples the scan already collected:
+    // both describe paths that hold no indexable text.
+    skipped.append(&mut stats.skipped);
+    skipped.truncate(MAX_SKIPPED_FILE_SAMPLES);
+    for (reason, count) in &stats.skipped_counts {
+        *skipped_counts.entry(reason.clone()).or_default() += count;
+    }
     Ok(IndexPassResult {
         files_scanned: diff.files_scanned,
         diff,
@@ -635,6 +646,12 @@ struct PreparedFile {
 enum PreparedCandidate {
     File(Box<PreparedFile>),
     Unchanged(FileRecord),
+    /// The bytes hold no indexable text. The file stays out of the index
+    /// instead of failing it.
+    Skipped {
+        file: FileRecord,
+        reason: SkippedFileReason,
+    },
 }
 
 type EmbeddingFuture<'context> =
@@ -724,6 +741,24 @@ async fn index_candidates_inner<'context>(
                 continue;
             }
             Ok(PreparedCandidate::File(prepared)) => *prepared,
+            Ok(PreparedCandidate::Skipped { file, reason }) => {
+                // A path with no indexable text keeps no entry: drop any
+                // previous snapshot so stale entities cannot be served, then
+                // count the skip without failing the workspace.
+                if candidate.existing.is_some() {
+                    context.storage.delete_file(file.id())?;
+                }
+                note_skipped(&mut stats, context.workspace, &file, reason);
+                report_indexing(
+                    context,
+                    &stats,
+                    diff,
+                    progress_base,
+                    Some(format!("skipped {}", file.relative_path().display())),
+                    None,
+                );
+                continue;
+            }
             Err(error) if error.code() == EngineError::CANCELLED => {
                 return Err(error);
             }
@@ -965,21 +1000,24 @@ fn commit_file(
     Ok(format!("indexed {}", file.file.relative_path().display()))
 }
 
+/// What preparing one candidate produced: the extraction to store, or the
+/// reason its bytes carry no indexable text.
+enum CandidateExtraction {
+    Extracted {
+        extracted: crate::extraction::ExtractionOutput,
+        chunk_options: crate::extraction::ChunkOptions,
+    },
+    Skipped(DecodeFailure),
+}
+
 async fn extract_candidate(
     context: &IndexingContext<'_>,
     control: &TaskControl,
     path: &SourcePath,
     formats: &[FileFormat],
     bytes: Vec<u8>,
-) -> Result<
-    (
-        crate::extraction::ExtractionOutput,
-        crate::extraction::ChunkOptions,
-    ),
-    EngineError,
-> {
-    let model = model_for_content(context, ContentKind::Text)?;
-    let source = context
+) -> Result<CandidateExtraction, EngineError> {
+    let source = match context
         .extractor
         .prepare(ExtractionRequest {
             path,
@@ -991,14 +1029,29 @@ async fn extract_candidate(
                 .clone()
                 .map(model_progress::for_extraction),
         })
-        .await?;
+        .await
+    {
+        Ok(source) => source,
+        // Content that names no text is not an index failure: skipping keeps
+        // the rest of the workspace published and ready.
+        Err(ExtractionError::NoText { failure, .. }) => {
+            return Ok(CandidateExtraction::Skipped(failure));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    // The model is read after preparation, so a path with no text leaves the
+    // index even when no embedding model is ready yet.
+    let model = model_for_content(context, ContentKind::Text)?;
     let options = index_chunk_options(model.info().max_input_tokens(), Some(source.text()));
     let graph = context
         .workspace
         .index()
         .descriptor()
         .is_some_and(IndexDescriptor::graph_indexing);
-    Ok((source.extract(options, graph)?, options))
+    Ok(CandidateExtraction::Extracted {
+        extracted: source.extract(options, graph)?,
+        chunk_options: options,
+    })
 }
 
 async fn prepare_candidate(
@@ -1037,14 +1090,23 @@ async fn prepare_candidate(
         .formats
         .as_ref()
         .ok_or_else(|| EngineError::internal("index candidate must have a detected format"))?;
-    let (extracted, chunk_options) = extract_candidate(
+    let (extracted, chunk_options) = match extract_candidate(
         context,
         control,
         file.relative_path(),
         formats,
         source.bytes,
     )
-    .await?;
+    .await?
+    {
+        CandidateExtraction::Extracted {
+            extracted,
+            chunk_options,
+        } => (extracted, chunk_options),
+        CandidateExtraction::Skipped(failure) => {
+            return Ok(skipped_candidate(file, failure));
+        }
+    };
     let entities = bind_entities(file.id(), extracted.fragments)?;
     let owners = entities
         .iter()
@@ -1292,6 +1354,38 @@ fn record_file_failed(stats: &mut IndexWriteStats, file: &FileRecord, reason: &s
     stats.files_failed += 1;
     stats.failed_files.push(file.relative_path().to_path_buf());
     stats.failed_reasons.push(reason.to_owned());
+}
+
+/// A path whose bytes carry no indexable text leaves the index instead of
+/// failing the workspace, keeping the reason the decoder reported.
+fn skipped_candidate(file: FileRecord, failure: DecodeFailure) -> PreparedCandidate {
+    let reason = match failure {
+        DecodeFailure::Binary => SkippedFileReason::Binary,
+        DecodeFailure::MalformedBom => SkippedFileReason::MalformedBom,
+    };
+    PreparedCandidate::Skipped { file, reason }
+}
+
+/// Counts a path whose bytes carry no indexable text. Skipped paths never
+/// count as failures, so they leave the workspace ready.
+fn note_skipped(
+    stats: &mut IndexWriteStats,
+    workspace: &Workspace,
+    file: &FileRecord,
+    reason: SkippedFileReason,
+) {
+    *stats
+        .skipped_counts
+        .entry(skip_reason_key(reason).to_owned())
+        .or_default() += 1;
+    if stats.skipped.len() < MAX_SKIPPED_FILE_SAMPLES {
+        stats.skipped.push(SkippedFile {
+            path: workspace.source_root().join(file.relative_path().as_path()),
+            reason,
+            size_bytes: Some(file.snapshot().size_bytes),
+            limit_bytes: None,
+        });
+    }
 }
 
 struct EmbeddingBatchOutcome {
@@ -2146,17 +2240,24 @@ fn count_skips(
         ("too_large".to_owned(), native.too_large),
         ("unsupported".to_owned(), native.unsupported),
         ("binary".to_owned(), native.binary),
+        ("malformed_bom".to_owned(), 0),
     ]);
     for file in classified {
-        let reason = match file.reason {
-            SkippedFileReason::Empty => "empty",
-            SkippedFileReason::TooLarge => "too_large",
-            SkippedFileReason::Unsupported => "unsupported",
-            SkippedFileReason::Binary => "binary",
-        };
-        *counts.entry(reason.to_owned()).or_default() += 1;
+        *counts
+            .entry(skip_reason_key(file.reason).to_owned())
+            .or_default() += 1;
     }
     counts
+}
+
+const fn skip_reason_key(reason: SkippedFileReason) -> &'static str {
+    match reason {
+        SkippedFileReason::Empty => "empty",
+        SkippedFileReason::TooLarge => "too_large",
+        SkippedFileReason::Unsupported => "unsupported",
+        SkippedFileReason::Binary => "binary",
+        SkippedFileReason::MalformedBom => "malformed_bom",
+    }
 }
 
 fn collect_skips(
