@@ -11,10 +11,10 @@ contains the legacy TypeScript implementation.
 - [npm installation](npm/meta/README.md): native packages distributed through npm.
 - [Agent integration](https://zvec.org/en/docs/zvec-grep/agents/): client configuration.
 
-## Develop
+After upgrading, run `zg --index --rebuild` to include newly supported Python
+and Go lookup tables in previously indexed files.
 
-After upgrading, use `zg --index --rebuild` to pick up newly supported
-declarations in files that have not changed since their last index.
+## Develop
 
 Run development commands from the workspace directory:
 

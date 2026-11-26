@@ -181,7 +181,7 @@ fn assemble_output(
         append_code_entity(
             source,
             entity.node,
-            Some(code_entity_metadata(entity)),
+            code_entity_metadata(entity),
             max_chars,
             overlap_chars,
             &mut output,
@@ -685,13 +685,13 @@ fn walk_code_node<'tree>(
 fn append_code_entity(
     source: &TextSource,
     node: Node<'_>,
-    metadata: Option<EntityMetadata>,
+    metadata: EntityMetadata,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
     let (content_max, content_overlap) =
-        chunk_options_for_metadata(max_chars, overlap_chars, metadata.as_ref());
+        chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
     let range = TextRange::from_coordinates(
         node.start_byte(),
         node.end_byte(),
@@ -714,7 +714,7 @@ fn append_code_entity(
         source_map: None,
         fragments: text_fragments(&content, content_max, content_overlap),
         content: Content::Text(content),
-        metadata,
+        metadata: Some(metadata),
     });
 }
 
@@ -4187,9 +4187,8 @@ public class Service {
         let Some(EntityMetadata::Code(metadata)) = test_metadata(entity) else {
             panic!("missing metadata for {binding}");
         };
-        assert_eq!(metadata.signature.as_deref(), Some(binding));
-        assert!(metadata.symbol_name.is_none());
-        assert!(metadata.symbol_type.is_none());
+        assert_eq!(metadata.symbol_name.as_deref(), Some(binding));
+        assert_eq!(metadata.symbol_type, Some(SymbolType::Value));
         assert_source_backed(source, entity);
     }
 
@@ -4242,6 +4241,36 @@ public class Service {
     }
 
     #[test]
+    fn table_documentation_only_includes_attached_source_comments() {
+        let source = test_source(
+            FileFormat::Python,
+            "comments.py",
+            concat!(
+                "def owner(): pass  # About the function.\n",
+                "# Previous paragraph.\n\n",
+                "# Per-mode labels.\n",
+                "# Read by the formatter.\n",
+                "LABELS = {'one': 1}\n",
+                "# A detached comment.\n\n",
+                "OTHER = {'two': 2}\n",
+            ),
+        );
+        let entities = extract(&source, ChunkOptions::default()).expect("Python extraction");
+        let doc = |binding| {
+            let Some(EntityMetadata::Code(metadata)) = test_metadata(named(&entities, binding))
+            else {
+                panic!("missing metadata");
+            };
+            metadata.documentation.as_deref()
+        };
+        assert_eq!(
+            doc("LABELS"),
+            Some("Per-mode labels.\nRead by the formatter.")
+        );
+        assert_eq!(doc("OTHER"), None);
+    }
+
+    #[test]
     fn python_data_tables_require_a_static_module_binding() {
         let declaration = "SINGLE = {'one': 1}";
         let body = [
@@ -4250,20 +4279,25 @@ public class Service {
             "COMPUTED = {'key': factory()}",
             "FORMATTED = {'key': f'value {factory()}'}",
             "COMPREHENSION = {k: 1 for k in source}",
+            "ANNOTATED: factory() = {'one': 1}",
+            "BOUND_METHOD = {'key': ({}).get}",
             "TEMPLATE = '''class Generated: pass'''",
             "LIMIT = 1",
             "FIRST = SECOND = {'one': 1}",
             "target.table = {'one': 1}",
             "if enabled: CONDITIONAL = {'one': 1}",
+            "class Owner:",
+            "    BY_NAME = {'one': 1}",
             "def owner():",
             "    LOCAL = {'one': 1}",
         ]
         .join("\n");
         let source = test_source(FileFormat::Python, "tables.py", &body);
         let entities = extract(&source, ChunkOptions::default()).expect("Python extraction");
-        assert_eq!(entities.len(), 2);
-        assert_eq!(named(&entities, "owner").index, 0);
-        assert_data_table(&source, &entities[1], "SINGLE", declaration);
+        assert_eq!(entities.len(), 3);
+        assert_eq!(named(&entities, "Owner").index, 0);
+        assert_eq!(named(&entities, "owner").index, 1);
+        assert_data_table(&source, &entities[2], "SINGLE", declaration);
     }
 
     #[test]
@@ -4273,6 +4307,7 @@ public class Service {
         let body = format!(
             "package demo\n{single}\nvar (\n    {grouped}\n    Empty = map[int]int{{}}\n\
              Dynamic = map[int]int{{1: compute()}}\n\
+             TypeCall = map[int]any{{1: [unsafe.Sizeof(probe())]byte{{}}}}\n\
              ComputedKey = map[int]int{{key(): 2}}\n\
              A, B = map[int]int{{1: 2}}, map[int]int{{3: 4}}\n\
              _ = map[int]int{{1: 2}}\n)\n\
@@ -4310,6 +4345,40 @@ public class Service {
             let output = super::extract_code(&source, options, false, true).expect("extraction");
             assert_eq!(output.fragments, plain);
             assert!(output.graph.is_none());
+        }
+    }
+
+    #[test]
+    fn package_data_tables_keep_nested_references_but_skip_calls() {
+        for (format, path, declaration, rejected, symbol) in [
+            (
+                FileFormat::Python,
+                "labels.py",
+                "Labels = {status.codes.OK: [defaults.text.LABEL]}",
+                "dynamic = {'key': factory().text.LABEL}",
+                "def owner(): pass",
+            ),
+            (
+                FileFormat::Go,
+                "labels.go",
+                "var Labels = map[int]string{status.Codes.OK: defaults.Text.Label}",
+                "var dynamic = map[int]string{1: factory().Text.Label}",
+                "func owner() {}",
+            ),
+        ] {
+            let prefix = if format == FileFormat::Go {
+                "package demo\n"
+            } else {
+                ""
+            };
+            let source = test_source(
+                format,
+                path,
+                &format!("{prefix}{declaration}\n{rejected}\n{symbol}\n"),
+            );
+            let entities = extract(&source, ChunkOptions::default()).expect("code extraction");
+            assert_eq!(entities.len(), 2);
+            assert_data_table(&source, &entities[1], "Labels", declaration);
         }
     }
 }
