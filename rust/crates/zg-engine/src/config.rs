@@ -142,8 +142,18 @@ fn parse_global_config(value: &Value) -> Result<Value, EngineError> {
 }
 
 fn parse_defaults(fields: &Map<String, Value>) -> Result<Option<Value>, EngineError> {
-    check_known_fields(fields, &["embedding", "modelCacheDir"], "defaults")?;
+    check_known_fields(
+        fields,
+        &["embedding", "modelCacheDir", "vectorIndex"],
+        "defaults",
+    )?;
     let mut parsed = Map::new();
+    if let Some(index) = fields.get("vectorIndex") {
+        if !matches!(index.as_str(), Some("hnsw" | "diskann")) {
+            return Err(invalid_field("defaults.vectorIndex"));
+        }
+        parsed.insert("vectorIndex".to_owned(), index.clone());
+    }
     for name in ["embedding", "modelCacheDir"] {
         if let Some(value) = non_empty_string(fields, name, &format!("defaults.{name}"))? {
             parsed.insert(name.to_owned(), json!(value));
@@ -654,6 +664,10 @@ mod tests {
                 json!({"version": 1, "defaults": {"modelCacheDir": "  "}}),
                 "defaults.modelCacheDir",
             ),
+            (
+                json!({"version": 1, "defaults": {"vectorIndex": "typo"}}),
+                "defaults.vectorIndex",
+            ),
             (json!({"version": 1, "providers": []}), "providers"),
             (
                 json!({"version": 1, "providers": {"Qwen": {}}}),
@@ -793,7 +807,7 @@ mod tests {
     fn global_config_normalizes_strings_and_omits_empty_sections() {
         let value = parse_global_config(&json!({
             "version": 1.0,
-            "defaults": {"embedding": " local/model ", "modelCacheDir": " cache "},
+            "defaults": {"embedding": " local/model ", "modelCacheDir": " cache ", "vectorIndex": "diskann"},
             "providers": {"qwen": {"apiKey": " secret "}, "unused": {}},
             "models": {
                 "qwen/model": {"endpoint": " https://example.test/embeddings "},
@@ -809,7 +823,7 @@ mod tests {
             value,
             json!({
                 "version": 1,
-                "defaults": {"embedding": "local/model", "modelCacheDir": "cache"},
+                "defaults": {"embedding": "local/model", "modelCacheDir": "cache", "vectorIndex": "diskann"},
                 "providers": {"qwen": {"apiKey": "secret"}},
                 "models": {
                     "qwen/model": {"endpoint": "https://example.test/embeddings"},

@@ -24,6 +24,7 @@ test("global config v1 is created securely and merged incrementally", async (t) 
       defaults: {
         embedding: "qwen/text-embedding-v4",
         modelCacheDir: "/tmp/models",
+        vectorIndex: "diskann",
       },
       providers: {
         qwen: {
@@ -60,6 +61,7 @@ test("global config v1 is created securely and merged incrementally", async (t) 
     defaults: {
       embedding: "qwen/text-embedding-v4",
       modelCacheDir: "/tmp/models",
+      vectorIndex: "diskann",
     },
     providers: {
       qwen: {
@@ -266,6 +268,15 @@ test("global config v1 rejects malformed schemas without echoing secrets", async
       assert.doesNotMatch(error.context, /12345/);
       return true;
     },
+  );
+
+  await writeFile(
+    configPath,
+    JSON.stringify({ version: 1, defaults: { vectorIndex: "typo" } }),
+  );
+  assert.throws(
+    () => readGlobalConfig(configPath),
+    (error) => error.context.includes("defaults.vectorIndex"),
   );
 
   for (const models of [

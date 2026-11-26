@@ -427,15 +427,12 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let descriptor = home.join("schema.json");
     let persisted = fs::read(&descriptor).expect("read descriptor");
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
-    assert_eq!(
-        record,
-        serde_json::json!({"path_encoding": "components", "vector_engine": "zvec_diskann_fp16_v1", "embeddings": [original]})
-    );
+    assert_eq!(record["path_encoding"], "components");
+    assert_eq!(record["embeddings"], serde_json::json!([original]));
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
             .expect("read model info")
-            .embeddings()
-            .expect("valid model info"),
+            .embeddings,
         vec![original.clone()]
     );
 
@@ -503,7 +500,8 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
     let path = directory.path();
     for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
         let mut record =
-            serde_json::to_value(SchemaRecord::new(&[schema()])).expect("descriptor JSON");
+            serde_json::to_value(SchemaRecord::new(vec![schema()], VectorEngine::Hnsw))
+                .expect("descriptor JSON");
         if field == "maxBatchSize" {
             record["embeddings"][0]["model"][field] = serde_json::json!(0);
         } else {
@@ -1659,7 +1657,8 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
 
     fs::write(
         home.path().join("schema.json"),
-        serde_json::to_vec(&SchemaRecord::new(&embeddings)).expect("descriptor JSON"),
+        serde_json::to_vec(&SchemaRecord::new(embeddings, VectorEngine::Hnsw))
+            .expect("descriptor JSON"),
     )
     .expect("write conflicting schema");
     let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {

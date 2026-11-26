@@ -14,6 +14,7 @@ import {
 } from "./native.js";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { readGlobalConfig } from "../config.js";
 import { EngineError } from "../errors.js";
 import type {
   CodeEntityModifier,
@@ -92,6 +93,7 @@ type StoredEntityFragment = {
 class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   readonly readOnly: boolean;
   private readonly collection: ZVecCollection;
+  private readonly isDiskann: boolean;
   private readonly vectorMetric: ZVecMetricType;
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
@@ -133,9 +135,15 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       const vector = this.collection.schema
         .vectors()
         .find((field) => field.name === "embedding");
+      const indexType = vector?.indexParams?.indexType;
+      this.isDiskann = indexType === ZVecIndexType.DISKANN;
       if (
-        vector?.indexParams?.indexType !== ZVecIndexType.DISKANN ||
-        vector.dataType !== ZVecDataType.VECTOR_FP16 ||
+        !vector?.indexParams ||
+        !(
+          (this.isDiskann && vector.dataType === ZVecDataType.VECTOR_FP16) ||
+          (indexType === ZVecIndexType.HNSW &&
+            vector.dataType === ZVecDataType.VECTOR_FP32)
+        ) ||
         (!readOnly &&
           (vector.dimension !== options.embedding.dimension ||
             vector.indexParams.metricType !==
@@ -359,10 +367,12 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       topk: limit,
       includeVector: false,
       ...(zvecFilter ? { filter: zvecFilter } : {}),
-      params: {
-        indexType: ZVecIndexType.DISKANN,
-        listSize: Math.max(80, limit),
-      },
+      ...(this.isDiskann && {
+        params: {
+          indexType: ZVecIndexType.DISKANN,
+          listSize: Math.max(80, limit),
+        },
+      }),
     });
     return docsToHits(
       docs.map((doc) => ({
@@ -961,25 +971,33 @@ function metricType(
   }
 }
 
+function pqChunkCount(dimension: number): number {
+  let chunks = Math.min(64, dimension);
+  while (chunks > 1 && dimension % chunks !== 0) chunks--;
+  return chunks;
+}
+
 function createSchema(
   embedding: WorkspaceIndexEmbeddingSchema,
 ): ZVecCollectionSchema {
-  let chunks = Math.min(64, embedding.dimension);
-  while (chunks > 1 && embedding.dimension % chunks !== 0) chunks--;
+  const diskann = readGlobalConfig().defaults?.vectorIndex === "diskann";
+  const metric = metricType(embedding.metric);
   return new ZVecCollectionSchema({
     name: "zvec_grep_entities",
     vectors: [
       {
         name: "embedding",
-        dataType: ZVecDataType.VECTOR_FP16,
+        dataType: diskann ? ZVecDataType.VECTOR_FP16 : ZVecDataType.VECTOR_FP32,
         dimension: embedding.dimension,
-        indexParams: {
-          indexType: ZVecIndexType.DISKANN,
-          metricType: metricType(embedding.metric),
-          maxDegree: 64,
-          listSize: 200,
-          pqChunkNum: chunks,
-        },
+        indexParams: diskann
+          ? {
+              indexType: ZVecIndexType.DISKANN,
+              metricType: metric,
+              maxDegree: 64,
+              listSize: 200,
+              pqChunkNum: pqChunkCount(embedding.dimension),
+            }
+          : { indexType: ZVecIndexType.HNSW, metricType: metric },
       },
     ],
     fields: [

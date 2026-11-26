@@ -45,7 +45,7 @@ fn model() -> EmbeddingModelInfo {
 
 fn metadata_store(path: &Path) -> Fragments {
     super::super::zvec::initialize().expect("initialize zvec");
-    Fragments::open(path, &[model()], false).expect("fragment storage")
+    Fragments::open(path, &[model()], false, VectorEngine::Hnsw).expect("fragment storage")
 }
 
 const DIRECTORY_LOOKUP: fn(&SourcePath) -> EngineResult<Option<DirectoryId>> =
@@ -431,7 +431,7 @@ fn filename_like_negation_propagates_native_query_errors() {
                 store.search_fts("orchard", 10, filter.as_deref()),
             ),
             (
-                "search zvec DiskANN index",
+                "search vector index",
                 store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, filter.as_deref()),
             ),
         ] {
@@ -499,7 +499,7 @@ fn assert_filter_file_ids(store: &Fragments, path: &StoragePathFilter, expected:
 }
 
 fn reopen_filter_store(path: &Path) -> Fragments {
-    Fragments::open(path, &[model()], true).expect("reopen fragments")
+    Fragments::open(path, &[model()], true, VectorEngine::Hnsw).expect("reopen fragments")
 }
 
 #[test]
@@ -638,7 +638,8 @@ fn fragment_ownership_is_checked_across_model_collections() {
         metadata["model"]["name"] = serde_json::json!("other");
         other = serde_json::from_value(metadata).expect("valid model metadata");
     }
-    let store = Fragments::open(home.path(), &[model(), other], false).expect("two models");
+    let store = Fragments::open(home.path(), &[model(), other], false, VectorEngine::Hnsw)
+        .expect("two models");
     let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
     write_fixture(&store, &source, &entities, &entries);
     store
@@ -665,9 +666,19 @@ fn fragment_ownership_is_checked_across_model_collections() {
 }
 
 #[test]
-fn embeddings_use_zvec_diskann_fp16_and_remain_searchable_after_reopen() {
+fn fp16_indexes_remain_searchable_after_reopen() {
+    for (engine, index_type) in [
+        (VectorEngine::Hnsw, IndexType::Hnsw),
+        (VectorEngine::Diskann, IndexType::Diskann),
+    ] {
+        verify_fp16_index(engine, index_type);
+    }
+}
+
+fn verify_fp16_index(engine: VectorEngine, index_type: IndexType) {
+    super::super::zvec::initialize().expect("initialize zvec");
     let home = tempfile::tempdir().expect("storage");
-    let store = metadata_store(home.path());
+    let store = Fragments::open(home.path(), &[model()], false, engine).expect("create fragments");
     let (source, entities, entries) = metadata_fragments(1, "diskann");
     let mut entries = entries;
     entries[1].vector = vec![0.1, -0.2, 1.25];
@@ -690,12 +701,12 @@ fn embeddings_use_zvec_diskann_fp16_and_remain_searchable_after_reopen() {
     let field = zg_zvec_fp16::vector_field_info(collection, "embedding")
         .expect("inspect schema")
         .expect("embedding field");
-    assert_eq!(field.index_type, IndexType::Diskann);
+    assert_eq!(field.index_type, index_type);
     assert_eq!(field.data_type, DataType::VectorFp16);
     assert_eq!(field.dimension, 3);
-    store.optimize().expect("build DiskANN");
+    store.optimize().expect("build vector index");
     drop(store);
-    let store = Fragments::open(home.path(), &[model()], true).expect("reopen read-only");
+    let store = Fragments::open(home.path(), &[model()], true, engine).expect("reopen read-only");
 
     let hits = store
         .search_vector("fixture/fixture", &entries[1].vector, 1, None)
@@ -759,8 +770,13 @@ fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets(
         first.max_image_bytes(),
     )
     .expect("second model");
-    let store = Fragments::open(root.path(), &[first.clone(), second.clone()], false)
-        .expect("model tables");
+    let store = Fragments::open(
+        root.path(),
+        &[first.clone(), second.clone()],
+        false,
+        VectorEngine::Hnsw,
+    )
+    .expect("model tables");
     let mut entities = Vec::new();
     let mut entries = Vec::new();
     for i in 0..125 {

@@ -66,7 +66,7 @@ Indexed search combines full-text and vector retrieval to return relevant source
 
 ### Vector storage
 
-Vector search uses zvec's native DiskANN with FP16 vectors. `indexVersion` is 4; older vector indexes require an explicit rebuild with `zg --index --rebuild`.
+Vector search defaults to native zvec HNSW with FP16 vectors. To build with DiskANN, set `defaults.vectorIndex` to `diskann` in `~/.zvec-grep/config.json`. Existing indexes keep their stored algorithm for queries and updates. Run `zg --index --rebuild` to apply the new selection to an existing workspace.
 
 ### Embedding models
 

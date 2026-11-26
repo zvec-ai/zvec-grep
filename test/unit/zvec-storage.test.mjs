@@ -9,12 +9,24 @@ import {
   ZVecDataType,
   ZVecIndexType,
 } from "../../dist/engine/storage/native.js";
+import { updateGlobalConfig } from "../../dist/engine/config.js";
 import { createWorkspaceIndexStorage } from "../../dist/engine/storage/index.js";
 import { queryFileMetadataDocs } from "../../dist/engine/storage/zvec.js";
 
-test("DiskANN vectors persist, respect metadata filters, and follow replacement and deletion", async (t) => {
+function useTemporaryHome(t, path) {
+  const key = process.platform === "win32" ? "USERPROFILE" : "HOME";
+  const original = process.env[key];
+  process.env[key] = path;
+  t.after(() => {
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  });
+}
+
+test("default HNSW vectors persist, respect metadata filters, and follow replacement and deletion", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "zvec-grep-diskann-"));
   t.after(() => rm(parent, { recursive: true, force: true }));
+  useTemporaryHome(t, parent);
   const options = storageOptions(parent);
   const write = (storage, id, vector) => {
     const file = fileInfo(id, parent, `${id}.ts`);
@@ -53,17 +65,18 @@ test("DiskANN vectors persist, respect metadata filters, and follow replacement 
     await original.finalizeWrites();
     assert.equal(
       original.collection.schema.vector("embedding").indexParams.indexType,
-      ZVecIndexType.DISKANN,
+      ZVecIndexType.HNSW,
     );
     assert.equal(
       original.collection.schema.vector("embedding").dataType,
-      ZVecDataType.VECTOR_FP16,
+      ZVecDataType.VECTOR_FP32,
     );
     original.deleteFile("b".repeat(64));
     await original.finalizeWrites();
   } finally {
     original.close();
   }
+  updateGlobalConfig({ defaults: { vectorIndex: "diskann" } });
   const reader = createWorkspaceIndexStorage({ ...options, readOnly: true });
   try {
     assert.deepEqual(
@@ -96,7 +109,9 @@ test("DiskANN vectors persist, respect metadata filters, and follow replacement 
 test("zvec builds on-disk DiskANN and PQ segments and searches them after reopen", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "zvec-grep-native-diskann-"));
   t.after(() => rm(parent, { recursive: true, force: true }));
+  useTemporaryHome(t, parent);
   const options = storageOptions(parent);
+  updateGlobalConfig({ defaults: { vectorIndex: "diskann" } });
   options.embedding.dimension = 32;
   const file = fileInfo("a", parent, "vectors.ts");
   let seed = 17;
@@ -126,6 +141,7 @@ test("zvec builds on-disk DiskANN and PQ segments and searches them after reopen
   } finally {
     writer.close();
   }
+  updateGlobalConfig({ defaults: { vectorIndex: "hnsw" } });
   const root = join(options.storagePath, "index.zvec");
   const files = (await readdir(root, { recursive: true })).filter((path) =>
     path.endsWith(".proxima"),

@@ -12,3 +12,12 @@ pub(crate) mod types;
 mod zvec;
 
 pub(crate) use store::{IndexStore, ReadView, ResolutionSnapshot};
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum VectorEngine {
+    #[default]
+    #[serde(rename = "zvec_hnsw_fp16_v1")]
+    Hnsw,
+    #[serde(rename = "zvec_diskann_fp16_v1")]
+    Diskann,
+}

@@ -20,6 +20,7 @@ use crate::{
 };
 
 use super::{
+    VectorEngine,
     directories::Directories,
     entities::Entities,
     files::Files,
@@ -72,14 +73,9 @@ pub(crate) struct IndexStore {
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
     path_encoding: PathEncoding,
+    #[serde(default)]
     vector_engine: VectorEngine,
     embeddings: Vec<EmbeddingModelInfo>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum VectorEngine {
-    ZvecDiskannFp16V1,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -89,21 +85,20 @@ enum PathEncoding {
 }
 
 impl SchemaRecord {
-    fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
+    fn new(embeddings: Vec<EmbeddingModelInfo>, vector_engine: VectorEngine) -> Self {
         Self {
             path_encoding: PathEncoding::Components,
-            vector_engine: VectorEngine::ZvecDiskannFp16V1,
-            embeddings: embeddings.to_vec(),
+            vector_engine,
+            embeddings,
         }
     }
 
-    fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
+    fn validate(&self) -> EngineResult<()> {
         validate_models(&self.embeddings).map_err(|error| {
             EngineError::storage_failure(format!(
                 "invalid stored embedding model information: {error}"
             ))
-        })?;
-        Ok(self.embeddings)
+        })
     }
 }
 
@@ -184,7 +179,8 @@ impl IndexStore {
         let files = Files::open(&path, read_only)?;
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
-        let fragments = Fragments::open(&path, &schema, read_only)?;
+        let fragments =
+            Fragments::open(&path, &schema.embeddings, read_only, schema.vector_engine)?;
         let graph_path = path.join("graph").join("graph.sqlite");
         let graph = if !graph_enabled {
             Err(graph_disabled())
@@ -228,7 +224,7 @@ impl IndexStore {
                 needs_optimize,
                 closed: false,
             }),
-            schema,
+            schema: schema.embeddings,
             read_only,
             graph_enabled,
             _lock: lock,
@@ -770,26 +766,22 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
     Ok(())
 }
 
-fn load_schema(
-    path: &Path,
-    options: WorkspaceIndexStorageOptions,
-) -> EngineResult<Vec<EmbeddingModelInfo>> {
+fn load_schema(path: &Path, options: WorkspaceIndexStorageOptions) -> EngineResult<SchemaRecord> {
     let descriptor = path.join("schema.json");
     if file_exists(&descriptor)? {
-        let schema = read_json::<SchemaRecord>(&descriptor)
-            .map_err(|error| {
-                EngineError::storage_failure(format!(
-                    "unsupported or invalid storage schema: {error}; rebuild the index"
-                ))
-            })?
-            .embeddings()?;
+        let schema = read_json::<SchemaRecord>(&descriptor).map_err(|error| {
+            EngineError::storage_failure(format!(
+                "unsupported or invalid storage schema: {error}; rebuild the index"
+            ))
+        })?;
+        schema.validate()?;
         if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
-            if schema.len() != embeddings.len() {
+            if schema.embeddings.len() != embeddings.len() {
                 return Err(EngineError::invalid_argument(
                     "embedding model set changed; rebuild the index",
                 ));
             }
-            for stored in &schema {
+            for stored in &schema.embeddings {
                 let current =
                     model_schema(embeddings, &stored.model().reference()).map_err(|_| {
                         EngineError::invalid_argument(
@@ -807,8 +799,12 @@ fn load_schema(
             "entities".to_owned(),
         ]
         .into_iter()
-        .chain(schema.iter().map(fragments::fragment_collection_name))
-        {
+        .chain(
+            schema
+                .embeddings
+                .iter()
+                .map(fragments::fragment_collection_name),
+        ) {
             let collection_path = path.join(&collection);
             if !directory_exists(&collection_path)? {
                 return Err(EngineError::storage_failure(format!(
@@ -839,11 +835,18 @@ fn load_schema(
         ));
     };
     validate_models(&embeddings)?;
+    let config = crate::config::read()?;
+    let vector_engine = if config["defaults"]["vectorIndex"] == "diskann" {
+        VectorEngine::Diskann
+    } else {
+        VectorEngine::Hnsw
+    };
+    let schema = SchemaRecord::new(embeddings, vector_engine);
     write_record(
         &descriptor,
-        &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
+        &serde_json::to_vec(&schema).map_err(|error| json_error(&error))?,
     )?;
-    Ok(embeddings)
+    Ok(schema)
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
@@ -865,7 +868,7 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 fn prepare_storage(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
+) -> EngineResult<(File, SchemaRecord)> {
     let lock = acquire_storage_lock(path, options.is_read_only())?;
     Ok((lock, load_schema(path, options)?))
 }
