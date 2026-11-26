@@ -35,6 +35,7 @@ bin/zg.exe              # meta entry on every OS; command remains zg
 lib/libzvec_c_api.*       # storage runtime with embedded Jieba dictionary
 lib/lib{llama,ggml}*      # CUDA variant: shared llama.cpp core and CPU backend
 lib/*onnxruntime*        # ONNX Runtime core/providers, when dynamically linked
+lib/*pdfium*             # LiteParse PDFium for native PDF parsing and rendering
 lib/*ggml-cuda*          # primary CUDA 13.1 GGUF plugin
 lib/cuda12/*ggml-cuda*    # CUDA 12.4 GGUF fallback plugin
 ```

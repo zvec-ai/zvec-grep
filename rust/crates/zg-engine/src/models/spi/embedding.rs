@@ -7,7 +7,7 @@ use crate::domain::model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-pub(super) use super::error::ModelError;
+use super::ModelError;
 
 pub(crate) fn input_text(input: &[Content]) -> Result<Cow<'_, str>, ModelError> {
     match input {
@@ -42,7 +42,7 @@ impl ModelProgressReporter {
         Self(Arc::new(reporter))
     }
 
-    pub(super) fn report(&self, progress: ModelProgress, concurrency: usize) {
+    pub(in crate::models) fn report(&self, progress: ModelProgress, concurrency: usize) {
         (self.0)(progress, concurrency);
     }
 }

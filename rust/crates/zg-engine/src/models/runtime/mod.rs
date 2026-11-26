@@ -4,6 +4,7 @@ mod compute;
 mod concurrency;
 pub(crate) mod llama_config;
 mod manager;
+pub(crate) mod onnx;
 pub(crate) mod ort_config;
 
 pub(super) use compute::ModelComputeRuntime;

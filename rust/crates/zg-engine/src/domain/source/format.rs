@@ -80,6 +80,11 @@ impl<'de> serde::Deserialize<'de> for FileFormat {
 }
 
 impl FileFormat {
+    /// Raw file bytes do not represent the searchable document text.
+    pub(crate) fn requires_extracted_search(self) -> bool {
+        matches!(self, Self::Pdf)
+    }
+
     /// Matches only catalog filename rules, without inspecting the filesystem.
     pub(crate) fn from_file_name(file_name: &OsStr) -> Vec<Self> {
         let file_name_formats = file_name.to_str().map_or(&[][..], catalog::lookup_name);

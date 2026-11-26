@@ -10,7 +10,7 @@ use crate::{
 fn hit_with_fragment(source: &str, start: usize, end: usize) -> SearchHit {
     let file_id = FileId::new(1);
     let content = Content::Code(source.to_owned());
-    let id = EntityId::new(file_id, &content, Range::Full).expect("entity ID");
+    let id = EntityId::new(file_id, &content, &Range::Full).expect("entity ID");
     let fragment = EntityFragment {
         id: FragmentId::new(&id, 0),
         range: Range::Byte(ByteRange::new(start as u64, end as u64).expect("fragment offsets")),

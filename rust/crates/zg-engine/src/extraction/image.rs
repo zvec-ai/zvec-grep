@@ -6,6 +6,7 @@ pub(super) fn extract(source: &ImageSource) -> Vec<ExtractedEntity> {
     vec![ExtractedEntity {
         index: 0,
         source_range: Range::Full,
+        source_map: None,
         content: Content::Image(source.content.clone()),
         metadata: None,
         fragments: vec![ExtractedEntityFragment { range: Range::Full }],

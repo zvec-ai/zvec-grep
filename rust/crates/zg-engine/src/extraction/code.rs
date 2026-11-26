@@ -695,6 +695,7 @@ fn append_entity(
     output.push(ExtractedEntity {
         index: output.len(),
         source_range: Range::Text(range),
+        source_map: None,
         fragments: text_fragments(&content, content_max, content_overlap),
         content: Content::Text(content),
         metadata: Some(metadata),
@@ -1183,7 +1184,9 @@ mod tests {
                     usize::try_from(local.start_offset()).expect("fragment start"),
                     usize::try_from(local.end_offset()).expect("fragment end"),
                 ),
-                Range::Text(_) => panic!("fragments store byte offsets without text coordinates"),
+                Range::Text(_) | Range::Pdf(_) => {
+                    panic!("fragments store byte offsets without text coordinates")
+                }
             };
             assert!(start < end && end <= content.len());
             let selected = source

@@ -20,6 +20,7 @@ End-user tutorials live on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
 | Location | Purpose |
 | --- | --- |
 | [Engine](../crates/zg-engine/README.md) | Public API, model/resource ownership, authorization and internal module navigation |
+| [PDF extraction](../crates/zg-engine/src/extraction/pdf/README.md) | Native text conversion, source mappings and failure handling |
 | [Workspace](../crates/zg-engine/src/workspace/README.md) | Persistence, read/write coordination, relocation and consent records |
 | [Daemon](../crates/zg-daemon/README.md) | Resident resources, refresh, job lifetime and execution-mode differences |
 | [MCP transport](../crates/zg-transport-mcp/README.md) | Tool boundaries, setup, consent, progress and cancellation |

@@ -40,7 +40,7 @@ use crate::{
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
-        ExtractedEntity, SourceKind, TextSource, extract_for_indexing, extract_without_graph,
+        ExtractedEntity, ExtractionOperation, ExtractionPort, ExtractionRequest, SourceKind,
         source_kind, vector_content_for_fragment,
     },
     file_selection::ScanPolicy,
@@ -49,7 +49,7 @@ use crate::{
         ModelRuntimeLease,
     },
     storage::types::IndexedFragment,
-    utils::{collapse_whitespace, decode_index_text, sha256_hex},
+    utils::{collapse_whitespace, sha256_hex},
 };
 
 use super::{
@@ -125,10 +125,12 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct IndexingContext<'context> {
     pub workspace: &'context Workspace,
     pub storage: &'context dyn IndexStorage,
     pub scanner: &'context dyn WorkspaceScannerPort,
+    pub extractor: &'context dyn ExtractionPort,
     pub embedding_models: &'context [&'context dyn IndexEmbeddingRuntime],
     pub embedding_concurrency: Option<usize>,
     pub on_progress: Option<IndexProgressReporter>,
@@ -140,6 +142,12 @@ pub(crate) async fn index_workspace(
     context: &IndexingContext<'_>,
 ) -> Result<IndexResult, EngineError> {
     validate_context(context)?;
+    let extraction_operation = ExtractionOperation::new(context.extractor);
+    let operation_context = IndexingContext {
+        extractor: &extraction_operation,
+        ..context.clone()
+    };
+    let context = &operation_context;
     let started = Instant::now();
     let mut timings = TimingCollector::default();
     let mut model_prepared = false;
@@ -197,7 +205,8 @@ pub(crate) async fn index_workspace(
     })?;
     timings.record("index_optimize", finalize_started.elapsed(), 1);
 
-    let result = build_index_result(&passes, started.elapsed(), timings);
+    let mut result = build_index_result(&passes, started.elapsed(), timings);
+    result.warnings = extraction_operation.warnings();
     if result.files_failed > 0 {
         report(
             context,
@@ -956,6 +965,42 @@ fn commit_file(
     Ok(format!("indexed {}", file.file.relative_path().display()))
 }
 
+async fn extract_candidate(
+    context: &IndexingContext<'_>,
+    control: &TaskControl,
+    path: &SourcePath,
+    formats: &[FileFormat],
+    bytes: Vec<u8>,
+) -> Result<
+    (
+        crate::extraction::ExtractionOutput,
+        crate::extraction::ChunkOptions,
+    ),
+    EngineError,
+> {
+    let model = model_for_content(context, ContentKind::Text)?;
+    let source = context
+        .extractor
+        .prepare(ExtractionRequest {
+            path,
+            formats,
+            bytes: bytes.into(),
+            signal: control.cancellation.clone(),
+            on_progress: context
+                .on_progress
+                .clone()
+                .map(model_progress::for_extraction),
+        })
+        .await?;
+    let options = index_chunk_options(model.info().max_input_tokens(), Some(source.text()));
+    let graph = context
+        .workspace
+        .index()
+        .descriptor()
+        .is_some_and(IndexDescriptor::graph_indexing);
+    Ok((source.extract(options, graph)?, options))
+}
+
 async fn prepare_candidate(
     context: &IndexingContext<'_>,
     control: &TaskControl,
@@ -992,35 +1037,14 @@ async fn prepare_candidate(
         .formats
         .as_ref()
         .ok_or_else(|| EngineError::internal("index candidate must have a detected format"))?;
-    if !matches!(source_kind(formats), Some(SourceKind::Text)) {
-        return Err(EngineError::unsupported(format!(
-            "cannot index {}: only text and code files are supported",
-            file.relative_path().display()
-        )));
-    }
-    let source_text = decode_index_text(formats, &source.bytes).ok_or_else(|| {
-        EngineError::invalid_argument(format!(
-            "cannot extract text from {}: binary content or malformed BOM-marked text",
-            file.relative_path().display()
-        ))
-    })?;
-    let model = model_for_content(context, ContentKind::Text)?;
-    let chunk_options = index_chunk_options(model.info().max_input_tokens(), Some(&source_text));
-    let text = TextSource {
-        relative_path: file.relative_path().clone(),
-        formats: formats.clone(),
-        text: source_text.into_owned(),
-    };
-    let extracted = if context
-        .workspace
-        .index()
-        .descriptor()
-        .is_some_and(IndexDescriptor::graph_indexing)
-    {
-        extract_for_indexing(&text, chunk_options)?
-    } else {
-        extract_without_graph(&text, chunk_options)?
-    };
+    let (extracted, chunk_options) = extract_candidate(
+        context,
+        control,
+        file.relative_path(),
+        formats,
+        source.bytes,
+    )
+    .await?;
     let entities = bind_entities(file.id(), extracted.fragments)?;
     let owners = entities
         .iter()
@@ -1127,7 +1151,7 @@ fn prepare_fragments(
         .iter()
         .flat_map(|entity| {
             entity.fragments().iter().map(move |fragment| {
-                let content = match (fragment.range, entity.content()) {
+                let content = match (fragment.range.clone(), entity.content()) {
                     (Range::Full, content) => Cow::Borrowed(content),
                     (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
                         let start = usize::try_from(range.start_offset()).map_err(|_| {
@@ -1213,7 +1237,12 @@ pub(super) fn bind_entities(
     extracted
         .into_iter()
         .map(|entity| {
-            let id = EntityId::new(file_id, &entity.content, entity.source_range)?;
+            let id = EntityId::new_with_source_map(
+                file_id,
+                &entity.content,
+                &entity.source_range,
+                entity.source_map.as_deref(),
+            )?;
             let fragments = entity
                 .fragments
                 .into_iter()
@@ -1235,7 +1264,8 @@ pub(super) fn bind_entities(
                 entity.content,
                 entity.metadata,
                 fragments,
-            )
+            )?
+            .with_source_map(entity.source_map)
         })
         .collect()
 }
@@ -2327,6 +2357,7 @@ fn build_index_result(
         files_deleted: passes.iter().map(|pass| pass.diff.deleted.len()).sum(),
         files_unchanged: first.diff.unchanged,
         files_failed: final_pass.stats.files_failed,
+        warnings: Vec::new(),
         failed_files: final_pass
             .stats
             .failed_files
@@ -2368,6 +2399,7 @@ impl TimingCollector {
 
 #[cfg(test)]
 mod tests {
+    use crate::extraction::{TextSource, extract_for_indexing};
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -2622,6 +2654,7 @@ mod tests {
             workspace,
             storage,
             scanner: &RecordingScanner::new(),
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[model],
             embedding_concurrency: None,
             on_progress: None,
@@ -2630,6 +2663,245 @@ mod tests {
         })
         .await
         .expect("index workspace");
+    }
+
+    #[derive(Clone)]
+    struct FixturePdf {
+        calls: Arc<AtomicUsize>,
+        fail: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl crate::extraction::pdf::PdfExtractionPort for FixturePdf {
+        async fn convert(
+            &self,
+            path: SourcePath,
+            bytes: Arc<[u8]>,
+            _signal: CancellationToken,
+            _progress: Option<Arc<dyn Fn(crate::domain::model::ModelProgress) + Send + Sync>>,
+        ) -> Result<
+            crate::extraction::pdf::PdfMarkdownSource,
+            crate::extraction::pdf::PdfExtractionError,
+        > {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if self.fail.load(Ordering::Acquire) {
+                return Err(crate::extraction::pdf::PdfExtractionError::Runtime(
+                    EngineError::internal("PDFium runtime unavailable"),
+                ));
+            }
+            if bytes.ends_with(b"document-failure") {
+                return Err(EngineError::invalid_argument("page 2 could not be parsed").into());
+            }
+            let text = if bytes.ends_with(b"no-native-text") {
+                String::new()
+            } else {
+                "# Recovery\n\nWait five minutes before retrying.".to_owned()
+            };
+            let source_map = crate::domain::PdfSourceMap {
+                markdown_start: 0,
+                text_len: text.len(),
+                parts: vec![crate::domain::PdfSourcePart {
+                    range: 0..text.len(),
+                    block: crate::domain::PdfBlock {
+                        page: 3,
+                        id: 2,
+                        page_width: 612.0,
+                        page_height: 792.0,
+                        bbox: None,
+                    },
+                }],
+            };
+            let source_map = if text.is_empty() {
+                crate::domain::PdfSourceMap {
+                    parts: Vec::new(),
+                    ..source_map
+                }
+            } else {
+                source_map
+            };
+            Ok(crate::extraction::pdf::PdfMarkdownSource {
+                warnings: if bytes.ends_with(b"native-fallback") {
+                    vec![format!(
+                        "{}: page 3: using native PDF text without layout filtering",
+                        path.display()
+                    )]
+                } else {
+                    Vec::new()
+                },
+                text: TextSource {
+                    relative_path: path,
+                    formats: vec![FileFormat::Pdf],
+                    text,
+                },
+                source_map,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pdf_indexing_reuses_unchanged_binary_and_refreshes_modified_content() {
+        let directory = tempdir().expect("valid test fixture");
+        let path = directory.path().join("manual.pdf");
+        std::fs::write(&path, b"%PDF-1.7\nfixture").expect("valid test fixture");
+        let workspace = workspace(directory.path());
+        let storage = MemoryStorage::default();
+        let scanner = RecordingScanner::new();
+        let model = ConcurrentModel::new();
+        let pdf = FixturePdf {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: Arc::new(AtomicBool::new(false)),
+        };
+        let extractor = crate::extraction::ExtractionService::with_pdf(pdf.clone());
+        let context = IndexingContext {
+            workspace: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            extractor: &extractor,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        let first = index_workspace(&context).await.expect("valid test fixture");
+        assert_eq!(first.entities_created, 1);
+        assert_eq!(first.files_failed, 0);
+        assert!(
+            storage
+                .entries
+                .lock()
+                .expect("valid test fixture")
+                .values()
+                .flatten()
+                .any(|entry| entry.fts_text.contains("Wait five minutes"))
+        );
+        let again = index_workspace(&context).await.expect("valid test fixture");
+        assert_eq!(again.entities_created, 0);
+        assert_eq!(pdf.calls.load(Ordering::Acquire), 1);
+        std::fs::write(&path, b"%PDF-1.7\nmodified fixture with different size")
+            .expect("valid test fixture");
+        index_workspace(&context).await.expect("valid test fixture");
+        assert_eq!(pdf.calls.load(Ordering::Acquire), 2);
+        let stored = storage.list_files().expect("valid test fixture");
+        assert_eq!(
+            stored[0].snapshot().content_hash.as_deref(),
+            Some(sha256_hex(&std::fs::read(path).expect("valid test fixture")).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn pdf_shared_runtime_failure_is_isolated_and_recovers_on_next_operation() {
+        let directory = tempdir().expect("valid test fixture");
+        for name in ["one.pdf", "two.pdf"] {
+            std::fs::write(directory.path().join(name), b"%PDF-1.7\nfixture")
+                .expect("valid test fixture");
+        }
+        let workspace = workspace(directory.path());
+        let storage = MemoryStorage::default();
+        let scanner = RecordingScanner::new();
+        let model = ConcurrentModel::new();
+        let pdf = FixturePdf {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: Arc::new(AtomicBool::new(true)),
+        };
+        let extractor = crate::extraction::ExtractionService::with_pdf(pdf.clone());
+        let context = IndexingContext {
+            workspace: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            extractor: &extractor,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        std::fs::write(
+            directory.path().join("healthy.md"),
+            "# Healthy\n\nSearchable text",
+        )
+        .expect("fixture");
+        let failed = index_workspace(&context)
+            .await
+            .expect("other files continue");
+        assert_eq!(failed.files_failed, 2);
+        assert_eq!(failed.entities_created, 1);
+        assert_eq!(pdf.calls.load(Ordering::Acquire), 1);
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 1);
+        pdf.fail.store(false, Ordering::Release);
+        let result = index_workspace(&context).await.expect("valid test fixture");
+        assert_eq!(result.files_failed, 0);
+        assert_eq!(result.entities_created, 2);
+    }
+
+    #[tokio::test]
+    async fn pdf_document_failure_and_empty_text_do_not_block_other_files() {
+        let directory = tempdir().expect("fixture");
+        for (name, bytes) in [
+            ("broken.pdf", b"%PDF-1.7\ndocument-failure".as_slice()),
+            ("empty.pdf", b"%PDF-1.7\nno-native-text"),
+            ("healthy.pdf", b"%PDF-1.7\nnative-fallback"),
+        ] {
+            std::fs::write(directory.path().join(name), bytes).expect("fixture");
+        }
+        std::fs::write(
+            directory.path().join("healthy.md"),
+            "# Healthy\n\nIndependent markdown.",
+        )
+        .expect("fixture");
+        let workspace = workspace(directory.path());
+        let storage = MemoryStorage::default();
+        let scanner = RecordingScanner::new();
+        let model = ConcurrentModel::new();
+        let pdf = FixturePdf {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: Arc::new(AtomicBool::new(false)),
+        };
+        let extractor = crate::extraction::ExtractionService::with_pdf(pdf.clone());
+        let context = IndexingContext {
+            workspace: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            extractor: &extractor,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        let result = index_workspace(&context).await.expect("isolated failure");
+        assert_eq!(result.files_failed, 1);
+        assert_eq!(result.entities_created, 2);
+        assert_eq!(result.failed_files[0].path, Path::new("broken.pdf"));
+        assert!(result.failed_files[0].reason.contains("page 2"));
+        assert_eq!(result.warnings.len(), 2);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("empty.pdf")
+                    && warning.contains("no searchable native text"))
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("healthy.pdf")
+                    && warning.contains("without layout filtering"))
+        );
+        let files = storage.list_files().expect("files");
+        assert_eq!(
+            files
+                .iter()
+                .filter(|file| file.index_status().is_indexed())
+                .count(),
+            3
+        );
+        let empty = files
+            .iter()
+            .find(|file| file.relative_path().as_ref() == Path::new("empty.pdf"))
+            .expect("empty file");
+        assert_eq!(empty.index_status().entity_count(), 0);
     }
 
     /// Asserts the file was indexed but no graph reached the store.
@@ -2668,7 +2940,7 @@ mod tests {
         let bodies = [" 中😀\0\r\n", "尾巴\n"];
         let file_id = FileId::new(42);
         let content = Content::Text(bodies.concat());
-        let entity_id = EntityId::new(file_id, &content, Range::Full).expect("entity id");
+        let entity_id = EntityId::new(file_id, &content, &Range::Full).expect("entity id");
         let entity = Entity::new(
             entity_id.clone(),
             file_id,
@@ -3279,7 +3551,7 @@ mod tests {
     fn prepared_fragment(text: &str, ordinal: u32) -> PreparedFragment {
         let content = Content::Text(text.to_owned());
         let entity_id =
-            EntityId::new(FileId::new(91), &content, Range::Full).expect("fixture entity ID");
+            EntityId::new(FileId::new(91), &content, &Range::Full).expect("fixture entity ID");
         PreparedFragment {
             model: "local/test".to_owned(),
             fragment_id: FragmentId::new(&entity_id, ordinal),
@@ -3390,6 +3662,7 @@ mod tests {
                 workspace: &workspace,
                 storage: &storage,
                 scanner: &scanner,
+                extractor: &crate::extraction::ExtractionService::default(),
                 embedding_models: &[&model],
                 embedding_concurrency: None,
                 on_progress: None,
@@ -3430,6 +3703,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3470,6 +3744,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3515,6 +3790,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3550,6 +3826,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: None,
@@ -3627,6 +3904,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: None,
@@ -3709,6 +3987,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3747,6 +4026,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3786,6 +4066,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3813,6 +4094,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3860,6 +4142,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3895,6 +4178,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -3993,6 +4277,7 @@ mod tests {
                 workspace: &workspace,
                 storage: &storage,
                 scanner: &scanner,
+                extractor: &crate::extraction::ExtractionService::default(),
                 embedding_models: &models,
                 embedding_concurrency: None,
                 on_progress: None,
@@ -4028,6 +4313,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -4150,6 +4436,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -4216,6 +4503,7 @@ mod tests {
             workspace: &workspace,
             storage: storage.as_ref(),
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: Some(reporter),
@@ -4282,6 +4570,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: None,
@@ -4298,6 +4587,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: None,
@@ -4331,6 +4621,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One operation verifies repair and deletion consistency together"
+    )]
     async fn scoped_index_repairs_unfinished_files_and_completes_deletions() {
         let directory = tempdir().expect("temporary directory");
         let root = directory.path().canonicalize().expect("source root");
@@ -4352,6 +4646,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -4400,6 +4695,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
@@ -4479,10 +4775,10 @@ mod tests {
         .expect("database");
         std::fs::write(directory.path().join("unrecognized"), [0, 1, 2, 3]).expect("binary");
         std::fs::write(
-            directory.path().join("document.pdf"),
-            b"%PDF-1.7\nASCII-only syntax",
+            directory.path().join("document.docx"),
+            b"unsupported document fixture",
         )
-        .expect("PDF");
+        .expect("unsupported document");
         let workspace = workspace(directory.path());
         let scanner = NativeScanner::default();
         let storage = MemoryStorage::default();
@@ -4491,6 +4787,7 @@ mod tests {
             workspace: &workspace,
             storage: &storage,
             scanner: &scanner,
+            extractor: &crate::extraction::ExtractionService::default(),
             embedding_models: &[&model],
             embedding_concurrency: Some(1),
             on_progress: None,
@@ -4521,7 +4818,7 @@ mod tests {
                 .iter()
                 .map(|file| file.path.clone())
                 .collect::<HashSet<_>>(),
-            ["database", "unrecognized", "document.pdf"]
+            ["database", "unrecognized", "document.docx"]
                 .into_iter()
                 .map(|name| workspace.source_root().join(name))
                 .collect()

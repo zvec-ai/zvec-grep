@@ -1,5 +1,7 @@
 //! Types used by [`crate::ZvecGrep::context`].
 
+mod projection;
+
 pub use options::ContextOptions;
 pub use result::ContextResult;
 
@@ -487,6 +489,18 @@ pub mod result {
         pub path: PathBuf,
     }
 
+    pub use crate::domain::PdfRect;
+
+    /// A source content block with raw top-left page coordinates (points).
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct PdfBox {
+        pub page: u32,
+        pub block: u32,
+        pub page_width: f32,
+        pub page_height: f32,
+        pub bbox: PdfRect,
+    }
+
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextItem {
         pub kind: ContextItemKind,
@@ -502,6 +516,13 @@ pub mod result {
         /// Individual lexical matches in decoded source coordinates, independent of context lines.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub match_ranges: Vec<ContentRange>,
+        /// Visible lexical context windows within `content`; gaps can be omitted
+        /// without changing the source coordinates. Empty means all content.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub content_windows: Vec<ContentRange>,
+        /// Entity block geometry for detailed PDF presentation.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub pdf_boxes: Vec<PdfBox>,
         /// Complete stored entity for indexed hits; context window for lexical matches.
         pub content: String,
         /// Optional structural context supplied with the retrieved source.
@@ -612,6 +633,12 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct RgDiagnostics {
+        /// Sources searched as raw files because their extraction index is unavailable.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub unindexed_files: Vec<PathBuf>,
+        /// Index access failures that caused raw-file fallback, without hiding the cause.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub index_warnings: Vec<String>,
         pub backend: String,
         pub command: PathBuf,
         pub args: Vec<String>,
@@ -626,6 +653,16 @@ pub mod result {
     #[serde(rename_all = "snake_case", tag = "kind")]
     pub enum ContentRange {
         File,
+        /// Physical PDF pages. Offsets refer to the transient assembled Markdown,
+        /// allowing excerpts to be located within returned text without exposing
+        /// generated Markdown line numbers as PDF source coordinates.
+        Pdf {
+            /// Sorted physical pages of the selection. Merged lexical matches
+            /// can skip unmatched pages within the bounding byte offsets.
+            pages: Vec<u32>,
+            start_byte_offset: usize,
+            end_byte_offset: usize,
+        },
         /// Half-open UTF-8 byte offsets and columns; endpoint lines are one-based.
         Text {
             start_line: usize,
@@ -642,12 +679,41 @@ pub mod result {
     }
 
     impl ContentRange {
+        /// Starting byte in decoded text, assembled PDF text, or binary content.
+        #[must_use]
+        pub fn start_byte_offset(&self) -> Option<usize> {
+            match self {
+                Self::Text {
+                    start_byte_offset, ..
+                }
+                | Self::Pdf {
+                    start_byte_offset, ..
+                } => Some(*start_byte_offset),
+                Self::Byte { start_offset, .. } => usize::try_from(*start_offset).ok(),
+                Self::File => None,
+            }
+        }
+        /// Exclusive ending byte in the same coordinate space as the start.
+        #[must_use]
+        pub fn end_byte_offset(&self) -> Option<usize> {
+            match self {
+                Self::Text {
+                    end_byte_offset, ..
+                }
+                | Self::Pdf {
+                    end_byte_offset, ..
+                } => Some(*end_byte_offset),
+                Self::Byte { end_offset, .. } => usize::try_from(*end_offset).ok(),
+                Self::File => None,
+            }
+        }
+
         /// Returns the one-based starting line when source line coordinates are available.
         #[must_use]
         pub fn start_line(&self) -> Option<usize> {
             match self {
                 Self::Text { start_line, .. } => Some(*start_line),
-                Self::File | Self::Byte { .. } => None,
+                Self::File | Self::Byte { .. } | Self::Pdf { .. } => None,
             }
         }
 
@@ -665,7 +731,7 @@ pub mod result {
                 } => Some(end_line.saturating_sub(usize::from(
                     *end_byte_column == 0 && start_byte_offset < end_byte_offset,
                 ))),
-                Self::File | Self::Byte { .. } => None,
+                Self::File | Self::Byte { .. } | Self::Pdf { .. } => None,
             }
         }
 
@@ -681,11 +747,80 @@ pub mod result {
     }
 }
 
+impl result::ContextItem {
+    /// Selected context as UTF-8 ranges relative to `content`, with borrowed text.
+    /// Empty `content_windows` selects the complete returned content.
+    pub fn visible_content(&self) -> impl Iterator<Item = (std::ops::Range<usize>, &str)> {
+        let origin = self.content_range.start_byte_offset().unwrap_or(0);
+        let windows = if self.content_windows.is_empty() {
+            std::slice::from_ref(&self.content_range)
+        } else {
+            &self.content_windows
+        };
+        windows.iter().filter_map(move |window| {
+            let start = window
+                .start_byte_offset()
+                .unwrap_or(origin)
+                .checked_sub(origin)?;
+            let end = window
+                .end_byte_offset()
+                .unwrap_or(origin + self.content.len())
+                .checked_sub(origin)?;
+            Some((start..end, self.content.get(start..end)?))
+        })
+    }
+}
+
+impl result::PdfBox {
+    pub(crate) fn from_entity(entity: &crate::domain::Entity) -> Vec<Self> {
+        entity
+            .source_map()
+            .map_or_else(Vec::new, |source| Self::from_source(source))
+    }
+
+    pub(crate) fn from_source(source: &crate::domain::PdfSourceMap) -> Vec<Self> {
+        source
+            .blocks_with_boxes()
+            .map(|(block, bbox)| Self {
+                page: block.page,
+                block: block.id,
+                page_width: block.page_width,
+                page_height: block.page_height,
+                bbox,
+            })
+            .collect()
+    }
+}
+
+impl result::ContentRange {
+    pub(crate) fn from_entity(entity: &crate::domain::Entity) -> Self {
+        let mut range: Self = entity.source_range().into();
+        if let (
+            Self::Pdf {
+                start_byte_offset,
+                end_byte_offset,
+                ..
+            },
+            Some(map),
+        ) = (&mut range, entity.source_map())
+        {
+            *start_byte_offset = map.markdown_start;
+            *end_byte_offset = map.markdown_start + map.text_len;
+        }
+        range
+    }
+}
+
 impl From<crate::domain::Range> for result::ContentRange {
     fn from(range: crate::domain::Range) -> Self {
         use crate::domain::Range;
         match range {
             Range::Full => Self::File,
+            Range::Pdf(location) => Self::Pdf {
+                pages: location.page_numbers(),
+                start_byte_offset: 0,
+                end_byte_offset: 0,
+            },
             Range::Text(range) => Self::Text {
                 start_line: range.start_line(),
                 end_line: range.end_line(),
@@ -704,7 +839,7 @@ impl From<crate::domain::Range> for result::ContentRange {
 
 impl From<&crate::domain::Range> for result::ContentRange {
     fn from(range: &crate::domain::Range) -> Self {
-        (*range).into()
+        range.clone().into()
     }
 }
 
@@ -727,6 +862,53 @@ mod tests {
     use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
+
+    #[test]
+    fn pdf_boxes_preserve_blocks_and_pages_without_duplicate_or_missing_bounds() {
+        use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+        let bbox = crate::domain::PdfRect {
+            x: -0.125,
+            y: 20.25,
+            width: 640.875,
+            height: 15.125,
+        };
+        let parts = [
+            (1, 1, Some(bbox)),
+            (1, 1, Some(bbox)),
+            (1, 2, Some(bbox)),
+            (2, 1, Some(bbox)),
+            (2, 2, None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(offset, (page, id, bbox))| PdfSourcePart {
+            range: offset..offset + 1,
+            block: PdfBlock {
+                page,
+                id,
+                page_width: 612.0,
+                page_height: 792.0,
+                bbox,
+            },
+        })
+        .collect();
+        let source = PdfSourceMap {
+            markdown_start: 100,
+            text_len: 5,
+            parts,
+        };
+        let boxes = result::PdfBox::from_source(&source);
+        assert_eq!(
+            boxes
+                .iter()
+                .map(|region| (region.page, region.block))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (1, 2), (2, 1)]
+        );
+        assert!(boxes.iter().all(|region| region.bbox == bbox
+            && region.page_width.to_bits() == 612.0_f32.to_bits()
+            && region.page_height.to_bits() == 792.0_f32.to_bits()));
+    }
 
     #[test]
     fn search_traces_allow_omitted_ranking() {

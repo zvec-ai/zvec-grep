@@ -101,6 +101,14 @@ pub fn write_index_with_options(
             ),
         )?;
     }
+    for warning in &result.warnings {
+        index_field(
+            &mut writer,
+            theme,
+            "warning",
+            &theme.warning(&clean(warning)),
+        )?;
+    }
     if result.files_scanned == 0 {
         index_field(
             &mut writer,
@@ -198,6 +206,9 @@ fn write_compact_index(
             clean(&storage_path(&file.path, root)),
             clean(&file.reason)
         )?;
+    }
+    for warning in &result.warnings {
+        writeln!(writer, "  {}", theme.warning(&clean(warning)))?;
     }
     if result.files_scanned == 0 {
         writeln!(writer, "  Run: zg --help file-types")?;
@@ -458,6 +469,29 @@ mod tests {
     use super::*;
     use unicode_width::UnicodeWidthChar;
     use zg_engine::authorization::AuthorizationGrantStatus;
+
+    #[test]
+    fn pdf_warnings_are_visible_in_terminal_and_pipe_output() {
+        let warning = "empty.pdf: no searchable native text; OCR is not enabled";
+        let result = IndexResult {
+            files_scanned: 1,
+            warnings: vec![warning.into()],
+            ..IndexResult::default()
+        };
+        for terminal in [false, true] {
+            let mut output = Vec::new();
+            write_index_with_options(
+                &mut output,
+                Path::new("/workspace"),
+                &result,
+                None,
+                OutputOptions::default(),
+                terminal,
+            )
+            .expect("output");
+            assert!(String::from_utf8(output).expect("UTF-8").contains(warning));
+        }
+    }
 
     #[test]
     fn index_result_distinguishes_failed_files_from_retried_work() {
