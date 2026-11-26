@@ -1,5 +1,8 @@
 # Rust architecture
 
+See the [documentation map](docs/README.md) for runtime contracts and operational
+guides. This page owns the application and crate boundaries.
+
 ## Public application boundary
 
 [`ZvecGrep`](crates/zg-engine/src/lib.rs) is the reusable engine entry point.
@@ -61,6 +64,10 @@ relocation, and authorization behavior.
 
 ## Resource ownership
 
+Resource lifetime is documented with the [engine](crates/zg-engine/README.md#resource-ownership),
+[workspace](crates/zg-engine/src/workspace/README.md#read-and-write-coordination)
+and [daemon](crates/zg-daemon/README.md).
+
 The engine owns a private model runtime manager. Matching model configuration
 and concurrency settings reuse cached runtimes and their loaded resources.
 Leases keep active runtimes alive; closing the engine rejects new operations
@@ -83,6 +90,7 @@ resources for the command's lifetime. Mode differences are recorded in
 - `zg-cli` and `zg`: argument parsing, terminal rendering, and binary lifecycle.
 - `zg-host-native`: native scanner and watcher implementations used by the engine.
 - `zg-llama-native`: native llama/ggml backend loading boundary.
+- `zg-pdfium`: shared PDFium loading for native PDF parsing and page rendering.
 - `zg-daemon`: resident process, HTTP endpoints, jobs, and stdio bootstrap.
 - `zg-daemon-protocol`: transport-only command, reply, and progress DTOs.
 - `zg-transport-mcp`: tool schemas, input validation, result presentation,
