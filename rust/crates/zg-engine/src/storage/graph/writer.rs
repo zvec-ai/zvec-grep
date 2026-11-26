@@ -1,8 +1,8 @@
-use crate::domain::{EdgeProvenance, FileGraphResult, PendingRefStatus};
+use crate::domain::{EdgeProvenance, FileGraphResult, PendingRef, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 use std::collections::HashSet;
 
-use super::{Error, Metadata, Result, SqliteGraphStorage, nonempty};
+use super::{Error, Metadata, Result, SqliteGraphStorage};
 
 // Bound IN-clause parameters; invalidation also binds the owning file ID.
 const TARGET_ID_BATCH_SIZE: usize = 512;
@@ -120,7 +120,11 @@ impl SqliteGraphStorage {
             let mut insert = tx.prepare_cached("INSERT INTO edges
                 (file_id, source, reference_name, receiver_name, kind, arity, line, col, language, name_tail, status, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
-            for reference in &graph.pending_refs {
+            for reference in graph
+                .pending_refs
+                .iter()
+                .filter(|reference| names_something(reference))
+            {
                 insert.execute(params![
                     file_id,
                     reference.owner_id,
@@ -172,6 +176,15 @@ impl SqliteGraphStorage {
     }
 }
 
+/// Whether a pending reference spells a name the resolver can look up.
+///
+/// A nameless reference is extraction output for a construct no symbol names:
+/// it cannot be stored, matched or resolved, so the write leaves it out of the
+/// snapshot instead of failing the file that carried it.
+fn names_something(reference: &PendingRef) -> bool {
+    !reference.ref_name.trim().is_empty()
+}
+
 /// Last component of a referenced name, matching the name index's namespace:
 /// `a::b::c`, `a.b.c` and `a/b/c` all index as `c`.
 fn name_tail(name: &str) -> &str {
@@ -212,7 +225,9 @@ fn inheritance_evidence(graph: &FileGraphResult) -> Vec<(String, String, String)
         graph
             .pending_refs
             .iter()
-            .filter(|reference| reference.ref_kind.spells_inheritance())
+            .filter(|reference| {
+                reference.ref_kind.spells_inheritance() && names_something(reference)
+            })
             .map(|reference| {
                 (
                     reference.ref_kind.as_str().to_owned(),
@@ -335,18 +350,31 @@ fn import_bindings(tx: &rusqlite::Transaction<'_>, file_id: u32) -> Result<Vec<S
     Ok(evidence)
 }
 
+/// Checks one file snapshot against the write contract.
+///
+/// Returns how many pending references the snapshot drops for carrying no
+/// name. A nameless reference is extraction output the resolver cannot read:
+/// discarding that one record keeps the file's entities, edges and remaining
+/// references published, where rejecting the snapshot loses the whole file.
+/// Every other check guards the store's own invariants — ownership, one-based
+/// positions, pending status, unique IDs — so a violation still fails the
+/// write, because those rows would corrupt a neighbouring file's graph.
 pub(super) fn validate(
     file_id: &str,
     graph: &FileGraphResult,
     old_entity_ids: &[String],
-) -> Result<()> {
+) -> Result<usize> {
     for id in old_entity_ids {
-        nonempty(id)?;
+        if id.trim().is_empty() {
+            return Err(Error::InvalidInput("previous entity IDs must not be empty"));
+        }
     }
     let mut local = HashSet::new();
     for node in &graph.nodes {
         let id = &node.id;
-        nonempty(id)?;
+        if id.trim().is_empty() {
+            return Err(Error::InvalidInput("entity IDs must not be empty"));
+        }
         if id == file_id || !local.insert(id.as_str()) {
             return Err(Error::InvalidInput(
                 "entity IDs must be unique and distinct from the file ID",
@@ -367,18 +395,29 @@ pub(super) fn validate(
             return Err(Error::InvalidInput("edge lines must be one-based"));
         }
     }
+    let mut dropped = 0;
     for reference in &graph.pending_refs {
         if reference.status != PendingRefStatus::Pending {
             return Err(Error::InvalidInput(
                 "file snapshots require pending references",
             ));
         }
-        nonempty(&reference.ref_name)?;
+        if !names_something(reference) {
+            dropped += 1;
+            continue;
+        }
         if !owns(&reference.owner_id) || reference.line == 0 {
             return Err(Error::InvalidInput(
                 "pending refs require local ownership and one-based lines",
             ));
         }
     }
-    Ok(())
+    if dropped > 0 {
+        tracing::debug!(
+            file_id,
+            dropped,
+            "references without a name left the file snapshot"
+        );
+    }
+    Ok(dropped)
 }

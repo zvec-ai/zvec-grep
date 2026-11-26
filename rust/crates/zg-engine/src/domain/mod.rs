@@ -20,6 +20,7 @@ pub(crate) use entity::Entity;
 pub(crate) use entity::EntityFragment;
 pub(crate) use entity::EntityId;
 pub(crate) use entity::FragmentId;
+pub(crate) use entity::content_has_value;
 
 // Glob rules.
 pub use glob::GlobRule;

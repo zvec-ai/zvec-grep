@@ -1102,6 +1102,20 @@ fn non_pending_reference_status_preserves_the_previous_snapshot() {
 }
 
 #[test]
+fn a_reference_without_a_name_leaves_the_snapshot_and_keeps_the_file() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let nameless = reference("a", " \t");
+    let snapshot = graph(&["a"], vec![], vec![reference("a", "kept"), nameless]);
+
+    db.write_file_graph(1, None, &snapshot, &[], false)
+        .expect("a nameless reference is not a file failure");
+
+    let pending = db.list_pending_refs(100, 0).expect("pending refs");
+    assert_eq!(pending.refs.len(), 1);
+    assert_eq!(pending.refs[0].reference.ref_name, "kept");
+}
+
+#[test]
 fn sql_failure_rolls_back_replacement_and_invalidation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");

@@ -36,7 +36,7 @@ use crate::{
     domain::{
         Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata, FileCategory,
         FileFormat, FileGraphResult, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId,
-        IndexDescriptor, Range, SourcePath, Workspace,
+        IndexDescriptor, Range, SourcePath, Workspace, content_has_value,
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
@@ -1107,8 +1107,9 @@ async fn prepare_candidate(
             return Ok(skipped_candidate(file, failure));
         }
     };
-    let entities = bind_entities(file.id(), extracted.fragments)?;
-    let owners = entities
+    let bound = bind_indexed_entities(&file, extracted.fragments)?;
+    let owners = bound
+        .entities
         .iter()
         .map(|entity| {
             Ok((
@@ -1120,7 +1121,7 @@ async fn prepare_candidate(
             ))
         })
         .collect::<Result<HashMap<_, _>, EngineError>>()?;
-    let mut fragments = prepare_fragments(&entities, chunk_options.max_chunk_chars)?;
+    let mut fragments = prepare_fragments(&bound.entities, chunk_options.max_chunk_chars)?;
     for fragment in &mut fragments {
         fragment.model = owners[&fragment.entity_id].clone();
     }
@@ -1135,7 +1136,7 @@ async fn prepare_candidate(
                     &file.id().get().to_string(),
                     graph_language(formats),
                     graph,
-                    &entities,
+                    &bound,
                 )
             })
             .unwrap_or_default()
@@ -1144,7 +1145,7 @@ async fn prepare_candidate(
     };
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
-        entities,
+        entities: bound.entities,
         fragments,
         graph,
     })))
@@ -1292,33 +1293,88 @@ fn append_contents(output: &mut String, contents: &[Content]) {
     }
 }
 
+/// Entities bound for one file, kept in extraction-ordinal space.
+///
+/// `ordinals[ordinal]` names the bound entity an extraction record produced.
+/// A record whose content names nothing indexable leaves `None` there, so the
+/// walk-time graph, which addresses entities by ordinal, still reaches its
+/// entity even after a neighbour left the file.
+pub(super) struct BoundEntities {
+    /// The entities the file carries, in extraction order minus empty records.
+    pub(super) entities: Vec<Entity>,
+    ordinals: Vec<Option<usize>>,
+}
+
+impl BoundEntities {
+    /// The entity an extraction ordinal bound, if binding kept it.
+    pub(super) fn get(&self, ordinal: usize) -> Option<&Entity> {
+        self.ordinals
+            .get(ordinal)?
+            .and_then(|index| self.entities.get(index))
+    }
+
+    /// Extraction records the file does not carry because they were empty.
+    fn dropped(&self) -> usize {
+        self.ordinals.iter().filter(|slot| slot.is_none()).count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_tests(entities: Vec<Entity>) -> Self {
+        let ordinals = (0..entities.len()).map(Some).collect();
+        Self { entities, ordinals }
+    }
+}
+
+fn bind_indexed_entities(
+    file: &FileRecord,
+    extracted: Vec<ExtractedEntity>,
+) -> Result<BoundEntities, EngineError> {
+    let bound = bind_entities(file.id(), extracted)?;
+    if bound.dropped() > 0 {
+        tracing::debug!(
+            path = %file.relative_path().display(),
+            dropped = bound.dropped(),
+            "entities without indexable content left the file"
+        );
+    }
+    Ok(bound)
+}
+
 pub(super) fn bind_entities(
     file_id: FileId,
     extracted: Vec<ExtractedEntity>,
-) -> Result<Vec<Entity>, EngineError> {
-    extracted
-        .into_iter()
-        .map(|entity| {
-            let id = EntityId::new_with_source_map(
-                file_id,
-                &entity.content,
-                &entity.source_range,
-                entity.source_map.as_deref(),
-            )?;
-            let fragments = entity
-                .fragments
-                .into_iter()
-                .enumerate()
-                .map(|(ordinal, fragment)| {
-                    let ordinal = u32::try_from(ordinal).map_err(|_| {
-                        EngineError::invalid_argument("fragment ordinal exceeds u32 limits")
-                    })?;
-                    Ok(EntityFragment {
-                        id: FragmentId::new(&id, ordinal),
-                        range: fragment.range,
-                    })
+) -> Result<BoundEntities, EngineError> {
+    let mut entities = Vec::with_capacity(extracted.len());
+    let mut ordinals = Vec::with_capacity(extracted.len());
+    for entity in extracted {
+        // Content with nothing to index cannot be an entity, and failing the
+        // whole file for it would hide every other entity. The hole keeps the
+        // ordinal of everything after it intact.
+        if !content_has_value(&entity.content) || entity.fragments.is_empty() {
+            ordinals.push(None);
+            continue;
+        }
+        let id = EntityId::new_with_source_map(
+            file_id,
+            &entity.content,
+            &entity.source_range,
+            entity.source_map.as_deref(),
+        )?;
+        let fragments = entity
+            .fragments
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, fragment)| {
+                let ordinal = u32::try_from(ordinal).map_err(|_| {
+                    EngineError::invalid_argument("fragment ordinal exceeds u32 limits")
+                })?;
+                Ok(EntityFragment {
+                    id: FragmentId::new(&id, ordinal),
+                    range: fragment.range,
                 })
-                .collect::<Result<Vec<_>, EngineError>>()?;
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        entities.push(
             Entity::new(
                 id,
                 file_id,
@@ -1327,9 +1383,11 @@ pub(super) fn bind_entities(
                 entity.metadata,
                 fragments,
             )?
-            .with_source_map(entity.source_map)
-        })
-        .collect()
+            .with_source_map(entity.source_map)?,
+        );
+        ordinals.push(Some(entities.len() - 1));
+    }
+    Ok(BoundEntities { entities, ordinals })
 }
 
 fn mark_file_failed(
@@ -2552,10 +2610,9 @@ mod tests {
             };
             let options = crate::extraction::ChunkOptions::default();
             let extracted = extract_for_indexing(&source, options).expect("extract code");
-            let entities =
-                bind_entities(FileId::new(42), extracted.fragments).expect("bind entities");
-            assert_eq!(entities.len(), 1, "{format:?}");
-            let entity = &entities[0];
+            let bound = bind_entities(FileId::new(42), extracted.fragments).expect("bind entities");
+            assert_eq!(bound.entities.len(), 1, "{format:?}");
+            let entity = &bound.entities[0];
             let Some(EntityMetadata::Code(metadata)) = entity.metadata() else {
                 panic!("code metadata expected");
             };
@@ -2571,7 +2628,7 @@ mod tests {
             };
             assert!(!content.contains("recallneedle"));
             let prepared =
-                prepare_fragments(&entities, options.max_chunk_chars).expect("index inputs");
+                prepare_fragments(&bound.entities, options.max_chunk_chars).expect("index inputs");
             assert!(!prepared.is_empty());
             for item in prepared {
                 assert!(item.fts_text.contains("recallneedle"), "{format:?}");
@@ -2598,17 +2655,17 @@ mod tests {
         };
         let extracted = extract_for_indexing(&source, options).expect("extract markdown");
         let file_id = FileId::new(42);
-        let entities = bind_entities(file_id, extracted.fragments.clone()).expect("bind entities");
+        let bound = bind_entities(file_id, extracted.fragments.clone()).expect("bind entities");
         let mut reordered = extracted.fragments;
         reordered.reverse();
         for (index, entity) in reordered.iter_mut().enumerate() {
             entity.index = index + 100;
         }
         let mut rebound = bind_entities(file_id, reordered).expect("bind reordered entities");
-        rebound.reverse();
-        assert_eq!(entities, rebound);
+        rebound.entities.reverse();
+        assert_eq!(bound.entities, rebound.entities);
         let mut ids = HashSet::new();
-        for entity in &entities {
+        for entity in &bound.entities {
             assert!(ids.insert(entity.id().as_str()));
             for (ordinal, fragment) in entity.fragments().iter().enumerate() {
                 assert!(ids.insert(fragment.id.as_str()));
@@ -2633,15 +2690,17 @@ mod tests {
             }
         }
         let prepared =
-            prepare_fragments(&entities, options.max_chunk_chars).expect("embedding inputs");
+            prepare_fragments(&bound.entities, options.max_chunk_chars).expect("embedding inputs");
         assert_eq!(
             prepared.len(),
-            entities
+            bound
+                .entities
                 .iter()
                 .map(|entity| entity.fragments().len())
                 .sum::<usize>()
         );
-        let section = entities
+        let section = bound
+            .entities
             .iter()
             .find(|entity| entity.fragments().len() > 1)
             .expect("long section");
@@ -2655,6 +2714,46 @@ mod tests {
             assert!(text.starts_with("heading: "));
             assert!(crate::utils::utf16_len(text) <= 64);
         }
+    }
+
+    #[test]
+    fn entities_without_indexable_content_leave_their_ordinal_behind() {
+        let file_id = FileId::new(42);
+        let fragment = || vec![crate::extraction::ExtractedEntityFragment { range: Range::Full }];
+        let blank = ExtractedEntity {
+            index: 0,
+            source_range: Range::Full,
+            content: Content::Code("  \n".into()),
+            metadata: None,
+            fragments: fragment(),
+            source_map: None,
+        };
+        let kept = ExtractedEntity {
+            index: 1,
+            source_range: Range::Full,
+            content: Content::Code("fn kept() {}".into()),
+            metadata: None,
+            fragments: fragment(),
+            source_map: None,
+        };
+        let bound = bind_entities(file_id, vec![blank, kept]).expect("blank entity is not fatal");
+        assert_eq!(bound.entities.len(), 1);
+        assert!(bound.get(0).is_none());
+        let kept_id = bound.get(1).expect("kept entity").id().as_str().to_owned();
+        // The graph addresses entities by extraction ordinal, so the surviving
+        // entity must still answer for ordinal 1 after ordinal 0 left.
+        let graph = crate::extraction::PartitionedGraph {
+            head_fragment_indices: vec![0, 1],
+            ..crate::extraction::PartitionedGraph::default()
+        };
+        let assembled = graph_assembly::assemble_file_graph(
+            &file_id.get().to_string(),
+            FileFormat::Rust,
+            &graph,
+            &bound,
+        );
+        assert_eq!(assembled.nodes.len(), 1);
+        assert_eq!(assembled.nodes[0].id, kept_id);
     }
 
     #[derive(Default)]

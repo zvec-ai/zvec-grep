@@ -16,6 +16,8 @@ use crate::domain::{
 };
 use crate::extraction::{FILE_SCOPE_INDEX, PartitionedGraph};
 
+use super::pipeline::BoundEntities;
+
 /// File-node ID marking the file scope itself (import owner).
 ///
 /// Matches the implicit file endpoint the graph store writes (`f{file_id}`),
@@ -26,13 +28,15 @@ pub(super) fn file_node_id(file_id: &str) -> String {
 
 /// Assembles the final `FileGraphResult` for a prepared file.
 ///
-/// `entities` must be the same bound values produced from the extraction
-/// output that generated `graph` (their ordinals still match).
+/// `entities` must be the bound values produced from the extraction output
+/// that generated `graph`: their extraction ordinals are what the partition
+/// addresses. An ordinal binding left empty contributes no node, edge or
+/// reference, and never shifts the ordinals around it.
 pub(super) fn assemble_file_graph(
     file_id: &str,
     language: FileFormat,
     graph: &PartitionedGraph,
-    entities: &[Entity],
+    entities: &BoundEntities,
 ) -> FileGraphResult {
     let file_scope = file_node_id(file_id);
     let entity_nodes = graph
@@ -55,7 +59,11 @@ pub(super) fn assemble_file_graph(
 
 /// The resolved edges of one file: walk-time containment plus name references
 /// the partition already bound inside it.
-fn file_edges(graph: &PartitionedGraph, entities: &[Entity], file_scope: &str) -> Vec<FileEdge> {
+fn file_edges(
+    graph: &PartitionedGraph,
+    entities: &BoundEntities,
+    file_scope: &str,
+) -> Vec<FileEdge> {
     let mut edges = Vec::with_capacity(graph.contains.len() + graph.resolved.len());
     for edge in &graph.contains {
         if let (Some(source), Some(target)) = (
@@ -109,16 +117,18 @@ fn file_edges(graph: &PartitionedGraph, entities: &[Entity], file_scope: &str) -
 /// The references one file leaves for the cross-file resolver.
 fn file_pending_refs(
     graph: &PartitionedGraph,
-    entities: &[Entity],
+    entities: &BoundEntities,
     file_scope: &str,
 ) -> Vec<PendingRef> {
     graph
         .pending
         .iter()
-        .map(|reference| {
+        .filter_map(|reference| {
             let owner_id = match reference.owner_index {
                 FILE_SCOPE_INDEX => file_scope.to_owned(),
-                ordinal => node_id(entities, ordinal).unwrap_or_else(|| file_scope.to_owned()),
+                // A reference whose owner left binding has no owner to hang
+                // on; the file scope would claim an owner it never had.
+                ordinal => node_id(entities, ordinal)?,
             };
             let mut metadata = BTreeMap::new();
             insert_ref_metadata(
@@ -154,7 +164,7 @@ fn file_pending_refs(
                     None,
                 );
             }
-            PendingRef {
+            Some(PendingRef {
                 owner_id,
                 ref_name: reference.ref_name.clone(),
                 receiver_name: reference.receiver_name.clone(),
@@ -164,12 +174,12 @@ fn file_pending_refs(
                 column: reference.column,
                 status: PendingRefStatus::Pending,
                 metadata,
-            }
+            })
         })
         .collect()
 }
 
-fn node_id(entities: &[Entity], ordinal: usize) -> Option<String> {
+fn node_id(entities: &BoundEntities, ordinal: usize) -> Option<String> {
     entities
         .get(ordinal)
         .map(|entity| entity.id().as_str().to_owned())
@@ -272,7 +282,7 @@ fn insert_inheritance_metadata(
 
 /// Qualified name of the entity owning a name reference; the file scope owns
 /// nothing inheritable, so it keeps its synthetic file-node ID.
-fn owner_identity(ordinal: usize, entities: &[Entity], file_scope: &str) -> String {
+fn owner_identity(ordinal: usize, entities: &BoundEntities, file_scope: &str) -> String {
     if ordinal == FILE_SCOPE_INDEX {
         return file_scope.to_owned();
     }
@@ -384,7 +394,12 @@ mod tests {
             column: 20,
         });
 
-        let assembled = assemble_file_graph("7", FileFormat::Rust, &graph, &entities);
+        let assembled = assemble_file_graph(
+            "7",
+            FileFormat::Rust,
+            &graph,
+            &BoundEntities::for_tests(entities),
+        );
         let inheritance = assembled
             .edges
             .iter()
