@@ -293,14 +293,23 @@ fn publish(
         {
             use rustix::fs::{CWD, RenameFlags, renameat_with};
             // Require a native rename; no hard-link/unlink fallback.
-            renameat_with(
+            match renameat_with(
                 CWD,
                 temporary.path(),
                 CWD,
                 destination,
                 RenameFlags::NOREPLACE,
-            )
-            .map_err(Into::into)
+            ) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    let error = io::Error::from(err);
+                    if is_unsupported(&error) {
+                        fs::rename(temporary.path(), destination)
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
         }
         #[cfg(windows)]
         {
@@ -323,6 +332,12 @@ fn publish(
     let mut temporary = temporary;
     temporary.disable_cleanup(true);
     Ok(temporary.into_file())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_unsupported(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+        || matches!(error.raw_os_error(), Some(22))
 }
 
 fn nonempty_directory(path: &Path) -> &Path {
