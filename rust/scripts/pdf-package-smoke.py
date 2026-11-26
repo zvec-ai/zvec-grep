@@ -85,26 +85,50 @@ def http_layout_cache_smoke(execute, workspace, home, env, cache):
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            config = {"version": 1, "defaults": {"modelCacheDir": str(cache)}, "models": {"http/fixture": {
+            config = {"version": 1, "models": {"http/fixture": {
                 "endpoint": f"http://127.0.0.1:{server.server_port}/v1", "model": "fixture",
                 "dimension": 4, "maxInputTokens": 512, "maxBatchSize": 16, "auth": "none"}}}
-            (config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+            config_path = config_dir / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
             isolated_env = dict(env, HOME=str(isolated_home), USERPROFILE=str(isolated_home),
                                 XDG_CONFIG_HOME=str(isolated_home / "config"),
                                 ZVEC_GREP_MODEL_CACHE=str(unavailable_cache))
             isolated_env.pop("ZVEC_GREP_DEVICE", None)
             arguments = ["--index", "--embedding", "http/fixture", "--allow-remote"]
-            for label, extra in [("http-cache-explicit", ["--model-cache", str(cache)]),
-                                 ("http-cache-global", ["--rebuild"])]:
+
+            def index(label, args, expected, cwd=root):
                 before = len(requests)
-                out, err = execute(label, arguments + extra, cwd=root, environment=isolated_env)
-                check("1 scanned" in out and "0 failed" in out, out + err)
+                out, err = execute(label, args, cwd=cwd, environment=isolated_env)
+                check(all(part in out for part in expected) and "0 failed" in out, out + err)
+                check("Preparing model: layout/pp-doclayout-s" in err, err)
                 check("using native PDF text without layout filtering" not in err, err)
                 check("Downloading model" not in err, "Expected cached PP-S: " + err)
                 check(len(requests) > before, "HTTP embedding fixture received no request")
-                isolated_env.pop("ZVEC_GREP_MODEL_CACHE", None)
-            out, _ = execute("http-cache-rg", ["--rg", "-F", "Orchid recovery"], cwd=root, environment=isolated_env)
-            check("native.pdf" in out and re.search(r"pages:\s*1\s*\n", out), out)
+
+            def saved_config(cwd=root):
+                manifest = json.loads((cwd / ".zvec-grep/manifest.json").read_text(encoding="utf-8"))
+                return manifest["index"]["descriptor"]["embeddingConfigs"]["http/fixture"]
+
+            index("http-cache-explicit", arguments + ["--model-cache", str(cache)], ["1 scanned", "1 added"])
+            check(saved_config().get("cacheDir") == str(cache), "Explicit model cache was not saved")
+            # A fresh process must reuse the workspace preference without any
+            # explicit cache, environment fallback, or global configuration.
+            isolated_env.pop("ZVEC_GREP_MODEL_CACHE", None)
+            config_path.unlink()
+            fixture(root / "added.pdf", [["Cobalt verification completes the recovery."]])
+            index("http-cache-incremental", ["--index", "--allow-remote"], ["2 scanned", "1 added", "1 unchanged"])
+            check(saved_config().get("cacheDir") == str(cache), "Incremental index lost the saved model cache")
+            out, _ = execute("http-cache-rg", ["--rg", "-F", "Cobalt verification"], cwd=root, environment=isolated_env)
+            check("added.pdf" in out and re.search(r"pages:\s*1\s*\n", out), out)
+
+            # Exercise the global fallback in a separate workspace with no saved preference.
+            global_root = workspace / "http-global-cache"
+            global_root.mkdir()
+            fixture(global_root / "native.pdf", [["Orchid recovery requires five minutes."]])
+            config["defaults"] = {"modelCacheDir": str(cache)}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            index("http-cache-global", arguments, ["1 scanned", "1 added"], cwd=global_root)
+            check("cacheDir" not in saved_config(global_root), "Global cache must not become a saved override")
         finally:
             server.shutdown()
             worker.join()

@@ -1002,10 +1002,22 @@ fn saved_embedding_config(
                 .cloned()
         })
         .unwrap_or_default();
+    let cache_dir = options
+        .model_cache
+        .clone()
+        .or_else(|| {
+            options
+                .embedding
+                .as_ref()
+                .and_then(|embedding| embedding.cache_dir.clone())
+        })
+        .or_else(|| stored.cache_dir.clone());
     if let Some(http) = model.configured_http() {
         let mut config = ModelConfig {
             http: Some(http.clone()),
             endpoint: model.configured_endpoint().map(str::to_owned),
+            // HTTP embeddings do not use this cache, but extraction models do.
+            cache_dir,
             api_key: (http.auth == HttpAuth::Bearer)
                 .then_some(stored.api_key)
                 .flatten(),
@@ -1029,16 +1041,7 @@ fn saved_embedding_config(
                     .filter(|device| *device != Device::Auto)
             })
             .or(stored.device);
-        stored.cache_dir = options
-            .model_cache
-            .clone()
-            .or_else(|| {
-                options
-                    .embedding
-                    .as_ref()
-                    .and_then(|embedding| embedding.cache_dir.clone())
-            })
-            .or(stored.cache_dir);
+        stored.cache_dir = cache_dir;
         return Ok(stored);
     }
     stored.endpoint = model
@@ -1368,6 +1371,84 @@ mod tests {
             bytes
         );
         assert!(!layout.credentials_key_path().exists());
+        models.close();
+    }
+
+    #[test]
+    fn http_model_cache_persists_without_saving_temporary_overrides() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let models = ModelRuntimeManager::new();
+        let http = serde_json::from_value(serde_json::json!({
+            "model": "served-model", "dimension": 4, "maxInputTokens": 128, "auth": "none"
+        }))
+        .expect("HTTP descriptor");
+        let model = models
+            .acquire(super::ModelRuntimeRequest::new(
+                "http/fixture",
+                super::ModelConfig {
+                    http: Some(http),
+                    endpoint: Some("http://127.0.0.1:9/v1/embeddings".into()),
+                    ..Default::default()
+                },
+                None,
+            ))
+            .expect("HTTP metadata without loading models");
+        let cache = directory.path().join("models");
+        let replacement = directory.path().join("replacement-models");
+        let mut workspace = None;
+        for (options, expected) in [
+            (
+                IndexOptions {
+                    model_cache: Some(cache.clone()),
+                    ..Default::default()
+                },
+                &cache,
+            ),
+            (IndexOptions::default(), &cache),
+            (
+                IndexOptions {
+                    runtime_model_cache: Some(directory.path().join("temporary-models")),
+                    ..Default::default()
+                },
+                &cache,
+            ),
+            (
+                IndexOptions {
+                    model_cache: Some(replacement.clone()),
+                    ..Default::default()
+                },
+                &replacement,
+            ),
+            (IndexOptions::default(), &replacement),
+        ] {
+            let saved =
+                super::saved_embedding_config(&layout, workspace.as_ref(), &options, &model)
+                    .expect("save HTTP settings");
+            assert_eq!(saved.cache_dir.as_ref(), Some(expected));
+            let descriptor = IndexDescriptor::new(
+                model.info().clone(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::from([("http/fixture".into(), saved)]),
+                false,
+                crate::domain::FTS_CONFIG,
+            )
+            .expect("HTTP index descriptor");
+            let updated = Workspace::new(
+                directory.path(),
+                layout.clone(),
+                crate::domain::ScanRules::default(),
+                super::CURRENT_INDEX_VERSION,
+                Some(uuid::Uuid::new_v4().to_string()),
+                1,
+                1,
+                IndexState::Enabled(Box::new(descriptor)),
+            )
+            .expect("workspace");
+            super::write_workspace_manifest(layout.manifest_path(), &updated).expect("write");
+            workspace = super::read_workspace_manifest(directory.path(), &layout).expect("read");
+            assert_eq!(workspace.as_ref(), Some(&updated));
+        }
         models.close();
     }
 
