@@ -116,11 +116,12 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          prefix-key: rust-ci-v3-quality
+          prefix-key: rust-ci-v4-quality
           workspaces: rust -> target
           cache-directories: |
             ~/.cargo/llama-cpp-sources/
             ~/.cargo/llama-cpp-runtimes/
+            ~/.cache/pdfium-rs/
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Check formatting
         run: cargo fmt --all --check
