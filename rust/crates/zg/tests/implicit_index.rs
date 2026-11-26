@@ -1201,6 +1201,7 @@ fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
             &manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"];
         assert!(runtime.get("device").is_none());
         assert!(runtime.get("cacheDir").is_none());
+        assert!(manifest.get("modelCacheDir").is_none());
         assert!(runtime.get("apiKey").is_none());
         assert!(runtime.get("endpoint").is_none());
         assert!(!manifest.to_string().contains("implicit-query-secret"));
@@ -1213,6 +1214,7 @@ fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
 fn query_refresh_keeps_saved_model_preferences() {
     for mode in ["direct", "server"] {
         let mut fixture = Fixture::new();
+        let saved_cache = fixture.root.path().join("saved-models");
         fixture.success(&[
             "--index",
             "--mode",
@@ -1222,12 +1224,13 @@ fn query_refresh_keeps_saved_model_preferences() {
             "--device",
             "cpu",
             "--model-cache",
-            "saved-models",
+            saved_cache.to_str().expect("saved cache path"),
         ]);
         let manifest_path = fixture.root.path().join(".zvec-grep/manifest.json");
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("saved manifest"))
                 .expect("manifest JSON");
+        assert_eq!(saved["modelCacheDir"], json!(saved_cache));
         assert_eq!(
             saved["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"]["device"],
             "cpu"
@@ -1264,6 +1267,7 @@ fn query_refresh_keeps_saved_model_preferences() {
             saved["index"]["descriptor"]["embeddingConfigs"]
         );
         assert_eq!(updated["storageGeneration"], saved["storageGeneration"]);
+        assert_eq!(updated["modelCacheDir"], saved["modelCacheDir"]);
     }
 }
 
