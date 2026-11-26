@@ -1733,11 +1733,17 @@ mod tests {
                 "package demo",
                 "type Widget struct { value int }",
                 "func (w *Widget) Value() int { return w.value }",
+                "type Queue[Item any] struct {}",
+                "func (q *Queue[Item]) Take(x Item) {}",
                 "type Reader interface { Read() string }",
             ]
             .join("\n"),
         );
         let go = extract(&go_source, ChunkOptions::default()).expect("go extraction");
+        assert!(matches!(
+            test_metadata(named(&go, "Take")),
+            Some(EntityMetadata::Code(meta)) if meta.scope.as_deref() == Some("Queue")
+        ));
         assert_eq!(
             test_metadata(named(&go, "Value")).cloned(),
             Some(EntityMetadata::Code(CodeMetadata {

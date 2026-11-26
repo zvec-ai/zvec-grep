@@ -39,8 +39,11 @@ are dependency code. Neither `dist/` nor `.d.ts` alone implies generated code.
 Code selection is greedy. After each selected code hit, remaining code hits from
 the same file receive a soft factor of `1 / (1 + 0.5 * selected_count)`. There is
 no hard per-file cap. A named function keeps its static score if the query
-identifies its file (literal path or normalized file stem) or its enclosing
-scope by name, and it has a distinct scoped name and a disjoint source range
+identifies its file, enclosing scope, or qualified method name. A path starting
+with `./` is relative to the workspace root. A bare filename or normalized
+file stem can match in any directory. Each fused route contributes its own
+explicit targets. To keep its static score, the function must also have a
+distinct scoped name and a disjoint source range
 from every previously selected code hit in that file. Unknown ranges cannot
 establish independence. Exempt functions still count toward subsequent file
 decay. A code pool from a single file skips this selection penalty. Context

@@ -155,7 +155,7 @@ fn score_code(
     let mut queries = routes.iter().map(|r| r.query.as_str()).collect::<Vec<_>>();
     queries.sort_unstable();
     queries.dedup();
-    let query = QueryFeatures::new(&queries.join("\n"));
+    let query = QueryFeatures::from_queries(&queries);
     let mut overrides = Roles::overrides(&query, filter);
     let roles = hits
         .iter()
@@ -168,22 +168,23 @@ fn score_code(
         .zip(roles)
         .map(|(hit, roles)| {
             let path = hit.file.relative_path().display().to_string();
-            let (symbol_match, symbol_bonus, definition_bonus, independent_anchor) = match hit
-                .entity
-                .metadata()
-            {
-                Some(EntityMetadata::Code(code)) => {
-                    let (kind, symbol, definition) = query.symbol_bonus_with(code, policy);
-                    let anchored = policy.anchored_functions
-                        && code.symbol_type == Some(SymbolType::Function)
-                        && code.symbol_name.as_ref().is_some_and(|s| !s.is_empty())
-                        && support::interval(&hit.entity.source_range()).is_some()
-                        && query
-                            .names_function_file_or_scope(&path, code.qualified_scope().as_deref());
-                    (kind, symbol, definition, anchored)
-                }
-                _ => ("none", 0.0, 0.0, false),
-            };
+            let (symbol_match, symbol_bonus, definition_bonus, independent_anchor) =
+                match hit.entity.metadata() {
+                    Some(EntityMetadata::Code(code)) => {
+                        let (kind, symbol, definition) = query.symbol_bonus_with(code, policy);
+                        let anchored = policy.anchored_functions
+                            && code.symbol_type == Some(SymbolType::Function)
+                            && code.symbol_name.as_ref().is_some_and(|s| !s.is_empty())
+                            && support::interval(&hit.entity.source_range()).is_some()
+                            && query.names_function_file_or_scope(
+                                &path,
+                                code.qualified_scope().as_deref(),
+                                code.symbol_name.as_deref(),
+                            );
+                        (kind, symbol, definition, anchored)
+                    }
+                    _ => ("none", 0.0, 0.0, false),
+                };
             let base = hit.score / maximum_rrf;
             let mut path_bonus = policy.path_weight * query.path_affinity(&path);
             // Weak lexical coverage is one signal even when repeated in the path.
@@ -285,7 +286,7 @@ fn select(
                 if other.independent_anchor {
                     let same_symbol = matches!((other.hit.entity.metadata(), item.hit.entity.metadata()),
                         (Some(EntityMetadata::Code(a)), Some(EntityMetadata::Code(b)))
-                        if a.scope == b.scope && a.symbol_name == b.symbol_name);
+                        if a.symbol_name == b.symbol_name && a.declaring_scope() == b.declaring_scope());
                     other.independent_anchor = !same_symbol
                         && !support::overlaps(
                             &other.hit.entity.source_range(),

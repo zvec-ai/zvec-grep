@@ -24,7 +24,22 @@ pub(super) struct QueryFeatures {
 }
 
 impl QueryFeatures {
+    #[cfg(test)]
     pub(super) fn new(query: &str) -> Self {
+        Self::from_queries(&[query])
+    }
+
+    pub(super) fn from_queries(queries: &[&str]) -> Self {
+        let mut features = Self::from_text(&queries.join("\n"));
+        for query in queries {
+            let (scopes, stems) = function_anchor_names(query);
+            features.scope_names.extend(scopes);
+            features.file_stems.extend(stems);
+        }
+        features
+    }
+
+    fn from_text(query: &str) -> Self {
         let identifiers = identifiers(query);
         let lower = query.to_lowercase();
         let words = identifiers
@@ -50,7 +65,6 @@ impl QueryFeatures {
         );
         explicit_names.sort();
         explicit_names.dedup();
-        let (scope_names, file_stems) = function_anchor_names(query);
         let requested_kind = [
             ("class", SymbolType::Class),
             ("function", SymbolType::Function),
@@ -84,8 +98,8 @@ impl QueryFeatures {
                 .filter(|s| s.contains(['/', '\\', '.']))
                 .map(str::to_owned)
                 .collect(),
-            scope_names,
-            file_stems,
+            scope_names: HashSet::new(),
+            file_stems: HashSet::new(),
             explicit_names,
             requested_kind,
             usages: ["usage", "usages", "callers", "references"]
@@ -164,7 +178,10 @@ impl QueryFeatures {
         let Some(name) = code.symbol_name.as_deref().filter(|s| !s.is_empty()) else {
             return ("none", 0.0, 0.0);
         };
-        let scope = code.scope.as_deref().unwrap_or_default().replace('.', "::");
+        let scope = code
+            .declaring_scope()
+            .unwrap_or_default()
+            .replace('.', "::");
         let name = name.replace('.', "::");
         let qualified = if scope.is_empty() {
             name.clone()
@@ -260,13 +277,25 @@ impl QueryFeatures {
         (best.0, best.1, definition)
     }
 
-    pub(super) fn names_function_file_or_scope(&self, path: &str, scope: Option<&str>) -> bool {
+    pub(super) fn names_function_file_or_scope(
+        &self,
+        path: &str,
+        scope: Option<&str>,
+        symbol: Option<&str>,
+    ) -> bool {
         if scope.is_some_and(|scope| {
             let scope = scope_type_name(scope);
-            self.scope_names.contains(scope.as_ref())
-                || scope
-                    .match_indices("::")
-                    .any(|(i, _)| self.scope_names.contains(&scope[i + 2..]))
+            let matches = |target: &str| {
+                scope
+                    .strip_suffix(target)
+                    .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with("::"))
+            };
+            self.scope_names.iter().any(|target| {
+                matches(target)
+                    || target
+                        .rsplit_once("::")
+                        .is_some_and(|(owner, member)| Some(member) == symbol && matches(owner))
+            })
         }) {
             return true;
         }
@@ -334,7 +363,7 @@ impl QueryFeatures {
 
 fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
     let mut generic_names = HashSet::new();
-    let query = without_type_arguments(query, Some(&mut generic_names));
+    let query = without_anchor_arguments(query, Some(&mut generic_names));
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut scope_names = HashSet::new();
     let mut standalone_names: HashSet<&str> = query
@@ -365,14 +394,16 @@ fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
             let word = raw.trim_matches([':', '.']);
             if raw.contains("::") || word.contains('.') {
                 let qualified = word.replace('.', "::");
-                // Member syntax can also name the enclosing type (Router.Dial or Router::dial).
+                // An explicit call identifies its owner regardless of method capitalization.
+                // An uncalled qualified type (Outer.Inner) retains its full scope.
                 if let Some((owner, member)) = qualified.rsplit_once("::")
                     && !raw.ends_with("::")
-                    && owner
-                        .rsplit("::")
-                        .next()
-                        .is_some_and(|name| name.starts_with(char::is_uppercase))
-                    && (word.contains('.') || member.starts_with(char::is_lowercase))
+                    && (is_call
+                        || (member.starts_with(char::is_lowercase)
+                            && owner
+                                .rsplit("::")
+                                .next()
+                                .is_some_and(|name| name.starts_with(char::is_uppercase))))
                 {
                     scope_names.insert(owner.to_owned());
                 }
@@ -399,7 +430,7 @@ fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
 
 /// Keep the qualified type name from extracted scopes such as `jsonc::Parser<'a>`.
 fn scope_type_name(scope: &str) -> Cow<'_, str> {
-    let name = without_type_arguments(scope, None);
+    let name = without_anchor_arguments(scope, None);
     if name.contains('.') {
         Cow::Owned(name.replace('.', "::"))
     } else {
@@ -407,27 +438,43 @@ fn scope_type_name(scope: &str) -> Cow<'_, str> {
     }
 }
 
-/// Elide balanced argument lists. In queries, also record explicitly named types
-/// so the sentence-initial filter can distinguish `Vec<T>` from a prose word.
-fn without_type_arguments<'a>(
+/// Keep the owner of type arguments and grouped selectors (e.g. `Router::{send, recv}`).
+/// Record explicit types so the sentence-initial filter accepts `Vec<T>` and `Repo[T]`.
+fn without_anchor_arguments<'a>(
     text: &'a str,
     mut query_names: Option<&mut HashSet<&'a str>>,
 ) -> Cow<'a, str> {
-    if !text.contains('<') {
+    if !text.contains(['<', '[', '{']) {
         return Cow::Borrowed(text);
     }
     let mut result = String::new();
     let mut copied = 0;
     let mut prefix = "";
     let mut name = "";
-    let mut depth = 0;
+    let mut closers = Vec::new();
     for (i, ch) in text.char_indices() {
         match ch {
-            '<' if depth > 0 => depth += 1,
-            '<' => {
+            '<' | '[' | '{' => {
+                let closer = match ch {
+                    '<' => '>',
+                    '[' => ']',
+                    _ => '}',
+                };
+                if !closers.is_empty() {
+                    closers.push(closer);
+                    continue;
+                }
                 let before = &text[copied..i];
-                prefix = before.trim_end().trim_end_matches("::");
+                if ch == '{' && !before.ends_with("::") {
+                    continue;
+                }
+                prefix = if ch == '{' {
+                    before
+                } else {
+                    before.trim_end().trim_end_matches("::")
+                };
                 name = prefix
+                    .trim_end_matches("::")
                     .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
                     .next()
                     .unwrap_or_default();
@@ -437,12 +484,14 @@ fn without_type_arguments<'a>(
                         && (!before.ends_with(char::is_whitespace)
                             || name.starts_with(char::is_uppercase)))
                 {
-                    depth = 1;
+                    closers.push(closer);
                 }
             }
-            '>' if depth > 0 && !text[..i].ends_with('-') => {
-                depth -= 1;
-                if depth == 0 {
+            '>' | ']' | '}'
+                if closers.last() == Some(&ch) && !(ch == '>' && text[..i].ends_with('-')) =>
+            {
+                closers.pop();
+                if closers.is_empty() {
                     if let Some(names) = query_names.as_deref_mut() {
                         names.insert(name);
                     }
@@ -470,10 +519,12 @@ fn normalized_stem(name: &str) -> String {
 
 fn path_matches(normalized: &str, query: &str) -> bool {
     let query = query.replace('\\', "/");
-    let query = query.strip_prefix("./").unwrap_or(&query);
+    if let Some(relative) = query.strip_prefix("./") {
+        return normalized.strip_prefix("./").unwrap_or(normalized) == relative;
+    }
     normalized == query
         || normalized
-            .strip_suffix(query)
+            .strip_suffix(&query)
             .is_some_and(|prefix| prefix.ends_with('/'))
 }
 

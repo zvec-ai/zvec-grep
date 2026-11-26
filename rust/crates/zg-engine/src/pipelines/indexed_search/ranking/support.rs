@@ -42,7 +42,7 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
             let Some(EntityMetadata::Code(code)) = scored[index].hit.entity.metadata() else {
                 continue;
             };
-            let name = (code.scope.as_deref(), code.symbol_name.as_deref());
+            let name = (code.declaring_scope(), code.symbol_name.as_deref());
             if names.contains(&name)
                 || selected.iter().any(|&other| {
                     overlaps(
