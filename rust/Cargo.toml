@@ -16,9 +16,9 @@ publish = false
 liteparse = { git = "https://github.com/run-llama/liteparse.git", rev = "89735b9fe99dfa493008a21706b48e3309792da8", default-features = false }
 liteparse-pdfium = { git = "https://github.com/run-llama/liteparse.git", rev = "89735b9fe99dfa493008a21706b48e3309792da8" }
 liteparse-pdfium-sys = { git = "https://github.com/run-llama/liteparse.git", rev = "89735b9fe99dfa493008a21706b48e3309792da8" }
-# Keep the safe API and the C5 FFI boundary on the same pinned native ABI.
-llama-cpp-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "79305567e63ee551eb1798c0537eab87d9595a23", default-features = false }
-llama-cpp-sys-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "79305567e63ee551eb1798c0537eab87d9595a23", default-features = false }
+# Pin both API layers to the verified zvec-0.1.162-r1 SDK (llama.cpp v0.9.0).
+llama-cpp-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "498a39ca09b5847980e77a786870248954eec62b", default-features = false }
+llama-cpp-sys-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "498a39ca09b5847980e77a786870248954eec62b", default-features = false }
 async-trait = "0.1.89"
 axum = "0.8"
 bytes = "1.12.1"

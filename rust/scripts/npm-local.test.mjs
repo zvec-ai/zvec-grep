@@ -622,6 +622,7 @@ with tempfile.TemporaryDirectory(prefix="zg-test-bundle-") as temporary:
                  "cuda12/ggml-cuda.dll", "llama.lib"):
         (backend / name).write_bytes(name.encode())
     (backend.parent / "manifest.json").write_text(json.dumps({
+        "schema": 2,
         "files": {p.relative_to(backend.parent).as_posix(): runtime.digest(p)
                   for p in backend.rglob("*") if p.is_file()}}))
     for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll", "pdfium.dll"):
@@ -629,8 +630,10 @@ with tempfile.TemporaryDirectory(prefix="zg-test-bundle-") as temporary:
     (root / "zvec/zvec_c_api.dll").write_bytes(b"current zvec")
     (root / "stale/zvec_c_api.dll").write_bytes(b"must not be selected")
     records = [
-        {"reason": "build-script-executed", "package_id": "llama-cpp-2",
+        {"reason": "build-script-executed", "package_id": "git+https://github.com/zvec-ai/llama-cpp-rs#llama-cpp-sys-2@0.1.162",
          "env": [["GGML_BACKENDS_DIR", str(backend)]]},
+        {"reason": "build-script-executed", "package_id": "llama-cpp-2",
+         "env": [["GGML_BACKENDS_DIR", str(root / "stale")]]},
         {"reason": "build-script-executed", "package_id": "zvec-rust-sys",
          "linked_paths": ["native=" + str(root / "zvec")]},
     ]

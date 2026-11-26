@@ -157,7 +157,7 @@ pub fn stage(root: &Path, manifest_path: &Path, target: &str, out: &Path) -> Res
         return Err("llama.cpp runtime manifest does not belong to its SDK directory".into());
     }
     let manifest: Manifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
-    if manifest.schema != 1 || manifest.target != target {
+    if manifest.schema != 2 || manifest.target != target {
         return Err("llama.cpp runtime manifest schema/target mismatch".into());
     }
     if manifest.linkage == "static" {
