@@ -39,6 +39,7 @@ pub use terminal::{stderr_supports_ansi, stdout_supports_ansi};
 
 use std::{
     ffi::{OsStr, OsString},
+    io::IsTerminal,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -755,6 +756,8 @@ pub enum CliPlan {
         home: Option<PathBuf>,
         request: Box<ContextOptions>,
         path_lookup: bool,
+        /// A missing index may lead to interactive model selection and a build.
+        prompt_for_missing_index: bool,
         output: OutputOptions,
     },
     Index {
@@ -1606,6 +1609,7 @@ fn query_plan(mut args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliE
         home,
         request: Box::new(request),
         path_lookup,
+        prompt_for_missing_index: std::io::stdin().is_terminal() && stderr_supports_ansi(),
         output,
     })
 }

@@ -68,7 +68,15 @@ impl Fixture {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zg"));
+        self.command_with_executable(env!("CARGO_BIN_EXE_zg"), args)
+    }
+
+    fn command_with_executable(
+        &self,
+        executable: impl AsRef<std::ffi::OsStr>,
+        args: &[&str],
+    ) -> Command {
+        let mut command = Command::new(executable);
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("ZVEC_GREP_") {
                 command.env_remove(key);
@@ -716,6 +724,59 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
     indexed.expect("incremental index completes after gate release");
     success(stopped.expect("stop daemon"));
     result.expect("indexed CLI queries must finish before the writer is released");
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn metal_startup_reexec_depends_on_the_query_and_environment() {
+    fn image_loads(output: &Output) -> usize {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|line| line.ends_with("/libzvec_c_api.dylib"))
+            .count()
+    }
+
+    let fixture = Fixture::new();
+    // The separate executable-path pinning step can re-exec a symlinked Cargo target.
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_zg")).expect("physical executable");
+    let command = |args: &[&str]| {
+        let mut command = fixture.command_with_executable(&executable, args);
+        command
+            .args(["--mode", "direct"])
+            .env_remove("GGML_METAL_NO_RESIDENCY")
+            .env("DYLD_PRINT_LIBRARIES", "1");
+        command
+    };
+    let query = |args: &[&str], setting: Option<(&str, &str)>| {
+        let mut command = command(args);
+        if let Some((key, value)) = setting {
+            command.env(key, value);
+        }
+        let output = command.output().expect("run direct query");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("No index found"), "{args:?}: {stderr}");
+        image_loads(&output)
+    };
+    let status = success(command(&["--status"]).output().expect("run direct status"));
+    assert_eq!(image_loads(&status), 1);
+    assert_eq!(query(&["--fts", "needle"], None), 1);
+    assert_eq!(query(&["--fts", "needle", "--refresh", "wait"], None), 2);
+    assert_eq!(query(&["--hybrid", "needle"], None), 2);
+    assert_eq!(query(&["--fts", "needle", "--vector", "pin"], None), 2);
+    let vector = ["--vector", "needle"];
+    assert_eq!(query(&vector, None), 2);
+    assert_eq!(query(&vector, Some(("GGML_METAL_NO_RESIDENCY", "0"))), 1);
+    assert_eq!(
+        query(&vector, Some(("ZVEC_GREP_METAL_KEEP_RESIDENCY", "1"))),
+        1
+    );
+
+    // An interactive FTS query can build a missing index with a Metal model.
+    let mut interactive = command(&["--fts", "needle"]);
+    interactive.env("TERM", "xterm");
+    let cancelled = terminal::run(interactive, &[("Esc Cancel", b"\x1b")]);
+    assert_eq!(cancelled.status.code(), Some(130));
+    assert_eq!(image_loads(&cancelled), 2);
 }
 
 #[test]
