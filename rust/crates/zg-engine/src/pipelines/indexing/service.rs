@@ -2588,12 +2588,11 @@ mod tests {
                 scanner.release.notify_one();
                 Ok(())
             };
-            let (result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
-                tokio::try_join!(biased; query, writer)
-            })
-            .await
-            .expect("writer admitted while discovery is paused")
-            .expect("query and writer");
+            let operations = Box::pin(async { tokio::try_join!(biased; query, writer) });
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(30), operations)
+                .await
+                .expect("writer admitted while discovery is paused")
+                .expect("query and writer");
             let status = result.indexing.expect("observed drift");
             assert_eq!(
                 (status.state.as_str(), status.completed, status.total),
