@@ -4302,7 +4302,7 @@ public class Service {
 
     #[test]
     fn go_data_tables_preserve_only_their_own_package_var_spec() {
-        let single = "var Words = map[int]string{1: `one`}";
+        let single = "var Words = (map[int]string{1: `one`})";
         let grouped = "ByCode = map[string][]int{\n        \"ok\": {1, 2},\n    }";
         let body = format!(
             "package demo\n{single}\nvar (\n    {grouped}\n    Empty = map[int]int{{}}\n\

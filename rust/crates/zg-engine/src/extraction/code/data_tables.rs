@@ -1,4 +1,5 @@
 //! Retain package-level lookup tables that the symbol walk skips.
+mod class_forward;
 
 use tree_sitter::Node;
 
@@ -32,12 +33,13 @@ pub(super) fn append(
         });
         append_code_entity(source, node, metadata, max_chars, overlap_chars, output);
     };
+    let mut python_tables = Vec::new();
     // Direct children only. Function and class entities already own their bodies.
     for node in named_children(root) {
         match (format, node.kind()) {
             (FileFormat::Python, "expression_statement") => {
                 if let Some(name) = python_table_binding(node) {
-                    retain(node, name);
+                    python_tables.push((node, name));
                 }
             }
             (FileFormat::Go, "var_declaration") => {
@@ -56,6 +58,10 @@ pub(super) fn append(
             _ => {}
         }
     }
+    class_forward::filter(&mut python_tables, root, &source.text);
+    for (node, name) in python_tables {
+        retain(node, name);
+    }
 }
 
 fn python_table_binding(statement: Node<'_>) -> Option<Node<'_>> {
@@ -70,12 +76,7 @@ fn python_table_binding(statement: Node<'_>) -> Option<Node<'_>> {
     {
         return None;
     }
-    let mut value = assignment.child_by_field_name("right")?;
-    while value.kind() == "parenthesized_expression" {
-        value = value
-            .named_children(&mut value.walk())
-            .find(|child| !child.is_extra())?;
-    }
+    let value = unparenthesize(assignment.child_by_field_name("right")?)?;
     (name.kind() == "identifier"
         && value.kind() == "dictionary"
         && has_entry(value, "pair")
@@ -101,16 +102,26 @@ fn go_table_binding<'a>(spec: Node<'a>, source: &str) -> Option<Node<'a>> {
     let mut values = values
         .named_children(&mut cursor)
         .filter(|child| !child.is_extra());
-    let value = values.next()?;
+    let value = unparenthesize(values.next()?)?;
+    let ty = value.child_by_field_name("type")?;
     if values.next().is_some()
         || value.kind() != "composite_literal"
-        || value.child_by_field_name("type")?.kind() != "map_type"
-        || contains_call(value.child_by_field_name("type")?)
+        || ty.kind() != "map_type"
+        || contains_call(ty)
     {
         return None;
     }
     let body = value.child_by_field_name("body")?;
     (has_entry(body, "keyed_element") && is_table_data(body, FileFormat::Go)).then_some(name)
+}
+
+fn unparenthesize(mut node: Node<'_>) -> Option<Node<'_>> {
+    while node.kind() == "parenthesized_expression" {
+        node = node
+            .named_children(&mut node.walk())
+            .find(|child| !child.is_extra())?;
+    }
+    Some(node)
 }
 
 fn has_entry(node: Node<'_>, kind: &str) -> bool {
@@ -123,11 +134,11 @@ fn is_table_data(root: Node<'_>, format: FileFormat) -> bool {
     while let Some(node) = pending.pop() {
         match (format, node.kind()) {
             (_, "comment" | "true" | "false" | "identifier")
-            | (FileFormat::Go, "field_identifier")
             | (FileFormat::Python, "none" | "integer" | "float")
             | (
                 FileFormat::Go,
-                "nil"
+                "field_identifier"
+                | "nil"
                 | "int_literal"
                 | "float_literal"
                 | "imaginary_literal"
@@ -195,9 +206,7 @@ fn is_name_reference(mut node: Node<'_>) -> bool {
             "identifier" => return true,
             "attribute" => node.child_by_field_name("object"),
             "selector_expression" => node.child_by_field_name("operand"),
-            "parenthesized_expression" => node
-                .named_children(&mut node.walk())
-                .find(|child| !child.is_extra()),
+            "parenthesized_expression" => unparenthesize(node),
             _ => return false,
         };
         let Some(child) = next else { return false };
