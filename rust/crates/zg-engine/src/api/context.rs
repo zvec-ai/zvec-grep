@@ -69,6 +69,9 @@ pub mod options {
         #[serde(default)]
         pub refresh: Option<RefreshPolicy>,
         pub trace: bool,
+        /// Use budgeted graph evidence to rerank the ordinary candidate pool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub graph_rerank: Option<bool>,
         pub prefer_symbol: bool,
         /// Temporary filter over indexed files; does not alter workspace selection.
         #[serde(default)]
@@ -159,6 +162,7 @@ pub mod options {
                 auto_update: true,
                 refresh: None,
                 trace: false,
+                graph_rerank: None,
                 prefer_symbol: false,
                 filter: QueryFilter::default(),
                 globs: Vec::new(),
@@ -301,7 +305,7 @@ pub mod options {
 
 /// Values returned by [`crate::ZvecGrep::context`].
 pub mod result {
-    pub use crate::domain::{CodeMetadata, EntityMetadata, MarkdownMetadata};
+    pub use crate::domain::{CodeMetadata, EntityMetadata, GraphEdgeKind, MarkdownMetadata};
 
     use std::path::PathBuf;
 
@@ -324,7 +328,21 @@ pub mod result {
         /// Rule scores are not calibrated relevance probabilities.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub ranking: Option<SearchRankingTrace>,
+        /// Graph-assisted scores applied after ordinary rule ranking.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub graph_ranking: Option<GraphRankingTrace>,
         pub final_selection: SearchFinalTrace,
+    }
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct GraphRankingTrace {
+        pub ordinary_rank: usize,
+        pub ordinary_score: f64,
+        pub graph_raw_score: f64,
+        pub graph_normalizer: f64,
+        pub graph_score: f64,
+        pub score: f64,
+        pub rank: usize,
     }
 
     /// Explains rule scoring and the state when an entity was selected.
@@ -573,13 +591,165 @@ pub mod result {
         PossiblyStale,
     }
 
-    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
     pub struct ContextDiagnostics {
         pub empty_reason: Option<EmptyReason>,
         pub index: Option<IndexDiagnostics>,
         pub rg: Option<RgDiagnostics>,
         pub structure: Option<StructureEnrichmentDiagnostics>,
         pub timings: Vec<TimingEntry>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub search_trace: Vec<GroupSearchTrace>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub graph_errors: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+    pub struct GroupSearchTrace {
+        pub group_id: String,
+        pub recall: Vec<RecallAttemptTrace>,
+        pub fused: Vec<FusedCandidateTrace>,
+        pub ordinary_pool: Vec<RecallEntityTrace>,
+        pub graph: Option<GraphExpansionTrace>,
+        pub selected: Vec<SelectedEntityTrace>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct RecallAttemptTrace {
+        pub route_id: String,
+        pub mode: super::options::ContextRouteMode,
+        pub query: String,
+        pub depth: usize,
+        pub fragments: Vec<RecallFragmentTrace>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct RecallFragmentTrace {
+        pub fragment_id: String,
+        pub entity_id: String,
+        pub rank: usize,
+        pub score: f64,
+    }
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct FusedCandidateTrace {
+        pub entity_id: String,
+        pub rank: usize,
+        pub score: f64,
+        pub load_failure: Option<CandidateLoadFailure>,
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CandidateLoadFailure {
+        MissingEntityOrFile,
+        MissingFragments,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct RecallEntityTrace {
+        pub entity_id: String,
+        pub path: String,
+        pub range: ContentRange,
+    }
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct SelectedEntityTrace {
+        pub entity_id: String,
+        pub rank: usize,
+        pub trace: SearchHitTrace,
+    }
+
+    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphExpansionTrace {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub edge_kinds: Vec<GraphEdgeKind>,
+        pub seeds: Vec<String>,
+        /// Visible, filter-matching edge reads, including repeated reads and self-loops.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub edges: Vec<GraphCallTrace>,
+        pub layers: Vec<GraphLayerTrace>,
+        pub added: Vec<GraphCandidateTrace>,
+        pub reached_ordinary: Vec<String>,
+        pub rejected: Vec<GraphRejectedTrace>,
+        pub duration_micros: u64,
+        pub error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub work: Option<GraphWorkTrace>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub budget: Option<GraphBudgetTrace>,
+    }
+
+    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphWorkTrace {
+        pub edge_rows_read: usize,
+        pub sqlite_edge_rows_considered: Option<usize>,
+        pub sqlite_vm_steps: Option<u64>,
+        pub symbol_rows_read: usize,
+        pub index_edge_micros: u64,
+        pub priority_preparation_micros: u64,
+        pub endpoint_micros: u64,
+        pub retention_micros: u64,
+    }
+
+    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphBudgetTrace {
+        pub edge_limit: usize,
+        pub candidate_limit: usize,
+        pub reached_pool: Vec<RecallEntityTrace>,
+        pub retained_paths: Vec<GraphRetainedPathTrace>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphRetainedPathTrace {
+        pub anchor_id: String,
+        pub seed_id: String,
+        pub candidate_ids: Vec<String>,
+        pub path: Vec<GraphCallTrace>,
+    }
+
+    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphLayerTrace {
+        pub depth: usize,
+        pub expanded: Vec<String>,
+        pub edges_read: usize,
+        pub already_visited: usize,
+        pub filtered: usize,
+        pub invisible: usize,
+        pub reached: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphCandidateTrace {
+        pub entity: RecallEntityTrace,
+        pub seed_id: String,
+        pub path: Vec<GraphCallTrace>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphCallTrace {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub kind: Option<GraphEdgeKind>,
+        /// The original directed edge source, including the derived type for inheritance.
+        pub caller_id: String,
+        /// The original directed edge target, including the base type for inheritance.
+        pub callee_id: String,
+        pub caller_path: String,
+        pub line: Option<usize>,
+        pub column: Option<usize>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct GraphRejectedTrace {
+        pub entity: RecallEntityTrace,
+        pub reason: GraphRejection,
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum GraphRejection {
+        Filtered,
+        Invisible,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

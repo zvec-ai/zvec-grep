@@ -147,6 +147,29 @@ test("PR updates run Retrieval-only at the fork head SHA with local embedding an
   );
 });
 
+test("Head graph pairs reuse the candidate package without changing base/head three-mode jobs", () => {
+  const graph = block(comparisonWorkflow, "graph-rerank", 2);
+  assert.match(graph, /if: inputs\.graph_rerank_pair/);
+  assert.match(graph, /needs: candidate/);
+  assert.match(graph, /name: package-retrieval-head-candidate/);
+  assert.match(graph, /--graph-rerank-pair --gold-stages/);
+  assert.match(graph, /name: graph-rerank-trace\.html/);
+  assert.match(graph, /archive: false/);
+  assert.match(graph, /\.\/\.github\/actions\/retrieval-authorize/);
+  assert.match(graph, /name: retrieval-head-graph-pair/);
+  assert.doesNotMatch(graph, /secrets\.|: write/);
+  for (const name of ["baseline", "candidate"])
+    assert.doesNotMatch(
+      block(comparisonWorkflow, name, 2),
+      /graph_rerank_pair/,
+    );
+  assert.match(
+    prWorkflow,
+    /graph_rerank_pair: \$\{\{ github\.event_name == 'pull_request' \}\}/,
+  );
+  assert.match(block(comparisonWorkflow, "compare", 2), /--head-graph/);
+});
+
 test("automatic PR concurrency cancels older commits without cancelling manual benchmark runs", () => {
   const concurrency = block(prWorkflow, "concurrency", 0);
   assert.match(

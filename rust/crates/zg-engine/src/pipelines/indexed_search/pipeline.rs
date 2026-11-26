@@ -13,8 +13,9 @@ use crate::{
     api::context::{
         options::{ContextRoute as SearchRoute, ContextRouteMode as SearchRouteMode, QueryFilter},
         result::{
-            MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace, SearchRecallTrace,
-            TimingEntry,
+            CandidateLoadFailure, FusedCandidateTrace, GroupSearchTrace, MatchedBy,
+            RecallAttemptTrace, RecallFragmentTrace, SearchFinalTrace, SearchFusionTrace,
+            SearchHitTrace, SearchRecallTrace, SelectedEntityTrace, TimingEntry,
         },
         stage_trace::StageTrace,
     },
@@ -28,6 +29,7 @@ use crate::{
 
 use super::{
     format_filter::{compile_format_filter, matches_file_name},
+    graph_expand::{self, GraphSearch, recall_entity},
     path_filter::{all, resolve_glob_filter},
     stage_trace::{StageTraceCollector, configured_paths},
 };
@@ -77,6 +79,8 @@ pub(crate) struct SearchPlanResult {
     pub routes: Vec<ResolvedSearchRoute>,
     pub hits: Vec<SearchHit>,
     pub timings: Vec<TimingEntry>,
+    pub trace: Option<GroupSearchTrace>,
+    pub graph_error: Option<String>,
     pub stage_trace: Option<StageTrace>,
 }
 
@@ -173,12 +177,14 @@ pub(crate) async fn search_workspace_index(
     plan: SearchPlan,
     storage: &dyn SearchStorage,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
+    graph: Option<GraphSearch<'_>>,
 ) -> Result<SearchPlanResult, EngineError> {
     search_with_stage_trace(
         workspace_root,
         plan,
         storage,
         embedding_models,
+        graph,
         configured_paths().as_ref(),
     )
     .await
@@ -189,6 +195,7 @@ async fn search_with_stage_trace(
     plan: SearchPlan,
     storage: &dyn SearchStorage,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
+    graph: Option<GraphSearch<'_>>,
     watched: Option<&HashSet<PathBuf>>,
 ) -> Result<SearchPlanResult, EngineError> {
     if embedding_models.len() > 1 {
@@ -227,6 +234,7 @@ async fn search_with_stage_trace(
         watched.map(|paths| StageTraceCollector::begin(&routes, limit, paths, storage));
     let recall_started = Instant::now();
     let mut candidates = HashMap::new();
+    let mut trace = plan.trace.then(GroupSearchTrace::default);
     if has_searchable_files && limit > 0 {
         collect_adaptive_recall(
             &routes,
@@ -236,6 +244,7 @@ async fn search_with_stage_trace(
             limit,
             storage,
             &mut candidates,
+            trace.as_mut().map(|trace| &mut trace.recall),
             observation.as_mut(),
         )?;
     }
@@ -259,42 +268,139 @@ async fn search_with_stage_trace(
 
     let load_started = Instant::now();
     // Load past the cutoff so any recalled code definition can fill a visible code position.
-    let hits = load_candidates(fused, limit, plan.trace, storage)?;
+    let hits = load_candidates(fused, limit, storage, trace.as_mut())?;
     let load_duration = load_started.elapsed();
     if let Some(observation) = observation.as_mut() {
         observation.loaded(&hits);
     }
-    let ranking_started = Instant::now();
-    let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
-        .iter()
-        .map(|_| 1.0 / (RRF_K + 1.0))
-        .sum();
-    let hits = super::ranking::rank(
+    let mut result = finish_search(
         hits,
-        &routes,
-        &plan.filter,
-        maximum_rrf,
-        limit,
-        observation.as_mut(),
-    );
-    let ranking_duration = ranking_started.elapsed();
-    let stage_trace = observation.map(|observation| observation.finish(&hits));
+        &plan,
+        routes,
+        filter.as_ref(),
+        graph,
+        trace,
+        observation,
+    )?;
+    let mut timings = vec![
+        timing("search_plan", plan_duration),
+        timing("search_filter", filter_duration),
+        timing("query_embedding", embedding_duration),
+        timing("recall", recall_duration),
+        timing("fusion", fusion_duration),
+        timing("load_results", load_duration),
+    ];
+    timings.append(&mut result.timings);
+    timings.push(timing("search_total", total_started.elapsed()));
+    result.timings = timings;
+    Ok(result)
+}
 
+fn finish_search(
+    hits: Vec<SearchHit>,
+    plan: &SearchPlan,
+    routes: Vec<ResolvedSearchRoute>,
+    filter: Option<&StorageSearchFilter>,
+    graph: Option<GraphSearch<'_>>,
+    mut trace: Option<GroupSearchTrace>,
+    mut observation: Option<StageTraceCollector>,
+) -> Result<SearchPlanResult, EngineError> {
+    if let Some(trace) = &mut trace {
+        trace.ordinary_pool = hits
+            .iter()
+            .map(|hit| recall_entity(&hit.entity, &hit.file))
+            .collect();
+    }
+    let mut expansion = graph
+        .map(|graph| graph_expand::expand(graph, &hits, filter, plan.trace))
+        .transpose()?;
+    let graph_timing = expansion.as_ref().map(|result| TimingEntry {
+        name: "graph_expand".into(),
+        duration_micros: result.trace.duration_micros,
+        count: result.trace.error.is_none().then_some(result.added as u64),
+    });
+    let graph_error = expansion
+        .as_ref()
+        .and_then(|result| result.trace.error.clone());
+    let relevance = expansion
+        .as_mut()
+        .and_then(|result| result.relevance.take());
+    let (hits, ranking_timing, graph_ranking_timing) = rank_candidates(
+        hits,
+        plan,
+        &routes,
+        filter,
+        graph,
+        relevance,
+        observation.as_mut(),
+    )?;
+    if let Some(trace) = &mut trace {
+        trace.graph = expansion.map(|result| result.trace);
+        trace.selected = selected_trace(&hits);
+    }
+
+    let stage_trace = observation.map(|observation| observation.finish(&hits));
     Ok(SearchPlanResult {
         routes,
         hits,
+        trace,
+        graph_error,
         stage_trace,
-        timings: vec![
-            timing("search_plan", plan_duration),
-            timing("search_filter", filter_duration),
-            timing("query_embedding", embedding_duration),
-            timing("recall", recall_duration),
-            timing("fusion", fusion_duration),
-            timing("load_results", load_duration),
-            timing("ranking", ranking_duration),
-            timing("search_total", total_started.elapsed()),
-        ],
+        timings: [ranking_timing]
+            .into_iter()
+            .chain(graph_timing)
+            .chain(graph_ranking_timing)
+            .collect(),
     })
+}
+
+fn rank_candidates(
+    hits: Vec<SearchHit>,
+    plan: &SearchPlan,
+    routes: &[ResolvedSearchRoute],
+    filter: Option<&StorageSearchFilter>,
+    graph: Option<GraphSearch<'_>>,
+    relevance: Option<graph_expand::Relevance>,
+    observation: Option<&mut StageTraceCollector>,
+) -> Result<(Vec<SearchHit>, TimingEntry, Option<TimingEntry>), EngineError> {
+    let started = Instant::now();
+    let maximum_rrf = build_recall_routes(routes, filter, plan.prefer_symbol)
+        .iter()
+        .map(|_| 1.0 / (RRF_K + 1.0))
+        .sum();
+    let limit = plan.limit.unwrap_or(DEFAULT_LIMIT);
+    let ordinary_limit = if relevance.is_some() {
+        hits.len()
+    } else {
+        limit
+    };
+    let mut hits = super::ranking::rank(
+        hits,
+        routes,
+        &plan.filter,
+        maximum_rrf,
+        ordinary_limit,
+        observation,
+    );
+    let ranking_timing = timing("ranking", started.elapsed());
+    let graph_timing = if let Some(relevance) = relevance {
+        let started = Instant::now();
+        relevance.rerank(&mut hits, limit, graph.and_then(|graph| graph.signal))?;
+        Some(timing("graph_ranking", started.elapsed()))
+    } else {
+        None
+    };
+    Ok((hits, ranking_timing, graph_timing))
+}
+
+fn selected_trace(hits: &[SearchHit]) -> Vec<SelectedEntityTrace> {
+    hits.iter()
+        .map(|hit| SelectedEntityTrace {
+            entity_id: hit.entity.id().as_str().to_owned(),
+            rank: hit.rank,
+            trace: hit.trace.clone().expect("ranking trace requested"),
+        })
+        .collect()
 }
 
 fn resolve_routes(routes: &[SearchRoute]) -> Result<Vec<ResolvedSearchRoute>, EngineError> {
@@ -398,6 +504,7 @@ fn collect_adaptive_recall(
     limit: usize,
     storage: &dyn SearchStorage,
     candidates: &mut HashMap<EntityId, Candidate>,
+    mut trace: Option<&mut Vec<RecallAttemptTrace>>,
     mut observation: Option<&mut StageTraceCollector>,
 ) -> Result<(), EngineError> {
     let recall_routes = build_recall_routes(routes, filter, prefer_symbol);
@@ -425,6 +532,24 @@ fn collect_adaptive_recall(
                     )?,
             };
             saturated |= hits.len() >= depth;
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.push(RecallAttemptTrace {
+                    route_id: route.route.id.clone(),
+                    mode: route.route.mode,
+                    query: route.route.query.clone(),
+                    depth,
+                    fragments: hits
+                        .iter()
+                        .enumerate()
+                        .map(|(index, hit)| RecallFragmentTrace {
+                            fragment_id: hit.document_id.clone(),
+                            entity_id: hit.entity_id.as_str().to_owned(),
+                            rank: index + 1,
+                            score: hit.score,
+                        })
+                        .collect(),
+                });
+            }
             if let Some(observation) = observation.as_deref_mut() {
                 observation.recall(&route.route.id, depth, &hits);
             }
@@ -592,8 +717,8 @@ fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
 fn load_candidates(
     candidates: Vec<Candidate>,
     limit: usize,
-    trace: bool,
     storage: &dyn SearchStorage,
+    mut trace: Option<&mut GroupSearchTrace>,
 ) -> Result<Vec<SearchHit>, EngineError> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -608,7 +733,18 @@ fn load_candidates(
     let mut data = storage.load_search_hits(&hits)?;
     let mut loaded = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        if let Some(hit) = candidate_to_hit(candidate, limit, trace, &mut data)? {
+        let record = trace.is_some().then(|| FusedCandidateTrace {
+            entity_id: candidate.id.as_str().to_owned(),
+            rank: candidate.rank,
+            score: candidate.score,
+            load_failure: None,
+        });
+        let result = candidate_to_hit(candidate, limit, trace.is_some(), &mut data)?;
+        if let (Some(group), Some(mut record)) = (trace.as_deref_mut(), record) {
+            record.load_failure = result.as_ref().err().copied();
+            group.fused.push(record);
+        }
+        if let Ok(hit) = result {
             loaded.push(hit);
         }
     }
@@ -620,10 +756,10 @@ fn candidate_to_hit(
     limit: usize,
     trace: bool,
     data: &mut StoredSearchData,
-) -> Result<Option<SearchHit>, EngineError> {
+) -> Result<Result<SearchHit, CandidateLoadFailure>, EngineError> {
     let Some(stored) = data.entities.remove(&candidate.id) else {
         // A file replacement may remove owners after recall has completed.
-        return Ok(None);
+        return Ok(Err(CandidateLoadFailure::MissingEntityOrFile));
     };
     if stored.entity.id() != &candidate.id
         || stored.entity.file_id() != candidate.file_id
@@ -663,9 +799,9 @@ fn candidate_to_hit(
         });
     }
     if loaded_evidence.is_empty() {
-        return Ok(None);
+        return Ok(Err(CandidateLoadFailure::MissingFragments));
     }
-    Ok(Some(SearchHit {
+    Ok(Ok(SearchHit {
         entity: stored.entity,
         file: stored.file,
         evidence: loaded_evidence,
@@ -675,6 +811,7 @@ fn candidate_to_hit(
         trace: trace.then_some(SearchHitTrace {
             recall: candidate.recall,
             ranking: None,
+            graph_ranking: None,
             fusion: SearchFusionTrace {
                 rank: candidate.rank,
                 score: candidate.score,
@@ -899,7 +1036,7 @@ fn timing(name: &str, duration: std::time::Duration) -> TimingEntry {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -925,8 +1062,647 @@ mod tests {
 
     use super::{
         MatchedBy, QueryFilter, SearchEmbeddingRuntime, SearchPlan, SearchRoute, SearchRouteMode,
-        SearchStorage, search_workspace_index,
+        SearchStorage, graph_expand, search_workspace_index,
     };
+
+    use crate::{
+        EngineError,
+        domain::{EdgeProvenance, FileEdge, FileGraphNode, FileGraphResult, GraphEdgeKind},
+        storage::{
+            IndexStore,
+            types::{IndexedFragment, WorkspaceIndexStorageOptions},
+        },
+    };
+    use tokio_util::sync::CancellationToken;
+
+    struct GraphFixture {
+        root: PathBuf,
+        model: FixtureModel,
+        graph: IndexStore,
+        storage: FixtureStorage,
+        entities: Vec<Entity>,
+        // The native store must close before its directory is removed.
+        _temp: tempfile::TempDir,
+    }
+
+    fn graph_entities(file: &FileRecord) -> Vec<Entity> {
+        (0..216)
+            .map(|index| {
+                let stored = entity(file, &format!("fn node_{index}() {{}}"), Content::Code);
+                let value = stored.entity;
+                Entity::new(
+                    value.id().clone(),
+                    file.id(),
+                    value.source_range(),
+                    value.content().clone(),
+                    Some(EntityMetadata::Code(CodeMetadata {
+                        symbol_type: Some(if index == 1 {
+                            SymbolType::Class
+                        } else {
+                            SymbolType::Function
+                        }),
+                        symbol_name: Some(if index == 0 {
+                            "fixture".into()
+                        } else {
+                            format!("node_{index}")
+                        }),
+                        ..CodeMetadata::default()
+                    })),
+                    value.fragments().to_vec(),
+                )
+                .expect("code entity")
+            })
+            .collect()
+    }
+
+    fn graph_edges(entities: &[Entity], file_id: FileId) -> Vec<FileEdge> {
+        let mut edges = Vec::new();
+        let id = |index: usize| entities[index].id().as_str().to_owned();
+        let bridge = format!("f{}", file_id.get());
+        let mut edge = |kind, source, target, line| {
+            edges.push(FileEdge {
+                kind,
+                source,
+                target,
+                line: Some(line),
+                column: Some(0),
+                provenance: EdgeProvenance::FileLocal,
+                metadata: BTreeMap::new(),
+            });
+        };
+        edge(GraphEdgeKind::Calls, bridge.clone(), id(0), 1);
+        edge(GraphEdgeKind::Calls, bridge, id(1), 2);
+        edge(GraphEdgeKind::Calls, id(1), id(2), 3);
+        edge(GraphEdgeKind::Calls, id(2), id(3), 4);
+        edge(GraphEdgeKind::Calls, id(0), id(0), 5);
+        edge(GraphEdgeKind::Calls, id(4), id(5), 6);
+        edge(GraphEdgeKind::Calls, id(0), id(4), 8);
+        let contained = 211;
+        for index in 6..contained {
+            for line in 10..18 {
+                edge(GraphEdgeKind::Calls, id(0), id(index), line);
+            }
+        }
+        edge(GraphEdgeKind::Calls, id(5), id(212), 30);
+        edge(GraphEdgeKind::Calls, id(212), id(213), 31);
+        edge(GraphEdgeKind::Calls, id(213), id(214), 32);
+        edge(GraphEdgeKind::Extends, id(3), id(0), 20);
+        edge(GraphEdgeKind::Contains, id(4), id(contained), 21);
+        edge(GraphEdgeKind::Contains, id(1), id(6), 33);
+        edges
+    }
+
+    impl GraphFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().expect("fixture workspace");
+            let root = temp
+                .path()
+                .canonicalize()
+                .expect("canonical fixture workspace");
+            let model = FixtureModel::new();
+            let graph = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+                graph_enabled: true,
+                storage_path: root.join("index"),
+                embeddings: vec![model.info().clone()],
+            })
+            .expect("graph-backed index");
+            let file_id = graph
+                .resolve_file_ids(&[PathBuf::from("src/lib.rs")])
+                .expect("file id")[0];
+            let file = file(file_id.get(), "src/lib.rs", 100);
+            let entities = graph_entities(&file);
+            let fragments = entities
+                .iter()
+                .map(|entity| IndexedFragment {
+                    entity_id: entity.id().clone(),
+                    fragment_id: entity.fragments()[0].id.clone(),
+                    model: model.info().model().reference(),
+                    vector: vec![0.25, 0.75],
+                    fts_text: "fixture".into(),
+                })
+                .collect::<Vec<_>>();
+            let nodes = entities
+                .iter()
+                .map(|entity| FileGraphNode {
+                    id: entity.id().as_str().to_owned(),
+                    kind: SymbolType::Function,
+                    name: None,
+                    qualified_name: entity.id().as_str().to_owned(),
+                    language: "rust".into(),
+                    range: None,
+                    signature: None,
+                    doc: None,
+                    arity: None,
+                    visibility: None,
+                    is_exported: false,
+                    is_declaration: false,
+                })
+                .collect();
+            graph
+                .replace_file_with_graph(
+                    &file,
+                    &entities,
+                    &fragments,
+                    &FileGraphResult {
+                        nodes,
+                        edges: graph_edges(&entities, file_id),
+                        ..FileGraphResult::default()
+                    },
+                )
+                .expect("persist fixture calls");
+            let file = graph
+                .read_snapshot(|view| view.fetch_files(&[file_id]))
+                .expect("indexed file")
+                .remove(&file_id)
+                .expect("published file");
+            let seeds = [0, 4].map(|index| StoredEntity {
+                entity: entities[index].clone(),
+                file: file.clone(),
+            });
+            let storage = FixtureStorage {
+                paths_only: false,
+                forbid_enumeration: false,
+                files: vec![file],
+                entities: seeds
+                    .iter()
+                    .map(|seed| (seed.entity.id().as_str().to_owned(), seed.clone()))
+                    .collect(),
+                fts: HashMap::from([(
+                    "fixture".into(),
+                    vec![hit(&seeds[0], 0, StorageSearchPath::Fts, 1.0)],
+                )]),
+                vector: vec![hit(&seeds[1], 0, StorageSearchPath::Vector, 1.0)],
+                reorder_deeper_vector_results: false,
+                filters: Arc::default(),
+                load_batches: Mutex::default(),
+            };
+            Self {
+                _temp: temp,
+                root,
+                model,
+                graph,
+                storage,
+                entities,
+            }
+        }
+
+        fn request() -> SearchPlan {
+            let mut request = plan(vec![
+                SearchRoute {
+                    mode: SearchRouteMode::Fts,
+                    query: "fixture".into(),
+                },
+                SearchRoute {
+                    mode: SearchRouteMode::Vector,
+                    query: "fixture".into(),
+                },
+            ]);
+            request.limit = Some(1);
+            request
+        }
+
+        fn id(&self, index: usize) -> &str {
+            self.entities[index].id().as_str()
+        }
+
+        async fn search(&self, request: SearchPlan, enabled: bool) -> super::SearchPlanResult {
+            search_workspace_index(
+                &self.root,
+                request,
+                &self.storage,
+                &[&self.model],
+                enabled.then_some(super::GraphSearch {
+                    storage: &self.graph,
+                    signal: None,
+                    query: "fixture",
+                }),
+            )
+            .await
+            .expect("fixture search")
+        }
+    }
+
+    #[tokio::test]
+    async fn budgeted_graph_reranking_preserves_recall_and_trace_independence() {
+        let fixture = GraphFixture::new();
+        let request = GraphFixture::request();
+        let baseline = fixture
+            .search(request.clone(), false)
+            .await
+            .trace
+            .expect("ordinary trace");
+        let enabled = fixture.search(request.clone(), true).await;
+        assert_eq!(enabled.hits.len(), 1);
+        let trace = enabled.trace.as_ref().expect("graph trace");
+        assert_eq!(trace.recall, baseline.recall);
+        assert_eq!(trace.fused, baseline.fused);
+        assert_eq!(trace.ordinary_pool, baseline.ordinary_pool);
+        assert!(
+            baseline
+                .ordinary_pool
+                .iter()
+                .any(|entity| entity.entity_id == trace.selected[0].entity_id)
+        );
+        let score = trace.selected[0]
+            .trace
+            .graph_ranking
+            .as_ref()
+            .expect("graph score");
+        assert_eq!(score.rank, 1);
+        assert!(score.graph_normalizer > 0.0);
+        assert_eq!(trace.selected[0].trace.final_selection.cutoff_rank, 1);
+        assert!(
+            enabled
+                .timings
+                .iter()
+                .any(|timing| timing.name == "graph_ranking")
+        );
+        let mut request = request;
+        request.trace = false;
+        let untraced = fixture.search(request, true).await;
+        assert!(untraced.trace.is_none());
+        assert_eq!(untraced.hits[0].entity.id(), enabled.hits[0].entity.id());
+        assert!((untraced.hits[0].score - enabled.hits[0].score).abs() < 1e-15);
+    }
+
+    #[tokio::test]
+    async fn stage_capture_preserves_graph_reranking_and_reports_actual_selection() {
+        let fixture = GraphFixture::new();
+        let watched = fixture
+            .storage
+            .files
+            .iter()
+            .map(|file| file.relative_path().to_path_buf())
+            .collect();
+        for enabled in [false, true] {
+            let request = GraphFixture::request();
+            let plain = fixture.search(request.clone(), enabled).await;
+            let observed = super::search_with_stage_trace(
+                &fixture.root,
+                request,
+                &fixture.storage,
+                &[&fixture.model],
+                enabled.then_some(super::GraphSearch {
+                    storage: &fixture.graph,
+                    signal: None,
+                    query: "fixture",
+                }),
+                Some(&watched),
+            )
+            .await
+            .expect("observed graph search");
+            let evidence = |result: &super::SearchPlanResult| {
+                let trace = result.trace.as_ref().expect("query trace");
+                (
+                    trace.recall.clone(),
+                    trace.fused.clone(),
+                    trace.ordinary_pool.clone(),
+                    trace.selected.clone(),
+                )
+            };
+            assert_eq!(evidence(&plain), evidence(&observed));
+            let results = |hits: &[super::SearchHit]| {
+                hits.iter()
+                    .map(|hit| (hit.entity.id().clone(), hit.rank, hit.score))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(results(&plain.hits), results(&observed.hits));
+            let capture = observed.stage_trace.expect("stage trace");
+            for hit in &observed.hits {
+                let path = hit
+                    .file
+                    .relative_path()
+                    .to_str()
+                    .expect("path")
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                let entry = &capture.files[&path][hit.entity.id().as_str()];
+                assert_eq!(entry.stages.final_rank, Some(hit.rank));
+                assert!(entry.stages.loaded_rrf_rank.is_some());
+                assert!(entry.stages.static_rank.is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn budgeted_graph_keeps_paths_and_stops_at_three_hops() {
+        let fixture = GraphFixture::new();
+        let result = fixture.search(GraphFixture::request(), true).await;
+        let trace = result
+            .trace
+            .expect("search trace")
+            .graph
+            .expect("graph trace");
+        assert_eq!(trace.error, None);
+        assert_eq!(trace.edge_kinds, graph_expand::ALL_EDGES);
+        assert_eq!(trace.seeds.len(), 2);
+        assert_eq!(trace.layers.len(), 3);
+        assert_eq!(
+            trace.edges.len(),
+            trace
+                .layers
+                .iter()
+                .map(|layer| layer.edges_read - layer.filtered - layer.invisible)
+                .sum::<usize>()
+        );
+        assert!(trace.added.len() <= 200);
+        let work = trace.work.expect("work");
+        assert!(work.edge_rows_read <= 1500);
+        assert_eq!(
+            work.edge_rows_read,
+            trace
+                .layers
+                .iter()
+                .map(|layer| layer.edges_read)
+                .sum::<usize>()
+        );
+        assert!(work.sqlite_edge_rows_considered.expect("SQL work") > work.edge_rows_read);
+        assert!(
+            trace.layers[2]
+                .reached
+                .iter()
+                .any(|id| id == fixture.id(213))
+        );
+        assert!(
+            !trace
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.reached)
+                .any(|id| id == fixture.id(214))
+        );
+        assert!(trace.layers.iter().any(|layer| layer.already_visited > 0));
+        let inherited = trace
+            .added
+            .iter()
+            .find(|entry| entry.entity.entity_id == fixture.id(3))
+            .expect("reverse extends");
+        assert_eq!(inherited.path.len(), 1);
+        assert_eq!(inherited.path[0].kind, Some(GraphEdgeKind::Extends));
+        assert_eq!(inherited.path[0].caller_id, fixture.id(3));
+        let budget = trace.budget.expect("budget");
+        assert!(budget.reached_pool.len() >= trace.added.len());
+        let path = budget
+            .retained_paths
+            .iter()
+            .find(|path| path.path.len() == 2)
+            .expect("calls and contains retention");
+        assert_eq!(path.path[0].kind, Some(GraphEdgeKind::Calls));
+        assert_eq!(path.path[1].kind, Some(GraphEdgeKind::Contains));
+        assert!(path.candidate_ids.iter().all(|id| {
+            trace
+                .added
+                .iter()
+                .any(|entry| &entry.entity.entity_id == id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn graph_reranking_respects_symbol_filters() {
+        let fixture = GraphFixture::new();
+        let mut request = GraphFixture::request();
+        request.filter.symbol_types = vec![SymbolType::Function];
+        let result = fixture.search(request, true).await;
+        let trace = result
+            .trace
+            .expect("search trace")
+            .graph
+            .expect("graph trace");
+        let filtered: usize = trace.layers.iter().map(|layer| layer.filtered).sum();
+        assert!(filtered >= 2);
+        assert_eq!(trace.rejected.len(), 1);
+        assert_eq!(trace.rejected[0].entity.entity_id, fixture.id(1));
+        assert!(
+            !trace
+                .added
+                .iter()
+                .any(|entry| entry.entity.entity_id == fixture.id(1))
+        );
+        assert!(
+            trace
+                .edges
+                .iter()
+                .all(|edge| { edge.caller_id != fixture.id(1) && edge.callee_id != fixture.id(1) })
+        );
+    }
+
+    fn walk_trace_paths(
+        node: &str,
+        mass: f64,
+        depth: usize,
+        neighbors: &BTreeMap<&str, BTreeSet<&str>>,
+        scores: &mut BTreeMap<String, f64>,
+    ) {
+        if depth == 3 {
+            return;
+        }
+        let Some(targets) = neighbors.get(node) else {
+            return;
+        };
+        let mass = mass / f64::from(u32::try_from(targets.len()).expect("fixture degree"));
+        for target in targets {
+            *scores.entry(target.to_string()).or_default() += mass * [1.0, 0.5, 0.25][depth];
+            walk_trace_paths(target, mass, depth + 1, neighbors, scores);
+        }
+    }
+
+    fn replay_graph_scores(
+        trace: &crate::api::context::result::GroupSearchTrace,
+    ) -> BTreeMap<String, f64> {
+        let graph = trace.graph.as_ref().expect("graph trace");
+        let mut neighbors = BTreeMap::<&str, BTreeSet<&str>>::new();
+        for edge in &graph.edges {
+            if edge.caller_id != edge.callee_id {
+                neighbors
+                    .entry(&edge.caller_id)
+                    .or_default()
+                    .insert(&edge.callee_id);
+                neighbors
+                    .entry(&edge.callee_id)
+                    .or_default()
+                    .insert(&edge.caller_id);
+            }
+        }
+        let seed_scores: HashMap<_, _> = trace
+            .fused
+            .iter()
+            .map(|candidate| (candidate.entity_id.as_str(), candidate.score))
+            .collect();
+        let mut scores = BTreeMap::new();
+        // Enumerate each seed's paths independently of the production aggregate walk.
+        for seed in &graph.seeds {
+            walk_trace_paths(seed, seed_scores[seed.as_str()], 0, &neighbors, &mut scores);
+        }
+        scores
+    }
+
+    #[tokio::test]
+    async fn graph_scores_can_be_replayed_from_the_serialized_response() {
+        let fixture = GraphFixture::new();
+        let result = fixture.search(GraphFixture::request(), true).await;
+        let json =
+            serde_json::to_vec(&result.trace.expect("search trace")).expect("serialize trace");
+        let trace: crate::api::context::result::GroupSearchTrace =
+            serde_json::from_slice(&json).expect("response trace");
+        let graph = trace.graph.as_ref().expect("graph trace");
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.caller_id == fixture.id(0) && edge.callee_id == fixture.id(4)
+                })
+                .count(),
+            2
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.caller_id == edge.callee_id)
+        );
+        let scores = replay_graph_scores(&trace);
+        let candidates: BTreeSet<_> = trace
+            .ordinary_pool
+            .iter()
+            .map(|entity| entity.entity_id.as_str())
+            .chain(
+                graph
+                    .added
+                    .iter()
+                    .map(|candidate| candidate.entity.entity_id.as_str()),
+            )
+            .collect();
+        let normalizer: f64 = candidates
+            .iter()
+            .map(|id| scores.get(*id).copied().unwrap_or(0.0))
+            .sum();
+        let ordinary_normalizer: f64 = (1..=trace.ordinary_pool.len())
+            .map(|rank| 1.0 / (60.0 + f64::from(u32::try_from(rank).expect("fixture rank"))))
+            .sum();
+        assert!(normalizer > 0.0);
+        for hit in &trace.selected {
+            let ranking = hit.trace.graph_ranking.as_ref().expect("graph ranking");
+            let raw = scores.get(&hit.entity_id).copied().unwrap_or(0.0);
+            assert!((raw - ranking.graph_raw_score).abs() < 1e-12);
+            assert!((normalizer - ranking.graph_normalizer).abs() < 1e-12);
+            let graph_score = raw / normalizer;
+            let ordinary_score = 1.0
+                / (60.0 + f64::from(u32::try_from(ranking.ordinary_rank).expect("rank")))
+                / ordinary_normalizer;
+            assert!((graph_score - ranking.graph_score).abs() < 1e-12);
+            assert!((ordinary_score - ranking.ordinary_score).abs() < 1e-12);
+            assert!((ordinary_score.midpoint(graph_score) - ranking.score).abs() < 1e-12);
+        }
+        let mut missing_seed_edges = trace.clone();
+        missing_seed_edges
+            .graph
+            .as_mut()
+            .expect("graph")
+            .edges
+            .retain(|edge| {
+                !((edge.caller_id == fixture.id(0) && edge.callee_id == fixture.id(4))
+                    || (edge.caller_id == fixture.id(4) && edge.callee_id == fixture.id(0)))
+            });
+        let incomplete = replay_graph_scores(&missing_seed_edges);
+        assert!(trace.selected.iter().any(|hit| {
+            (incomplete.get(&hit.entity_id).copied().unwrap_or(0.0) - scores[&hit.entity_id]).abs()
+                > 1e-6
+        }));
+    }
+
+    #[test]
+    fn cancellation_inside_sql_keeps_the_engine_cancelled_error_code() {
+        let fixture = GraphFixture::new();
+        let signal = CancellationToken::new();
+        let cancel = signal.clone();
+        let error = fixture
+            .graph
+            .read_snapshot(|view| {
+                view.with_edge_priority(
+                    move |_, _, _| {
+                        cancel.cancel();
+                        None
+                    },
+                    || view.ranked_hop(&[fixture.id(0)], 600, Some(&signal)),
+                )
+            })
+            .expect_err("cancel from a running SQLite priority callback");
+        assert!(signal.is_cancelled());
+        assert_eq!(error.code(), EngineError::CANCELLED);
+    }
+
+    #[tokio::test]
+    async fn empty_graph_seeds_skip_symbol_projection() {
+        let mut fixture = GraphFixture::new();
+        fixture.storage.fts.clear();
+        fixture.storage.vector.clear();
+        let result = fixture.search(GraphFixture::request(), true).await;
+        assert!(result.hits.is_empty());
+        assert!(
+            !result
+                .timings
+                .iter()
+                .any(|timing| timing.name == "graph_ranking")
+        );
+        let trace = result
+            .trace
+            .expect("search trace")
+            .graph
+            .expect("graph attempt");
+        assert!(trace.seeds.is_empty());
+        let work = trace.work.expect("empty work");
+        assert_eq!(work.symbol_rows_read, 0);
+        assert_eq!(work.edge_rows_read, 0);
+    }
+
+    #[tokio::test]
+    async fn unavailable_graph_preserves_ordinary_results_and_cancellation_propagates() {
+        let fixture = GraphFixture::new();
+        let baseline = fixture
+            .search(GraphFixture::request(), false)
+            .await
+            .trace
+            .expect("ordinary trace");
+        let graph = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: false,
+            storage_path: fixture.root.join("missing-graph"),
+            embeddings: vec![fixture.model.info().clone()],
+        })
+        .expect("text-only store");
+        let result = search_workspace_index(
+            &fixture.root,
+            GraphFixture::request(),
+            &fixture.storage,
+            &[&fixture.model],
+            Some(super::GraphSearch {
+                storage: &graph,
+                signal: None,
+                query: "fixture",
+            }),
+        )
+        .await
+        .expect("ordinary results survive graph failure");
+        assert!(result.graph_error.is_some());
+        assert_eq!(
+            result.trace.expect("search trace").selected,
+            baseline.selected
+        );
+        let signal = CancellationToken::new();
+        signal.cancel();
+        let error = search_workspace_index(
+            &fixture.root,
+            GraphFixture::request(),
+            &fixture.storage,
+            &[&fixture.model],
+            Some(super::GraphSearch {
+                storage: &fixture.graph,
+                signal: Some(&signal),
+                query: "fixture",
+            }),
+        )
+        .await
+        .expect_err("cancelled graph request");
+        assert_eq!(error.code(), EngineError::CANCELLED);
+    }
 
     struct FixtureModel {
         info: EmbeddingModelInfo,
@@ -1197,7 +1973,7 @@ mod tests {
         }]);
         request.limit = Some(1);
         let root = tempfile::tempdir().expect("workspace");
-        let result = search_workspace_index(root.path(), request, &storage, &[])
+        let result = search_workspace_index(root.path(), request, &storage, &[], None)
             .await
             .expect("search");
         assert_eq!(result.hits[0].entity.id(), &definition_id);
@@ -1276,6 +2052,7 @@ mod tests {
                     request.clone(),
                     &storage,
                     &[&model],
+                    None,
                 )
                 .await
                 .expect("mixed search");
@@ -1336,6 +2113,7 @@ mod tests {
             ]),
             &storage,
             &[&model],
+            None,
         )
         .await
         .expect("hybrid search");
@@ -1428,6 +2206,7 @@ mod tests {
                     &storage,
                     &[&model],
                     None,
+                    None,
                 )
                 .await
                 .expect("ordinary search");
@@ -1436,6 +2215,7 @@ mod tests {
                     request,
                     &storage,
                     &[&model],
+                    None,
                     Some(&watched),
                 )
                 .await
@@ -1583,6 +2363,7 @@ mod tests {
             plan,
             &storage,
             &[&FixtureModel::new()],
+            None,
         )
         .await
         .expect("search");
@@ -1652,7 +2433,7 @@ mod tests {
             query: "guide".into(),
         }]);
         request.limit = Some(1);
-        let result = search_workspace_index(Path::new("/workspace"), request, &storage, &[])
+        let result = search_workspace_index(Path::new("/workspace"), request, &storage, &[], None)
             .await
             .expect("search");
         let [hit] = result.hits.as_slice() else {
@@ -1685,7 +2466,8 @@ mod tests {
                 mode: SearchRouteMode::Fts,
                 query: "query".to_owned(),
             }]);
-            let result = search_workspace_index(Path::new("/workspace"), plan, &storage, &[]).await;
+            let result =
+                search_workspace_index(Path::new("/workspace"), plan, &storage, &[], None).await;
             if missing {
                 assert!(result.expect("interrupted replacement").hits.is_empty());
             } else {
@@ -1739,7 +2521,7 @@ mod tests {
                 assert_eq!(result.evidence.len(), 1);
                 assert_eq!(result.evidence[0].fragment.id, retained.fragment.id);
             } else {
-                assert!(result.is_none());
+                assert!(result.is_err());
             }
         }
     }
@@ -1774,10 +2556,15 @@ mod tests {
             query: "Service".to_owned(),
         }]);
         query.prefer_symbol = true;
-        let error =
-            search_workspace_index(Path::new("/workspace"), query, &storage, &[&first, &second])
-                .await
-                .expect_err("multiple models are unsupported");
+        let error = search_workspace_index(
+            Path::new("/workspace"),
+            query,
+            &storage,
+            &[&first, &second],
+            None,
+        )
+        .await
+        .expect_err("multiple models are unsupported");
         assert!(error.message().contains("only one embedding model"));
         assert!(first.calls.lock().expect("first model calls").is_empty());
         assert!(second.calls.lock().expect("second model calls").is_empty());
@@ -1824,7 +2611,7 @@ mod tests {
         plan.filter.included_formats = vec![FileFormat::Rust];
         plan.prefer_symbol = true;
 
-        let result = search_workspace_index(Path::new("/workspace"), plan, &storage, &[])
+        let result = search_workspace_index(Path::new("/workspace"), plan, &storage, &[], None)
             .await
             .expect("filtered search");
 

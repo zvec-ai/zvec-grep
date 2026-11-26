@@ -27,15 +27,23 @@ import {
   writeJson,
   repositorySlug,
   inside,
+  suiteDirectory,
 } from "../../core/lib.mjs";
 import { embeddingRuntime } from "../../core/embedding.mjs";
 import { stageTraceEnvironment } from "../../core/gold-stage-capture.mjs";
 import { aggregate } from "./report.mjs";
 import { NativeIndexProductError, snapshotIndex } from "./snapshot.mjs";
+import {
+  GRAPH_PAIR,
+  graphCallPlan,
+  compareGraphReports,
+  graphPairMarkdown,
+  writeGraphTrace,
+} from "./graph-pair.mjs";
 
 const MCP_CLIENT_PACKAGE = "@modelcontextprotocol/client@2.0.0";
 
-export function requestArguments(task, root, mode, protocol) {
+export function requestArguments(task, root, mode, protocol, graphRerank) {
   assert.ok(protocol.modes.includes(mode), `unknown mode: ${mode}`);
   assert.equal(
     protocol.preview,
@@ -48,6 +56,7 @@ export function requestArguments(task, root, mode, protocol) {
     ...(mode === "hybrid" ? { query: task.query } : { [mode]: [task.query] }),
     limit: protocol.limit,
     ...protocol.request,
+    ...(graphRerank === undefined ? {} : { trace: true, graphRerank }),
   };
 }
 
@@ -249,10 +258,12 @@ export function isProductPreparationFailure(phase, error) {
 async function runRepository({ suite, repo, tasks, candidate, options }) {
   const { protocol, gold, identity } = suite;
   const embedding = embeddingRuntime(protocol.model);
-  const modes = protocol.modes;
+  const modes = options.graphPair ? ["hybrid"] : protocol.modes;
   const output = join(options.output, repositorySlug(repo.repository));
   await mkdir(join(output, "raw"), { recursive: true });
-  const planned = callPlan(tasks, protocol);
+  const planned = options.graphPair
+    ? graphCallPlan(tasks, protocol)
+    : callPlan(tasks, protocol);
   const manifest = {
     schema_version: 1,
     run_id: options.runId,
@@ -273,6 +284,9 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     modes,
     preview: protocol.preview,
     planned_calls: planned.length,
+    ...(options.graphPair
+      ? { graph_pair: GRAPH_PAIR, harness_commit: options.harnessCommit }
+      : {}),
     ...(options.goldStages ? { gold_stages: true } : {}),
     invalid_reasons: [],
     preparation_status: "pending",
@@ -373,6 +387,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
         [
           "--index",
           root,
+          ...(options.graphPair ? ["--graph=true"] : []),
           "--mode",
           "direct",
           "--embedding",
@@ -483,6 +498,10 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     assert.ok(queryString);
     assert.ok(typed("autoUpdate", "boolean"));
     assert.ok(typed("preferSymbol", "boolean"));
+    if (options.graphPair) {
+      assert.ok(typed("graphRerank", "boolean"), "candidate lacks graphRerank");
+      assert.ok(typed("trace", "boolean"), "graph experiment requires trace");
+    }
     const limitNumber = findSchemaVariant(fields.limit, schema, (entry) =>
       ["number", "integer"].some((type) => schemaAllowsType(entry, type)),
     );
@@ -534,7 +553,13 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     await writeJson(join(output, "installation/tools.json"), tools);
     phase = "replay";
     for (const [index, call] of planned.entries()) {
-      const args = requestArguments(call.task, root, call.mode, protocol);
+      const args = requestArguments(
+        call.task,
+        root,
+        call.mode,
+        protocol,
+        call.graph_rerank,
+      );
       const start = performance.now();
       let response, error;
       try {
@@ -553,11 +578,14 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
         preview: call.preview,
         repetition: call.repetition,
         quality_observation: call.quality_observation,
+        ...(options.graphPair
+          ? { graph_rerank: call.graph_rerank, arm: call.arm }
+          : {}),
         session_first_query: index === 0,
         latency_ms: performance.now() - start,
         request: { name: "zvec_grep_search", arguments: args },
         transport_error: error ?? null,
-        raw_path: `raw/${call.task.task_slug}-${call.mode}-${call.preview}-${call.repetition}.json`,
+        raw_path: `raw/${call.task.task_slug}-${call.arm ?? call.mode}-${call.preview}-${call.repetition}.json`,
       };
       await writeJson(join(output, record.raw_path), response);
       record.raw_sha256 = await fileHash(join(output, record.raw_path));
@@ -648,6 +676,9 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
         preview: call.preview,
         repetition: call.repetition,
         quality_observation: call.quality_observation,
+        ...(options.graphPair
+          ? { graph_rerank: call.graph_rerank, arm: call.arm }
+          : {}),
         session_first_query: false,
         latency_ms: null,
         request: {
@@ -657,13 +688,14 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
             root ?? "<unavailable>",
             call.mode,
             protocol,
+            call.graph_rerank,
           ),
         },
         preparation_error: productFailure ?? null,
         harness_error: productFailure
           ? null
           : manifest.invalid_reasons.join("; "),
-        raw_path: `raw/${call.task.task_slug}-${call.mode}-${call.preview}-${call.repetition}.json`,
+        raw_path: `raw/${call.task.task_slug}-${call.arm ?? call.mode}-${call.preview}-${call.repetition}.json`,
       };
       await writeJson(join(output, record.raw_path), {
         isError: true,
@@ -694,6 +726,7 @@ export async function main(args = process.argv.slice(2)) {
       tasks: { type: "string" },
       "model-cache": { type: "string" },
       "gold-stages": { type: "boolean", default: false },
+      "graph-rerank-pair": { type: "boolean", default: false },
       "candidate-commit": { type: "string", default: "unrecorded" },
     },
   });
@@ -724,6 +757,14 @@ export async function main(args = process.argv.slice(2)) {
     ),
     candidateCommit: values["candidate-commit"],
     goldStages: values["gold-stages"],
+    graphPair: values["graph-rerank-pair"],
+    ...(values["graph-rerank-pair"]
+      ? {
+          harnessCommit: (
+            await run("git", ["-C", suiteDirectory, "rev-parse", "HEAD"])
+          ).stdout.trim(),
+        }
+      : {}),
     runId: new Date().toISOString(),
   };
   await mkdir(options.output, { recursive: false }); // Never overwrite a prior run.
@@ -740,6 +781,43 @@ export async function main(args = process.argv.slice(2)) {
       candidate,
       options,
     });
+  }
+  if (options.graphPair) {
+    const expectedTasks = tasks.map((task) => task.task_id);
+    const off = await aggregate(options.output, {
+      expectedTasks,
+      graphRerank: false,
+    });
+    const on = await aggregate(options.output, {
+      expectedTasks,
+      graphRerank: true,
+    });
+    const report = compareGraphReports(off, on, {
+      suite,
+      candidateCommit: options.candidateCommit,
+    });
+    await writeJson(join(options.output, "graph-rerank.json"), report);
+    await writeFile(
+      join(options.output, "graph-rerank.md"),
+      graphPairMarkdown(report),
+    );
+    if (options.goldStages) {
+      const version = {
+        repository: process.env.GITHUB_REPOSITORY,
+        commit: options.candidateCommit,
+      };
+      await writeGraphTrace(options.output, off, on, {
+        baseline: version,
+        candidate: version,
+        run_url:
+          process.env.GITHUB_ACTIONS === "true"
+            ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+            : undefined,
+        note: "Fresh Hybrid graphRerank off/on pairs share one graph-enabled index. Gold, ordinary recall and Top K are unchanged. Stage capture is enabled in both arms.",
+      });
+    }
+    console.log(`Graph pair: ${join(options.output, "graph-rerank.md")}`);
+    return;
   }
   const report = await aggregate(options.output, {
     expectedTasks: tasks.map((task) => task.task_id),

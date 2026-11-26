@@ -18,6 +18,10 @@ import {
   PILOT_SUITES,
 } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
+import {
+  compareGraphReports,
+  graphPairMarkdown,
+} from "../engines/zg/graph-pair.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import {
   QA_ENTITY_METRICS,
@@ -369,6 +373,15 @@ export function markdownVersionComparison(result, { traceUrl } = {}) {
       ),
     );
   if (traceUrl) lines.push("", `[Download stage trace (HTML)](${traceUrl})`);
+  if (result.graph_rerank?.status === "success")
+    lines.push("", graphPairMarkdown(result.graph_rerank));
+  else if (result.graph_rerank)
+    lines.push(
+      "",
+      "### Head graphRerank: incomplete",
+      "",
+      result.graph_rerank.error,
+    );
   if (result.run_url)
     lines.push("", `[Full reports and per-call evidence](${result.run_url})`);
   return `${lines.join("\n")}\n`;
@@ -413,7 +426,7 @@ export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({
     args,
     options: Object.fromEntries(
-      ["baseline", "candidate", "output"].map((key) => [
+      ["baseline", "candidate", "output", "head-graph"].map((key) => [
         key,
         { type: "string" },
       ]),
@@ -466,6 +479,36 @@ export async function main(args = process.argv.slice(2)) {
       errors: [error.message],
     };
   }
+  if (values["head-graph"]) {
+    try {
+      const directory = values["head-graph"];
+      const read = async (name) =>
+        JSON.parse(await readFile(join(directory, name), "utf8"));
+      const [off, on] = await Promise.all([
+        read("graph-off.json"),
+        read("graph-on.json"),
+      ]);
+      assert.deepEqual(
+        off.expected_task_ids,
+        (await loadSuite()).lock.tasks.map((task) => task.task_id),
+      );
+      result.graph_rerank = compareGraphReports(off, on, {
+        suite: await loadSuite(),
+        candidateCommit: metadata.candidate.commit,
+      });
+      if (result.status === "success")
+        assert.equal(
+          result.graph_rerank.harness_commit,
+          result.harness_commit,
+          "graph scorer checkout differs from the main benchmark",
+        );
+    } catch (error) {
+      result.graph_rerank = {
+        status: "failed",
+        error: `Head graph experiment: ${error.message}`,
+      };
+    }
+  }
   await mkdir(resolve(values.output), { recursive: true });
   await writeFile(
     join(values.output, "summary.json"),
@@ -495,7 +538,8 @@ export async function main(args = process.argv.slice(2)) {
         : "retrieval-trace.html",
     }),
   );
-  if (result.status !== "success") process.exitCode = 1;
+  if (result.status !== "success" || result.graph_rerank?.status === "failed")
+    process.exitCode = 1;
 }
 
 if (

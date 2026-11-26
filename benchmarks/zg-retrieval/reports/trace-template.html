@@ -1004,7 +1004,7 @@
         </div>
         <div class="table-wrap" id="aggregate-table"></div>
         <div class="overview-foot">
-          <span
+          <span id="comparison-legend"
             >Baseline → candidate · Equal values appear once · Missing
             observations are N/A.</span
           ><span id="count-note"></span>
@@ -1055,16 +1055,22 @@
       const DATA = JSON.parse(
         document.getElementById("trace-data").textContent,
       );
-      const MODES = ["fts", "vector", "hybrid"];
+      const GRAPH_PAIR = DATA.meta.kind === "graph-rerank-pair";
+      const MODES = GRAPH_PAIR ? ["hybrid"] : ["fts", "vector", "hybrid"];
       const SIDES = ["baseline", "candidate"];
       const MODE_LABEL = { fts: "FTS", vector: "Vector", hybrid: "Hybrid" };
-      const SIDE_LABEL = { baseline: "Baseline", candidate: "Candidate" };
+      const SIDE_LABEL = GRAPH_PAIR
+        ? { baseline: "graphRerank off", candidate: "graphRerank on" }
+        : { baseline: "Baseline", candidate: "Candidate" };
       const ROWS = [
         ["index", "Gold covered by index"],
         ["fts", "Gold recalled by FTS"],
         ["vector", "Gold recalled by Vector"],
         ["rrf_top10", "Before rule ranking (RRF)"],
-        ["actual_top10", "After rule ranking (actual)"],
+        [
+          "actual_top10",
+          GRAPH_PAIR ? "After ranking (actual)" : "After rule ranking (actual)",
+        ],
       ];
       const EXTRA = [
         ["recall", "Gold in recall pool (union)"],
@@ -1177,10 +1183,13 @@
         $("source-note").textContent = m.note ?? "";
         $("run-source").innerHTML =
           `${url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer">Source evaluation run ↗</a>` : '<span class="muted">Run link unavailable</span>'}<div class="versions">${esc(m.baseline?.commit?.slice(0, 8) ?? "N/A")} → ${esc(m.candidate?.commit?.slice(0, 8) ?? "N/A")}</div>`;
-        $("ranking-note").textContent =
-          `Both ranking rows select Top K from the same loaded candidate pool (K = ${m.limit ?? "N/A"}). Before: RRF order. After: static rules and same-file decay, then selection.`;
+        $("comparison-legend").textContent =
+          `${SIDE_LABEL.baseline} → ${SIDE_LABEL.candidate} · Equal values appear once · Missing observations remain N/A`;
+        $("ranking-note").textContent = GRAPH_PAIR
+          ? `Both arms use the same loaded pool and K = ${m.limit}. Before: RRF order. Actual: ordinary rules with graphRerank off, graph reranking with it on.`
+          : `Both ranking rows select Top K from the same loaded candidate pool (K = ${m.limit ?? "N/A"}). Before: RRF order. After: static rules and same-file decay, then selection.`;
         $("provenance").innerHTML =
-          `${m.note ? `<p>${esc(m.note)}</p>` : ""}<p>${url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer">Open source evaluation</a> · ` : ""}Baseline <code>${esc(m.baseline?.repository)}@${esc(m.baseline?.commit ?? "N/A")}</code> · Candidate <code>${esc(m.candidate?.repository)}@${esc(m.candidate?.commit ?? "N/A")}</code></p><p>Average each question's repeated observations before summing coverage. Each question's Gold is counted once in the denominator. Per-call ranks retain the selected observation's original positions. N/A means missing or unknown; — means the route did not run. Questions without Gold annotations are not counted as zero recall.</p><p>One returned Entity may cover several Gold targets. This report traces annotated Gold, not every non-Gold candidate. Stage capture can add latency; compare normal search latency with capture disabled on both versions.</p>`;
+          `${m.note ? `<p>${esc(m.note)}</p>` : ""}<p>${url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer">Open source evaluation</a> · ` : ""}${esc(SIDE_LABEL.baseline)} <code>${esc(m.baseline?.repository)}@${esc(m.baseline?.commit ?? "N/A")}</code> · ${esc(SIDE_LABEL.candidate)} <code>${esc(m.candidate?.repository)}@${esc(m.candidate?.commit ?? "N/A")}</code></p><p>Average each question's repeated observations before summing coverage. Each question's Gold is counted once in the denominator. Per-call ranks retain the selected observation's original positions. N/A means missing or unknown; — means the route did not run. Questions without Gold annotations are not counted as zero recall.</p><p>One returned Entity may cover several Gold targets. This report traces annotated Gold, not every non-Gold candidate. Stage capture can add latency; compare normal search latency with capture disabled on both versions.</p>`;
       }
       function renderTabs() {
         $("suite-tabs").innerHTML = DATA.suites
@@ -1311,7 +1320,7 @@
             ? '<div class="callout">Original queries differ between versions. The selected version is shown below; this is not a like-for-like query comparison.</div>'
             : "";
         $("question").innerHTML =
-          `<div class="question-head"><code>${esc(t.id)}</code>${qual}</div><div class="segment version-control" aria-label="Trace version">${SIDES.map((side) => `<button type="button" data-side="${side}" aria-pressed="${side === state.side}">${SIDE_LABEL[side]}</button>`).join("")}</div>${queryWarning}<h3 class="query">${esc(t.query || "Original query unavailable")}</h3><div class="question-meta"><span>${esc(t.corpus || suite()?.label)}</span><span>Original query</span></div><section class="recall-summary" aria-label="Per-question recall"><div class="recall-title">${SIDE_LABEL[state.side]} · ${state.level === "entity" ? "Entity" : "File"} Recall · Actual results</div><dl class="recall-values">${recall}</dl></section>${selected && !included(selected) ? `<div class="callout">This question is excluded from the aggregate. ${esc(selected.excludedReason || "Available observations are retained below.")}</div>` : ""}<section class="question-stage"><div class="mini-heading"><h3>Stage coverage for this question</h3><small>Mean per question · baseline → candidate</small></div><div class="table-wrap">${stageTable((mode, side) => task(side)?.groups?.[mode]?.[state.level])}</div></section><section class="trace-detail"><div class="detail-controls"><div class="segment" aria-label="Search mode">${MODES.map((m) => `<button type="button" data-mode="${m}" aria-pressed="${m === state.mode}">${MODE_LABEL[m]}</button>`).join("")}</div><label class="rep-control" for="repetition">${SIDE_LABEL[state.side]} call <select id="repetition"${modeReps.length ? "" : " disabled"}>${modeReps.length ? modeReps.map((n) => `<option value="${n}"${n === state.repetition ? " selected" : ""}>Repetition ${n}</option>`).join("") : "<option>No capture</option>"}</select></label></div><div id="call-detail"></div></section>`;
+          `<div class="question-head"><code>${esc(t.id)}</code>${qual}</div><div class="segment version-control" aria-label="Trace version">${SIDES.map((side) => `<button type="button" data-side="${side}" aria-pressed="${side === state.side}">${SIDE_LABEL[side]}</button>`).join("")}</div>${queryWarning}<h3 class="query">${esc(t.query || "Original query unavailable")}</h3><div class="question-meta"><span>${esc(t.corpus || suite()?.label)}</span><span>Original query</span></div><section class="recall-summary" aria-label="Per-question recall"><div class="recall-title">${SIDE_LABEL[state.side]} · ${state.level === "entity" ? "Entity" : "File"} Recall · Actual results</div><dl class="recall-values">${recall}</dl></section>${selected && !included(selected) ? `<div class="callout">This question is excluded from the aggregate. ${esc(selected.excludedReason || "Available observations are retained below.")}</div>` : ""}<section class="question-stage"><div class="mini-heading"><h3>Stage coverage for this question</h3><small>Mean per question · ${esc(SIDE_LABEL.baseline)} → ${esc(SIDE_LABEL.candidate)}</small></div><div class="table-wrap">${stageTable((mode, side) => task(side)?.groups?.[mode]?.[state.level])}</div></section><section class="trace-detail"><div class="detail-controls"><div class="segment" aria-label="Search mode">${MODES.map((m) => `<button type="button" data-mode="${m}" aria-pressed="${m === state.mode}">${MODE_LABEL[m]}</button>`).join("")}</div><label class="rep-control" for="repetition">${SIDE_LABEL[state.side]} call <select id="repetition"${modeReps.length ? "" : " disabled"}>${modeReps.length ? modeReps.map((n) => `<option value="${n}"${n === state.repetition ? " selected" : ""}>Repetition ${n}</option>`).join("") : "<option>No capture</option>"}</select></label></div><div id="call-detail"></div></section>`;
         renderCall(selected);
       }
       function routeCount(v, key) {
@@ -1375,7 +1384,7 @@
           ? `<div class="table-wrap"><table class="target-table"><thead><tr><th scope="col">Gold target</th><th scope="col">Index</th><th scope="col">FTS<br>Fragment rank</th><th scope="col">Vector<br>Fragment rank</th><th scope="col">RRF<br>Loaded rank</th><th scope="col">Static rules<br>Rank</th><th scope="col">Final<br>Rank</th></tr></thead><tbody>${targets.map((x) => `<tr><td><div class="target-name">${esc(x.symbol || x.path)}</div>${x.symbol ? `<div class="target-path">${esc(x.path)}</div>` : ""}${x.level === "entity" ? `<div class="target-path">ID: ${esc(x.id)}</div>` : ""}<div class="target-qualifier">${deltaBadge(x)}</div></td><td>${x.coverage?.index === true ? '<span class="hit">Covered</span>' : x.coverage?.index === false ? '<span class="miss">Not covered</span>' : '<span class="muted">Unknown</span>'}</td>${["fts", "vector", "loaded", "static", "selected"].map((key) => `<td>${rankCell(x, key)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
           : `<div class="empty">No ${state.level === "entity" ? "Entity" : "File"} Gold annotations are available for this question. This is not zero recall.</div>`;
         $("call-detail").innerHTML =
-          `${v.state !== "observed" ? `<p class="capture-note">Capture ${esc(v.state ?? "unavailable")}. Unknown observations are not misses.</p>` : ""}${renderFlow(v)}<div class="target-toolbar"><h3>Gold target details <small>· ${targets.length} targets</small></h3></div>${table}<details class="rank-info"><summary>Rank interpretation</summary><p>${SIDE_LABEL[state.side]}, repetition ${state.repetition}. FTS and Vector show recall fragment ranks. RRF shows the loaded Entity candidate pool before rules. Static rules shows ranking before same-file decay. Final rank is the actual returned position.</p><p>Entered / Exited compares the RRF Top K with the actual Top K after rules (K = ${esc(DATA.meta.limit ?? "N/A")}). Miss means no target matched at that stage; Unknown means no reliable observation. Ranks retain their original positions.</p></details>`;
+          `${v.state !== "observed" ? `<p class="capture-note">Capture ${esc(v.state ?? "unavailable")}. Unknown observations are not misses.</p>` : ""}${renderFlow(v)}<div class="target-toolbar"><h3>Gold target details <small>· ${targets.length} targets</small></h3></div>${table}<details class="rank-info"><summary>Rank interpretation</summary><p>${SIDE_LABEL[state.side]}, repetition ${state.repetition}. FTS and Vector show recall fragment ranks. RRF shows the loaded Entity candidate pool before rules. Static rules shows ranking before same-file decay. Final rank is the actual returned position.${GRAPH_PAIR ? " Graph reranking is included in the enabled arm." : ""}</p><p>Entered / Exited compares the RRF Top K with the actual Top K after rules (K = ${esc(DATA.meta.limit ?? "N/A")}). Miss means no target matched at that stage; Unknown means no reliable observation. Ranks retain their original positions.</p></details>`;
       }
       function renderAll() {
         renderTabs();

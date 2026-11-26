@@ -745,6 +745,7 @@ fn open_graph(path: &Path, mode: OpenMode) -> EngineResult<SqliteGraphStorage> {
 
 fn graph_error(error: graph::Error) -> EngineError {
     match error {
+        graph::Error::Cancelled => EngineError::cancelled("graph query was cancelled"),
         graph::Error::InvalidInput(message) => EngineError::invalid_argument(message),
         error => EngineError::storage_failure(format!("workspace graph operation failed: {error}")),
     }

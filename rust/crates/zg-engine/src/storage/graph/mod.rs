@@ -9,11 +9,13 @@
 
 mod invalidation;
 mod pending;
+mod ranked;
 mod reader;
 mod schema;
 mod types;
 mod writer;
 
+pub(crate) use ranked::RankedHop;
 pub(crate) use reader::parse_file_endpoint;
 use rusqlite::{Connection, OpenFlags};
 use std::{path::Path, time::Duration};
@@ -22,6 +24,8 @@ pub(crate) use types::*;
 /// Errors at the graph persistence boundary.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
+    #[error("graph query was cancelled")]
+    Cancelled,
     #[error("SQLite graph operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("invalid graph metadata: {0}")]

@@ -1,5 +1,3 @@
-use super::storage::SearchStorage;
-
 use std::{collections::HashSet, fs, path::Path};
 
 use crate::{
@@ -15,12 +13,16 @@ use crate::{
             IndexRouteDiagnostics, MatchedBy,
         },
     },
-    domain::{Content, FileRecord, Range, Workspace},
+    domain::{Content, FileRecord, IndexDescriptor, Range, Workspace},
+    storage::IndexStore,
     utils::sha256_hex,
 };
 
-use super::pipeline::{
-    SearchEmbeddingRuntime, SearchHit, SearchPlan, SearchPlanResult, search_workspace_index,
+use super::{
+    graph_expand::GraphSearch,
+    pipeline::{
+        SearchEmbeddingRuntime, SearchHit, SearchPlan, SearchPlanResult, search_workspace_index,
+    },
 };
 
 const DEFAULT_CONTEXT_LIMIT: usize = 10;
@@ -132,7 +134,7 @@ pub(crate) fn normalize_context_request(
 pub(crate) async fn context_from_index(
     root: &Path,
     workspace: &Workspace,
-    storage: &dyn SearchStorage,
+    storage: &IndexStore,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
     request: &NormalizedContextRequest,
@@ -156,6 +158,11 @@ pub(crate) async fn context_from_index(
         request.groups.clone()
     };
     let limit = context_group_limit(options.limit, groups.len());
+    let graph_enabled = options.graph_rerank == Some(true)
+        && workspace
+            .index()
+            .descriptor()
+            .is_some_and(IndexDescriptor::graph_indexing);
     let mut searches = Vec::with_capacity(groups.len());
     for group in &groups {
         searches.push(
@@ -170,6 +177,13 @@ pub(crate) async fn context_from_index(
                 },
                 storage,
                 embedding_models,
+                (graph_enabled && group.role == ContextQueryGroupRole::Primary).then_some(
+                    GraphSearch {
+                        storage,
+                        signal: options.signal.as_ref(),
+                        query: &group.query,
+                    },
+                ),
             )
             .await?,
         );
@@ -183,7 +197,7 @@ fn build_context_result(
     workspace: &Workspace,
     request: &NormalizedContextRequest,
     groups: &[NormalizedContextGroup],
-    mut searches: Vec<SearchPlanResult>,
+    searches: Vec<SearchPlanResult>,
 ) -> Result<ContextResult, EngineError> {
     let group_items = searches
         .iter()
@@ -199,21 +213,36 @@ fn build_context_result(
         group_items.iter().flatten().cloned().collect(),
         &coverage_groups,
     );
-    let timings = searches
-        .iter()
-        .flat_map(|search| search.timings.iter().cloned())
-        .collect();
     let hits_returned = items.len();
-    let stage_traces = searches
-        .iter_mut()
-        .zip(groups)
-        .filter_map(|(search, group)| {
-            search.stage_trace.take().map(|mut trace| {
-                trace.group_id.clone_from(&group.id);
-                trace
-            })
-        })
-        .collect();
+    let mut timings = Vec::new();
+    let mut routes = Vec::new();
+    let mut search_trace = Vec::new();
+    let mut graph_errors = Vec::new();
+    let mut stage_traces = Vec::new();
+    for (group, search) in groups.iter().zip(searches) {
+        timings.extend(search.timings);
+        if let Some(mut trace) = search.stage_trace {
+            trace.group_id.clone_from(&group.id);
+            stage_traces.push(trace);
+        }
+        routes.extend(
+            search
+                .routes
+                .into_iter()
+                .map(|route| IndexRouteDiagnostics {
+                    id: route.id,
+                    mode: route.mode,
+                    query: route.query,
+                }),
+        );
+        if let Some(mut trace) = search.trace {
+            trace.group_id.clone_from(&group.id);
+            search_trace.push(trace);
+        }
+        if let Some(error) = search.graph_error {
+            graph_errors.push(format!("{}: {error}", group.id));
+        }
+    }
 
     Ok(ContextResult {
         freshness: None,
@@ -251,19 +280,13 @@ fn build_context_result(
                         role: group.role,
                     })
                     .collect(),
-                routes: searches
-                    .into_iter()
-                    .flat_map(|search| search.routes)
-                    .map(|route| IndexRouteDiagnostics {
-                        id: route.id,
-                        mode: route.mode,
-                        query: route.query,
-                    })
-                    .collect(),
+                routes,
             }),
             rg: None,
             structure: None,
             timings,
+            search_trace,
+            graph_errors,
         },
     })
 }
@@ -710,6 +733,8 @@ mod tests {
             routes: Vec::new(),
             hits: vec![hit.clone()],
             timings: Vec::new(),
+            trace: None,
+            graph_error: None,
             stage_trace: None,
         };
         let request = normalize_context_request(&ContextOptions {
@@ -885,6 +910,8 @@ mod tests {
                 trace: None,
             }],
             timings: Vec::new(),
+            trace: None,
+            graph_error: None,
         };
         let request = normalize_context_request(&ContextOptions {
             query: Some("source".to_owned()),

@@ -35,7 +35,19 @@ fn fixtures() -> Vec<McpSearchPresentationCase> {
 fn stage_metadata_preserves_search_text_and_stays_absent_when_disabled() {
     let mut reply: ContextResult =
         serde_json::from_value(fixtures().remove(0).result).expect("result");
-    let plain = crate::search_result_to_tool_result(&reply, SearchPreview::Full);
+    reply
+        .diagnostics
+        .search_trace
+        .push(zg_engine::api::context::result::GroupSearchTrace {
+            group_id: "Q1".into(),
+            recall: Vec::new(),
+            fused: Vec::new(),
+            ordinary_pool: Vec::new(),
+            graph: None,
+            selected: Vec::new(),
+        });
+    let plain = super::search_result(&reply, SearchPreview::Full);
+    assert!(plain.structured_content.is_some());
     assert!(plain.meta.is_none());
     assert!(
         serde_json::to_value(&reply)
@@ -52,7 +64,7 @@ fn stage_metadata_preserves_search_text_and_stays_absent_when_disabled() {
           "sizes": { "merged": 0, "fused": 0, "loaded": 0, "selected": 0 }, "files": {} }
     ]);
     reply.stage_traces = serde_json::from_value(traces.clone()).expect("typed traces");
-    let observed = crate::search_result_to_tool_result(&reply, SearchPreview::Full);
+    let observed = super::search_result(&reply, SearchPreview::Full);
     assert_eq!(observed.content, plain.content);
     assert_eq!(observed.structured_content, plain.structured_content);
     let wire = serde_json::to_value(&observed).expect("MCP result");
@@ -533,4 +545,46 @@ async fn public_tool_preview_matches_cli_without_changing_retrieval() {
             task.await.expect("server task").expect("server stop");
         }
     }).await.expect("tool tests terminate");
+}
+
+#[test]
+fn traced_search_returns_stage_timings_and_group_evidence() {
+    use zg_engine::api::context::result::{GroupSearchTrace, TimingEntry};
+    let mut reply: ContextResult =
+        serde_json::from_value(fixtures().remove(0).result).expect("fixture");
+    reply.diagnostics.search_trace.push(GroupSearchTrace {
+        group_id: "Q1".into(),
+        recall: Vec::new(),
+        fused: Vec::new(),
+        ordinary_pool: Vec::new(),
+        graph: None,
+        selected: Vec::new(),
+    });
+    reply.diagnostics.timings.push(TimingEntry {
+        name: "graph_ranking".into(),
+        duration_micros: 123,
+        count: None,
+    });
+    let result = super::search_result(&reply, SearchPreview::Short);
+    let structured = result.structured_content.expect("structured trace");
+    assert_eq!(structured["searchTrace"][0]["group_id"], "Q1");
+    assert_eq!(
+        structured["timings"],
+        serde_json::to_value(&reply.diagnostics.timings).expect("timings")
+    );
+}
+
+#[test]
+fn untraced_search_reports_graph_failure_without_structured_trace() {
+    let mut reply: ContextResult =
+        serde_json::from_value(fixtures().remove(0).result).expect("fixture");
+    reply
+        .diagnostics
+        .graph_errors
+        .push("Q1: graph unavailable".into());
+    let result = super::search_result(&reply, SearchPreview::Short);
+    assert!(result.structured_content.is_none());
+    let serialized = serde_json::to_string(&result).expect("response");
+    assert!(serialized.contains("graph unavailable"));
+    assert!(!result.is_error.unwrap_or(false));
 }

@@ -583,6 +583,9 @@ fn trace(item: &ContextItem) -> Option<String> {
     if let Some(ranking) = &trace.ranking {
         parts.push(format!("reranked #{}", ranking.rank));
     }
+    if let Some(ranking) = &trace.graph_ranking {
+        parts.push(format!("graph reranked #{}", ranking.rank));
+    }
     Some(parts.join("; "))
 }
 

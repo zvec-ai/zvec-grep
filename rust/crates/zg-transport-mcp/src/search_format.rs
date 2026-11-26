@@ -1,5 +1,6 @@
 //! Public indexed-search presentation with CLI content and explicit MCP freshness.
 
+use rmcp::model::{CallToolResult, ContentBlock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use zg_cli::{
@@ -46,6 +47,28 @@ pub(crate) fn format_search_result(reply: &ContextResult, preview: SearchPreview
     )
     .expect("writing search output to a byte buffer cannot fail");
     String::from_utf8(bytes).expect("search output is UTF-8")
+}
+
+pub(crate) fn search_result(reply: &ContextResult, preview: SearchPreview) -> CallToolResult {
+    let mut text = format_search_result(reply, preview);
+    for error in &reply.diagnostics.graph_errors {
+        use std::fmt::Write;
+        writeln!(text, "\nCall graph expansion failed for {error}").expect("writing to a string");
+    }
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+    if !reply.diagnostics.search_trace.is_empty() {
+        result.structured_content = Some(serde_json::json!({
+            "searchTrace": reply.diagnostics.search_trace,
+            "timings": reply.diagnostics.timings,
+        }));
+    }
+    if !reply.stage_traces.is_empty() {
+        result.meta = Some(rmcp::model::MetaObject(serde_json::Map::from_iter([(
+            "zg_stage_trace".to_owned(),
+            serde_json::json!(reply.stage_traces),
+        )])));
+    }
+    result
 }
 
 #[cfg(test)]

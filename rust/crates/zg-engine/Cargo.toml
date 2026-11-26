@@ -42,7 +42,7 @@ llama-cpp-2.workspace = true
 # API selection does not select the download version; build.rs owns that pin.
 ort.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "functions", "hooks"] }
 rayon = "1.11.0"
 serde.workspace = true
 serde_json.workspace = true
@@ -85,8 +85,6 @@ dunce = "1.0.5"
 ort = { workspace = true, features = ["directml"] }
 
 [dev-dependencies]
-# Count SQLite VM instructions in graph query performance regression tests.
-rusqlite = { version = "0.37", features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
 
