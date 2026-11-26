@@ -1047,12 +1047,11 @@ mod tests {
                         .entities
                         .values()
                         .filter(|stored| stored.file.id() == file.id())
-                        .map(|stored| {
-                            (
-                                stored.entity.id().clone(),
-                                stored.entity.source_range(),
-                                true,
-                            )
+                        .map(|stored| crate::storage::IndexedSourceEntity {
+                            id: stored.entity.id().clone(),
+                            range: stored.entity.source_range(),
+                            source_bytes: stored.entity.source_byte_offsets(),
+                            searchable: true,
                         })
                         .collect(),
                 })
@@ -2634,7 +2633,7 @@ mod tests {
             TextRange::from_coordinates(0, text.len(), 1, 1, 0, text.len()).expect("source range"),
         );
         let content = content_kind(text.to_owned());
-        let id = EntityId::new(file.id(), &content, source_range).expect("entity id");
+        let id = EntityId::new(file.id(), &content, &source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&id, 0),
             range: Range::Full,

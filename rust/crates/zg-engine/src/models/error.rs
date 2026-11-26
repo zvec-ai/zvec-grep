@@ -12,6 +12,7 @@ pub struct ModelError {
     context: Option<String>,
     cause: Option<String>,
     disposition: FailureDisposition,
+    native_backend_failure: bool,
     origin: Box<ErrorSite>,
 }
 
@@ -37,6 +38,7 @@ impl ModelError {
             context,
             cause: None,
             disposition: FailureDisposition::Input,
+            native_backend_failure: false,
             origin: Box::new(ErrorSite::capture()),
         }
     }
@@ -73,6 +75,16 @@ impl ModelError {
         self
     }
 
+    /// Only native context creation/execution errors may request a device fallback.
+    pub(crate) fn native_backend(mut self) -> Self {
+        self.native_backend_failure = true;
+        self
+    }
+
+    pub(crate) fn is_native_backend_failure(&self) -> bool {
+        self.native_backend_failure
+    }
+
     pub(crate) fn shared(mut self) -> Self {
         if self.disposition == FailureDisposition::Input {
             self.disposition = FailureDisposition::Shared;
@@ -97,6 +109,7 @@ impl ModelError {
             context: cause_context,
             cause,
             disposition,
+            native_backend_failure,
             origin,
         } = self;
         Self {
@@ -105,6 +118,7 @@ impl ModelError {
             context,
             cause: Some(compose_message(cause_message, cause_context, cause)),
             disposition,
+            native_backend_failure,
             origin,
         }
     }
@@ -116,6 +130,7 @@ impl ModelError {
             context,
             cause,
             disposition: _,
+            native_backend_failure: _,
             origin,
         } = self;
         EngineError::new_at(code, compose_message(message, context, cause), *origin)
@@ -223,5 +238,16 @@ mod tests {
 
         let shared = ModelError::storage_failure("model load failed");
         assert!(shared.should_fail_fast());
+    }
+
+    #[test]
+    fn wrapping_preserves_explicit_native_backend_origin() {
+        let native = ModelError::internal("native context failed")
+            .native_backend()
+            .with_cause("fixture")
+            .wrap("embedding failed", None);
+        assert!(native.is_native_backend_failure());
+        assert!(!ModelError::internal("tokenization failed").is_native_backend_failure());
+        assert!(!ModelError::cancelled("cancelled").is_native_backend_failure());
     }
 }

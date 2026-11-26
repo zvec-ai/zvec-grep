@@ -54,6 +54,7 @@ pub(super) fn extract(
             ExtractedEntity {
                 index,
                 source_range: Range::Text(range),
+                source_map: None,
                 fragments: text_fragments(&content, content_max, content_overlap),
                 content: Content::Text(content),
                 metadata: Some(metadata),
@@ -208,7 +209,7 @@ mod tests {
                 let id = crate::domain::EntityId::new(
                     crate::domain::FileId::new(42),
                     &entity.content,
-                    entity.source_range,
+                    &entity.source_range,
                 )
                 .expect("entity ID");
                 let Content::Text(text) = &entity.content else {
@@ -227,7 +228,9 @@ mod tests {
                             )
                             .expect("fragment text")
                             .to_owned(),
-                            Range::Text(_) => panic!("entity-relative range expected"),
+                            Range::Text(_) | Range::Pdf(_) => {
+                                panic!("entity-relative range expected")
+                            }
                         };
                         serde_json::json!({
                             "range": fragment.range,
@@ -401,7 +404,7 @@ mod tests {
                         usize::try_from(local.start_offset()).expect("fragment start"),
                         usize::try_from(local.end_offset()).expect("fragment end"),
                     ),
-                    Range::Text(_) => panic!("fragments must store byte offsets"),
+                    Range::Text(_) | Range::Pdf(_) => panic!("fragments must store byte offsets"),
                 };
                 assert!(start < end && end <= content.len());
                 assert!(content.is_char_boundary(start) && content.is_char_boundary(end));

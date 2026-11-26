@@ -156,7 +156,7 @@ def stage_test_bundle(messages, archive):
         for name, binary in binaries.items():
             shutil.copy2(binary, bundle / "bin" / (name + (".exe" if windows else "")))
         shutil.copy2(sorted(zvec_files)[0], bundle / "lib" / zvec)
-        for name in ort:
+        for name in [*ort, "pdfium.dll" if windows else "libpdfium.so"]:
             shutil.copy2(profile / name, bundle / "lib" / name)
         # Record identity and transport integrity without leaking builder paths.
         manifest = {
@@ -190,7 +190,7 @@ def verify_test_bundle(bundle):
 
 
 def cargo_runtime_file(name):
-    return bool(re.fullmatch(r"(?:lib)?(?:llama[\w-]*|ggml[\w-]*|onnxruntime[\w-]*|zvec_c_api)"
+    return bool(re.fullmatch(r"(?:lib)?(?:llama[\w-]*|ggml[\w-]*|onnxruntime[\w-]*|zvec_c_api|pdfium)"
                              r"(?:\.so(?:\.\d+)*|\.dll)", name))
 
 

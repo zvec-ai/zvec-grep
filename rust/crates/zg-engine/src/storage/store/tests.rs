@@ -98,7 +98,12 @@ fn indexed_sources_reads_only_requested_existing_files_in_writers_and_readers() 
         assert_eq!(sources[0].path, watched.relative_path().as_path());
         assert_eq!(
             sources[0].entities,
-            vec![(entry.entity.id().clone(), entry.entity.source_range(), true)]
+            vec![super::IndexedSourceEntity {
+                id: entry.entity.id().clone(),
+                range: entry.entity.source_range(),
+                source_bytes: entry.entity.source_byte_offsets(),
+                searchable: true
+            }]
         );
     };
     check(&storage);
@@ -700,7 +705,7 @@ fn fixture(
 }
 
 fn fixture_entity(file_id: FileId, content: Content, metadata: Option<EntityMetadata>) -> Entity {
-    let id = EntityId::new(file_id, &content, Range::Full).expect("entity id");
+    let id = EntityId::new(file_id, &content, &Range::Full).expect("entity id");
     let fragment = EntityFragment {
         id: FragmentId::new(&id, 0),
         range: Range::Full,
@@ -781,7 +786,7 @@ fn persists_filters_and_replaces_complete_files() {
         },
         StorageSearchFilter {
             entity_ids: Some(vec![
-                EntityId::new(first.id(), &Content::Text("missing".into()), Range::Full)
+                EntityId::new(first.id(), &Content::Text("missing".into()), &Range::Full)
                     .expect("entity id"),
             ]),
             ..filter.clone()
@@ -1118,7 +1123,7 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     .expect("valid entity with duplicate ID");
     let mut duplicate_fragment = entry.clone();
     duplicate_fragment.entity = Entity::new(
-        EntityId::new(file.id(), &Content::Text("other".into()), Range::Full).expect("entity id"),
+        EntityId::new(file.id(), &Content::Text("other".into()), &Range::Full).expect("entity id"),
         entry.entity.file_id(),
         entry.entity.source_range(),
         entry.entity.content().clone(),
@@ -1138,7 +1143,7 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     let (entities, entries) = fixture_records(std::slice::from_ref(&entry));
     let mut wrong_owner = entries[0].clone();
     wrong_owner.entity_id =
-        EntityId::new(file.id(), &Content::Text("unrelated".into()), Range::Full)
+        EntityId::new(file.id(), &Content::Text("unrelated".into()), &Range::Full)
             .expect("entity id");
     let mut unknown_fragment = entries[0].clone();
     unknown_fragment.fragment_id = FragmentId::new(entry.entity.id(), 1);

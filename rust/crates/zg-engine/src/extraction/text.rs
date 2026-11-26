@@ -36,6 +36,7 @@ pub(super) fn extract_plain_text_entities(
         .map(|(index, chunk)| ExtractedEntity {
             index,
             source_range: Range::Text(chunk.range),
+            source_map: None,
             content: Content::Text(chunk.text),
             metadata: None,
             fragments: vec![ExtractedEntityFragment { range: Range::Full }],

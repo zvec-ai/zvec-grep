@@ -8,9 +8,29 @@ use super::{
 use crate::domain::model::ModelConfig;
 use crate::models::{
     catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
-    runtime::ModelComputeRuntime,
-    spi::{EmbeddingModel, ModelError},
+    runtime::{
+        ModelComputeRuntime,
+        llama_config::{LlamaResources, LlamaSettings},
+    },
+    spi::{EmbeddingModel, LayoutModel, LayoutModelConfig, ModelError},
 };
+
+pub(crate) fn create_layout_model(
+    reference: &str,
+    config: LayoutModelConfig,
+    compute: ModelComputeRuntime,
+) -> Result<Arc<dyn LayoutModel>, ModelError> {
+    if reference != crate::models::catalog::layout::PP_S_REFERENCE {
+        return Err(ModelError::new(
+            crate::EngineError::NOT_FOUND,
+            "Layout model is not in the catalog",
+            None,
+        ));
+    }
+    Ok(Arc::new(super::pp_doclayout::PpDocLayoutModel::new(
+        config, compute,
+    )))
+}
 
 /// Creates a catalog-backed embedding model.
 ///
@@ -25,6 +45,7 @@ pub fn create_embedding_model(
     options: Option<ModelConfig>,
     compute_runtime: ModelComputeRuntime,
     session_count: usize,
+    llama: Option<Arc<LlamaResources>>,
 ) -> Result<Arc<dyn EmbeddingModel>, ModelError> {
     let options = options.unwrap_or_default();
     if reference.starts_with("http/") {
@@ -60,6 +81,7 @@ pub fn create_embedding_model(
             config,
             options,
             compute_runtime,
+            llama.unwrap_or_else(|| LlamaSettings::capture().resources(1)),
         ))),
     }
 }
@@ -83,6 +105,7 @@ mod tests {
                 options,
                 crate::models::runtime::ModelComputeRuntime::shared(),
                 1,
+                None,
             )
             .expect("catalog backend should construct without loading model assets");
             assert_eq!(model.info().model().reference(), entry.reference());
@@ -94,6 +117,7 @@ mod tests {
             None,
             crate::models::runtime::ModelComputeRuntime::shared(),
             1,
+            None,
         )
         .err()
         .expect("unknown model should fail catalog lookup");

@@ -41,9 +41,9 @@ pub(crate) struct ObservedEntity {
 }
 
 impl ObservedEntity {
-    pub(crate) fn new(range: Option<Range>, searchable: bool) -> Self {
+    pub(crate) fn new(range: Option<StageRange>, searchable: bool) -> Self {
         Self {
-            range: range.map(Into::into),
+            range,
             searchable,
             stages: CandidateStages::default(),
         }
@@ -54,8 +54,36 @@ impl ObservedEntity {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StageRange {
     Full,
-    Byte { start_offset: u64, end_offset: u64 },
+    Byte {
+        start_offset: u64,
+        end_offset: u64,
+    },
     Text(TextRange),
+    Pdf {
+        pages: Vec<u32>,
+        start_byte_offset: usize,
+        end_byte_offset: usize,
+    },
+}
+
+impl StageRange {
+    pub(crate) fn from_location(range: Range, offsets: Option<(u64, u64)>) -> Self {
+        let mut range = Self::from(range);
+        if let (
+            Self::Pdf {
+                start_byte_offset,
+                end_byte_offset,
+                ..
+            },
+            Some((start, end)),
+        ) = (&mut range, offsets)
+        {
+            *start_byte_offset =
+                usize::try_from(start).expect("offset originates from in-memory text");
+            *end_byte_offset = usize::try_from(end).expect("offset originates from in-memory text");
+        }
+        range
+    }
 }
 
 impl From<Range> for StageRange {
@@ -67,6 +95,11 @@ impl From<Range> for StageRange {
                 end_offset: range.end_offset(),
             },
             Range::Text(range) => Self::Text(range),
+            Range::Pdf(location) => Self::Pdf {
+                pages: location.page_numbers(),
+                start_byte_offset: 0,
+                end_byte_offset: 0,
+            },
         }
     }
 }
@@ -89,4 +122,48 @@ pub(crate) struct StagePoolSizes {
     pub(crate) fused: usize,
     pub(crate) loaded: usize,
     pub(crate) selected: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+
+    #[test]
+    fn pdf_trace_preserves_pages_and_document_offsets_without_block_payloads() {
+        let source = PdfSourceMap {
+            markdown_start: 100,
+            text_len: 3,
+            parts: [2, 2, 4]
+                .into_iter()
+                .enumerate()
+                .map(|(offset, page)| PdfSourcePart {
+                    range: offset..offset + 1,
+                    block: PdfBlock {
+                        page,
+                        id: u32::try_from(offset + 1).expect("small block id"),
+                        page_width: 612.0,
+                        page_height: 792.0,
+                        bbox: None,
+                    },
+                })
+                .collect(),
+        };
+        source.validate("abc").expect("valid source map");
+        let range = StageRange::from_location(
+            Range::Pdf(source.locate(0..source.text_len).expect("location").into()),
+            Some((100, 103)),
+        );
+        let encoded = serde_json::to_value(&range).expect("serialize PDF trace");
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "pdf": {"pages": [2, 4], "start_byte_offset": 100, "end_byte_offset": 103}
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<StageRange>(encoded).expect("deserialize PDF trace"),
+            range
+        );
+    }
 }

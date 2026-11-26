@@ -181,6 +181,9 @@ impl WorkspaceIndexService {
             options.embedding_concurrency,
         )
         .map_err(ModelError::into_engine_error)?;
+        // Extraction models are local even when embeddings use an HTTP backend.
+        let extraction_cache =
+            index_model_cache(&crate::config::read()?, existing.as_ref(), &options);
         let IndexModels {
             runtimes: acquired,
             descriptor,
@@ -214,11 +217,13 @@ impl WorkspaceIndexService {
             options.changes.clear();
             prepare_build(&workspace)?;
         }
+        let extractor = crate::extraction::ExtractionService::new(models.clone(), extraction_cache);
         let result = self
             .run_index(
                 &workspace,
                 rebuilding,
                 acquired,
+                extractor,
                 &options,
                 Arc::clone(&home_lock),
             )
@@ -249,6 +254,7 @@ impl WorkspaceIndexService {
         workspace: &Workspace,
         rebuilding: bool,
         models: Vec<ModelRuntimeLease>,
+        extractor: crate::extraction::ExtractionService,
         options: &IndexOptions,
         home_lock: Arc<LockGuard>,
     ) -> Result<(IndexResult, Option<IndexProgress>), EngineError> {
@@ -308,6 +314,7 @@ impl WorkspaceIndexService {
             workspace,
             storage: &writer.session.storage,
             scanner: self.scanner.as_ref(),
+            extractor: &extractor,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
             on_progress: pipeline_progress,
@@ -651,7 +658,7 @@ fn index_workspace_state(
         descriptor.graph_indexing(),
         descriptor.fts(),
     )?;
-    Workspace::new(
+    let workspace = Workspace::new(
         source_root,
         layout.clone(),
         scan,
@@ -660,7 +667,8 @@ fn index_workspace_state(
         active.map_or(now, Workspace::created_epoch_ms),
         now,
         IndexState::Enabled(Box::new(descriptor)),
-    )
+    )?;
+    Ok(workspace.with_model_cache_dir(saved_model_cache(active, options)))
 }
 
 impl Default for WorkspaceIndexService {
@@ -714,6 +722,40 @@ fn normalize_model_paths(options: &mut IndexOptions) -> Result<(), EngineError> 
 struct IndexModels {
     runtimes: Vec<ModelRuntimeLease>,
     descriptor: IndexDescriptor,
+}
+
+fn index_model_cache(
+    config: &serde_json::Value,
+    existing: Option<&Workspace>,
+    options: &IndexOptions,
+) -> Option<std::path::PathBuf> {
+    let saved = existing
+        .and_then(Workspace::model_cache_dir)
+        .map(Path::to_path_buf);
+    crate::config::model_cache(
+        config,
+        options
+            .runtime_model_cache
+            .clone()
+            .or_else(|| options.model_cache.clone())
+            .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
+        saved,
+    )
+}
+
+fn saved_model_cache(
+    existing: Option<&Workspace>,
+    options: &IndexOptions,
+) -> Option<std::path::PathBuf> {
+    options
+        .model_cache
+        .clone()
+        .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone()))
+        .or_else(|| {
+            existing
+                .and_then(Workspace::model_cache_dir)
+                .map(Path::to_path_buf)
+        })
 }
 
 fn acquire_index_models(
@@ -866,15 +908,7 @@ fn acquire_model(
     let cache_dir = if http_descriptor.is_some() {
         None
     } else {
-        crate::config::model_cache(
-            &config,
-            options
-                .runtime_model_cache
-                .clone()
-                .or_else(|| options.model_cache.clone())
-                .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
-            existing_runtime.and_then(|runtime| runtime.cache_dir.clone()),
-        )
+        index_model_cache(&config, existing, options)
     };
     models
         .acquire(ModelRuntimeRequest::new(
@@ -1023,9 +1057,8 @@ fn saved_embedding_config(
         {
             config.api_key = Some(encrypt_api_key(layout, &reference, key)?);
         }
-        return Ok(config);
-    }
-    if model.info().model().provider() == "local" {
+        stored = config;
+    } else if model.info().model().provider() == "local" {
         stored.device = options
             .device
             .or_else(|| {
@@ -1036,25 +1069,17 @@ fn saved_embedding_config(
                     .filter(|device| *device != Device::Auto)
             })
             .or(stored.device);
-        stored.cache_dir = options
-            .model_cache
-            .clone()
-            .or_else(|| {
-                options
-                    .embedding
-                    .as_ref()
-                    .and_then(|embedding| embedding.cache_dir.clone())
-            })
-            .or(stored.cache_dir);
-        return Ok(stored);
+    } else {
+        stored.endpoint = model
+            .configured_endpoint()
+            .map(str::to_owned)
+            .or(stored.endpoint);
+        if let Some(key) = options.api_key.as_deref() {
+            stored.api_key = Some(encrypt_api_key(layout, &reference, key)?);
+        }
     }
-    stored.endpoint = model
-        .configured_endpoint()
-        .map(str::to_owned)
-        .or(stored.endpoint);
-    if let Some(key) = options.api_key.as_deref() {
-        stored.api_key = Some(encrypt_api_key(layout, &reference, key)?);
-    }
+    // Artifact caches are shared workspace settings, not per-model settings.
+    stored.cache_dir = None;
     Ok(stored)
 }
 
@@ -1131,6 +1156,48 @@ mod tests {
     };
 
     use super::{ModelRuntimeManager, WorkspaceIndexService};
+
+    #[test]
+    fn extraction_model_cache_is_independent_of_embedding_backend() {
+        let directory = tempdir().expect("cache preferences");
+        let runtime = directory.path().join("runtime");
+        let explicit = directory.path().join("explicit");
+        let embedding = directory.path().join("embedding");
+        let global = directory.path().join("global");
+        let config = serde_json::json!({"defaults": {"modelCacheDir": global}});
+        for reference in [
+            "local/potion-code-16m-v2",
+            "http/fixture",
+            "qwen/text-embedding-v4",
+        ] {
+            let mut options = IndexOptions {
+                runtime_model_cache: Some(runtime.clone()),
+                model_cache: Some(explicit.clone()),
+                embedding: Some(EmbeddingModelSpec {
+                    reference: reference.into(),
+                    revision: None,
+                    cache_dir: Some(embedding.clone()),
+                    endpoint: None,
+                    device: Device::Auto,
+                }),
+                ..Default::default()
+            };
+            let resolve = |options: &IndexOptions| super::index_model_cache(&config, None, options);
+            assert_eq!(resolve(&options), Some(runtime.clone()), "{reference}");
+            options.runtime_model_cache = None;
+            assert_eq!(resolve(&options), Some(explicit.clone()), "{reference}");
+            options.model_cache = None;
+            assert_eq!(resolve(&options), Some(embedding.clone()), "{reference}");
+            options.embedding.as_mut().expect("embedding").cache_dir = None;
+            assert_eq!(
+                resolve(&options),
+                std::env::var_os("ZVEC_GREP_MODEL_CACHE")
+                    .map(PathBuf::from)
+                    .or_else(|| Some(global.clone())),
+                "{reference}",
+            );
+        }
+    }
 
     #[test]
     fn normalizes_selected_model_cache_paths() {
@@ -1244,18 +1311,22 @@ mod tests {
     }
 
     fn write_previous_index_version(home: &std::path::Path, manifest: &crate::domain::Workspace) {
-        let mut previous = manifest.clone();
-        previous = crate::domain::Workspace::new(
-            previous.source_root(),
-            previous.layout().clone(),
-            previous.scan().clone(),
-            super::CURRENT_INDEX_VERSION - 1,
-            previous.storage_generation().map(str::to_owned),
-            previous.created_epoch_ms(),
-            previous.updated_epoch_ms(),
-            previous.index().clone(),
-        )
-        .expect("workspace");
+        let mut previous = serde_json::to_value(manifest).expect("manifest JSON");
+        previous["indexVersion"] = serde_json::json!(super::CURRENT_INDEX_VERSION - 1);
+        if let Some(cache) = previous
+            .as_object_mut()
+            .expect("manifest")
+            .remove("modelCacheDir")
+        {
+            let reference = manifest
+                .index()
+                .descriptor()
+                .expect("index")
+                .default_embedding_model()
+                .model()
+                .reference();
+            previous["index"]["descriptor"]["embeddingConfigs"][reference]["cacheDir"] = cache;
+        }
         std::fs::write(
             home.join("manifest.json"),
             serde_json::to_vec(&previous).expect("previous manifest JSON"),
@@ -1336,6 +1407,133 @@ mod tests {
         );
         assert!(!layout.credentials_key_path().exists());
         models.close();
+    }
+
+    #[test]
+    fn every_embedding_provider_persists_model_cache_without_temporary_overrides() {
+        let models = ModelRuntimeManager::new();
+        for entry in crate::models::list_embedding_models() {
+            let config = if matches!(entry, crate::models::EmbeddingCatalogEntry::Qwen(_)) {
+                super::ModelConfig {
+                    api_key: Some("fixture-token".into()),
+                    endpoint: Some("http://127.0.0.1:9/v1/embeddings".into()),
+                    ..Default::default()
+                }
+            } else {
+                super::ModelConfig::default()
+            };
+            let model = models
+                .acquire(super::ModelRuntimeRequest::new(
+                    entry.reference(),
+                    config,
+                    None,
+                ))
+                .expect("catalog metadata without loading models");
+            assert_model_cache_persistence(&model);
+        }
+        for auth in ["none", "bearer"] {
+            let http = serde_json::from_value(serde_json::json!({
+                "model": "served-model", "dimension": 4, "maxInputTokens": 128, "auth": auth
+            }))
+            .expect("HTTP descriptor");
+            let model = models
+                .acquire(super::ModelRuntimeRequest::new(
+                    "http/fixture",
+                    super::ModelConfig {
+                        http: Some(http),
+                        api_key: (auth == "bearer").then(|| "fixture-token".into()),
+                        endpoint: Some("http://127.0.0.1:9/v1/embeddings".into()),
+                        ..Default::default()
+                    },
+                    None,
+                ))
+                .expect("HTTP metadata without loading models");
+            assert_model_cache_persistence(&model);
+        }
+        models.close();
+    }
+
+    fn assert_model_cache_persistence(model: &super::ModelRuntimeLease) {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let reference = model.info().model().reference();
+        let cache = directory.path().join("models");
+        let replacement = directory.path().join("replacement-models");
+        let mut workspace = None;
+        for (options, expected) in [
+            (IndexOptions::default(), None),
+            (
+                IndexOptions {
+                    runtime_model_cache: Some(directory.path().join("temporary-models")),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                IndexOptions {
+                    model_cache: Some(cache.clone()),
+                    ..Default::default()
+                },
+                Some(&cache),
+            ),
+            (IndexOptions::default(), Some(&cache)),
+            (
+                IndexOptions {
+                    runtime_model_cache: Some(directory.path().join("temporary-models")),
+                    ..Default::default()
+                },
+                Some(&cache),
+            ),
+            (
+                IndexOptions {
+                    model_cache: Some(replacement.clone()),
+                    ..Default::default()
+                },
+                Some(&replacement),
+            ),
+            (IndexOptions::default(), Some(&replacement)),
+        ] {
+            let descriptor = IndexDescriptor::new(
+                model.info().clone(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::from([(
+                    reference.clone(),
+                    super::ModelConfig {
+                        http: model.configured_http().cloned(),
+                        endpoint: model.configured_endpoint().map(str::to_owned),
+                        ..Default::default()
+                    },
+                )]),
+                false,
+                crate::domain::FTS_CONFIG,
+            )
+            .expect("index descriptor");
+            let updated = super::index_workspace_state(
+                directory.path(),
+                &layout,
+                workspace.as_ref(),
+                &options,
+                std::slice::from_ref(model),
+                &descriptor,
+                crate::domain::ScanRules::default(),
+                true,
+            )
+            .expect("workspace");
+            assert_eq!(
+                updated.model_cache_dir(),
+                expected.map(PathBuf::as_path),
+                "{reference}"
+            );
+            let saved = &updated
+                .index()
+                .descriptor()
+                .expect("index")
+                .embedding_configs()[&reference];
+            assert_eq!(saved.cache_dir, None, "cache is shared, not per model");
+            super::write_workspace_manifest(layout.manifest_path(), &updated).expect("write");
+            workspace = super::read_workspace_manifest(directory.path(), &layout).expect("read");
+            assert_eq!(workspace.as_ref(), Some(&updated));
+        }
     }
 
     #[test]
@@ -1851,6 +2049,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_cache_survives_switching_embedding_models() {
+        for legacy in [false, true] {
+            let directory = tempdir().expect("workspace");
+            let cache = directory.path().join("shared-models");
+            std::fs::create_dir(&cache).expect("cached models");
+            let service = WorkspaceIndexService::new();
+            let models = ModelRuntimeManager::new();
+            let mut options = empty_index_options(directory.path());
+            options.model_cache = Some(cache.clone());
+            service
+                .index(&models, options.clone())
+                .await
+                .expect("model A");
+            let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+            let mut active = super::read_workspace_manifest(directory.path(), &layout)
+                .expect("read")
+                .expect("workspace");
+            if legacy {
+                write_previous_index_version(layout.storage_dir(), &active);
+                active = crate::workspace::manifest::inspect_workspace_manifest(
+                    directory.path(),
+                    &layout,
+                )
+                .expect("legacy manifest")
+                .into_workspace(true)
+                .expect("rebuild settings")
+                .expect("workspace");
+            }
+            options.rebuild = true;
+            options.model_cache = None;
+            options.embedding.as_mut().expect("model B").reference =
+                "local/all-minilm-l6-v2".into();
+            let expected = std::env::var_os("ZVEC_GREP_MODEL_CACHE")
+                .map_or_else(|| cache.clone(), PathBuf::from);
+            assert_eq!(
+                super::index_model_cache(&serde_json::json!({}), Some(&active), &options),
+                Some(expected.clone()),
+            );
+            service
+                .index(&models, options)
+                .await
+                .expect("rebuild with model B");
+            let rebuilt = super::read_workspace_manifest(directory.path(), &layout)
+                .expect("read")
+                .expect("workspace");
+            assert_eq!(
+                super::index_model_cache(
+                    &serde_json::json!({}),
+                    Some(&rebuilt),
+                    &IndexOptions::default()
+                ),
+                Some(expected),
+            );
+            assert_eq!(rebuilt.model_cache_dir(), Some(cache.as_path()));
+            let serialized = serde_json::to_value(&rebuilt).expect("manifest");
+            assert_eq!(serialized["modelCacheDir"], serde_json::json!(cache));
+            assert!(!serialized.to_string().contains("\"cacheDir\""));
+            let cached_runtimes = models.snapshot().cached_runtimes;
+            let query = crate::pipelines::indexed_search::service::acquire_search_model(
+                &models,
+                &rebuilt,
+                &crate::api::context::ContextOptions::default(),
+            )
+            .expect("query uses shared cache");
+            assert_eq!(models.snapshot().cached_runtimes, cached_runtimes);
+            drop(query);
+            models.close();
+        }
+    }
+
+    #[tokio::test]
     async fn model_preferences_save_index_changes_but_not_query_overrides() {
         let directory = tempdir().expect("workspace");
         let service = WorkspaceIndexService::new();
@@ -1888,6 +2157,7 @@ mod tests {
                 .expect("indexed workspace")
                 .embedding_configs()
         );
+        assert_eq!(refreshed.model_cache_dir(), manifest.model_cache_dir());
         service
             .index(
                 &models,
@@ -1908,16 +2178,17 @@ mod tests {
             manifest.storage_generation()
         );
         let saved = serde_json::to_value(&configured).expect("manifest serialization");
+        assert_eq!(
+            saved["modelCacheDir"],
+            serde_json::json!(directory.path().join("saved-models"))
+        );
         for runtime in saved["index"]["descriptor"]["embeddingConfigs"]
             .as_object()
             .expect("runtimes")
             .values()
         {
             assert_eq!(runtime["device"], "auto");
-            assert_eq!(
-                runtime["cacheDir"],
-                serde_json::json!(directory.path().join("saved-models"))
-            );
+            assert!(runtime.get("cacheDir").is_none());
         }
         let replacement = directory.path().join("replacement-models");
         service
@@ -1938,15 +2209,7 @@ mod tests {
             replaced.storage_generation(),
             configured.storage_generation()
         );
-        for config in replaced
-            .index()
-            .descriptor()
-            .expect("index")
-            .embedding_configs()
-            .values()
-        {
-            assert_eq!(config.cache_dir.as_ref(), Some(&replacement));
-        }
+        assert_eq!(replaced.model_cache_dir(), Some(replacement.as_path()));
         models.close();
     }
 
@@ -3437,6 +3700,7 @@ mod tests {
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.scan.globs = Some(vec!["sources/**".into()]);
+        options.graph_indexing = Some(true);
         options.embedding.as_mut().expect("local model").cache_dir =
             Some(directory.path().join("model-cache"));
         let result = service
@@ -3466,7 +3730,7 @@ mod tests {
         .expect("manifest");
         let serialized = serde_json::to_value(&manifest).expect("manifest serialization");
         assert_eq!(
-            serialized["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"]["cacheDir"],
+            serialized["modelCacheDir"],
             serde_json::json!(directory.path().join("model-cache"))
         );
         let lease = crate::pipelines::indexed_search::service::acquire_search_model(
@@ -3506,12 +3770,13 @@ mod tests {
             .index(
                 &models,
                 IndexOptions {
+                    root: options.root.clone(),
                     rebuild: true,
-                    ..options
+                    ..IndexOptions::default()
                 },
             )
             .await
-            .expect("rebuild uses explicitly supplied configuration");
+            .expect("v2 rebuild inherits saved configuration without overrides");
         let rebuilt = super::read_workspace_manifest(
             layout.storage_dir().parent().expect("source root"),
             &layout,
@@ -3521,6 +3786,7 @@ mod tests {
         assert_eq!(rebuilt.index_version(), super::CURRENT_INDEX_VERSION);
         assert_eq!(rebuilt.source_root(), manifest.source_root());
         assert_eq!(rebuilt.scan(), manifest.scan());
+        assert!(graph_indexing_enabled(&rebuilt));
         assert_eq!(
             rebuilt
                 .index()
