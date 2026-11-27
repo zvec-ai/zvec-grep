@@ -203,11 +203,15 @@ async fn check_case(case: Case) {
 // Compare the declared fields without imposing result order. Consume each
 // actual item once, preserving exact definition and call-site counts.
 fn matches_expected(actual: &Value, expected: &Value) -> bool {
+    matches_field(actual, expected, false)
+}
+
+fn matches_field(actual: &Value, expected: &Value, file_path: bool) -> bool {
     match (actual, expected) {
         (Value::Object(actual), Value::Object(expected)) => expected.iter().all(|(key, wanted)| {
             actual
                 .get(key)
-                .is_some_and(|value| matches_expected(value, wanted))
+                .is_some_and(|value| matches_field(value, wanted, key == "filePath"))
         }),
         (Value::Array(actual), Value::Array(expected)) => {
             if actual.len() != expected.len() {
@@ -215,16 +219,21 @@ fn matches_expected(actual: &Value, expected: &Value) -> bool {
             }
             let mut used = vec![false; actual.len()];
             expected.iter().all(|wanted| {
-                let Some(index) = actual
-                    .iter()
-                    .enumerate()
-                    .position(|(index, value)| !used[index] && matches_expected(value, wanted))
-                else {
+                let Some(index) = actual.iter().enumerate().position(|(index, value)| {
+                    !used[index] && matches_field(value, wanted, file_path)
+                }) else {
                     return false;
                 };
                 used[index] = true;
                 true
             })
+        }
+        // A result spells workspace paths with the host's separators, because
+        // `native_path` keeps the payload native, while fixtures spell them the
+        // way a source file does. Fold the host separator so a path in a
+        // subdirectory compares the same on every platform.
+        (Value::String(actual), Value::String(expected)) if file_path => {
+            actual.replace(std::path::MAIN_SEPARATOR, "/") == expected.as_str()
         }
         _ => actual == expected,
     }
