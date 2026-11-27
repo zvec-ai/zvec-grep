@@ -216,10 +216,9 @@ CPU/GPU CI validates its specific driver/runtime environments, not every older
 driver. See NVIDIA's [minor-version compatibility caveats](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
 and [cubin compatibility rules](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/cuda-platform.html#binary-compatibility).
 
-The primary GGUF CUDA plugin remains directly under `lib/`; there is no new
-`lib/cuda13/` directory. Explicit CPU execution uses a selective CPU-plugin
-loader rather than scanning that directory for every backend, and ignores
-`GGML_BACKEND_PATH`. Optional GPU registration is separate from CPU initialization.
+The primary GGUF CUDA plugin lives directly under `lib/`. Explicit CPU execution
+loads only CPU plugins and ignores `GGML_BACKEND_PATH`. Optional GPU registration
+is separate from CPU initialization.
 Before scoring CPU variants, a device-independent ggml timer call resolves the
 core import. This keeps `ggml-base.dll` loaded for the process lifetime on
 Windows, including when temporary scoring handles are released; it does not
@@ -244,9 +243,8 @@ package retains the cross-platform `bin/zg.exe` native entry point so npm's
 Windows shim and Unix symlink both enter the executable directly.
 
 Self-contained native packages (macOS, Linux ARM64 and deliberate CPU-only
-builds) retain schema-1 checksums. The installer supports native schemas 1 and 3;
-the unpublished schema-2 format with mandatory CUDA npm dependencies is not
-supported. Plugin component checksums still use their own schema 1.
+builds) use schema-1 checksums. The installer supports native schemas 1 and 3.
+Plugin component checksums use their own schema 1.
 
 The published meta package supports Node.js 14.14 and newer for installation
 only, not for CLI execution. Online plugin transport requires npm 7+ and
