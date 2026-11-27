@@ -193,6 +193,68 @@ async function captureStderr(callback) {
   }
 }
 
+test("local embedding preserves the Metal residency opt-out with the native runtime", async (t) => {
+  for (const { name, platform, keepResidency, noResidency, expected } of [
+    { name: "Darwin defaults", platform: "darwin" },
+    {
+      name: "Darwin non-opt-out value",
+      platform: "darwin",
+      keepResidency: "0",
+    },
+    {
+      name: "Darwin explicit opt-out",
+      platform: "darwin",
+      keepResidency: "1",
+      expected: { metalSkipDisablingResidencySets: true },
+    },
+    {
+      name: "explicit native setting remains authoritative",
+      platform: "darwin",
+      keepResidency: "1",
+      noResidency: "1",
+      expected: { metalSkipDisablingResidencySets: true },
+    },
+    { name: "other platforms", platform: "linux", keepResidency: "1" },
+  ]) {
+    await t.test(name, async (t) => {
+      const modelFile = await ggufFile(t);
+      const setup = createDependencies(modelFile.path);
+      const originalPlatform = Object.getOwnPropertyDescriptor(
+        process,
+        "platform",
+      );
+      Object.defineProperty(process, "platform", { value: platform });
+      t.after(() =>
+        Object.defineProperty(process, "platform", originalPlatform),
+      );
+      for (const [key, value] of [
+        ["ZVEC_GREP_METAL_KEEP_RESIDENCY", keepResidency],
+        ["GGML_METAL_NO_RESIDENCY", noResidency],
+      ]) {
+        const original = process.env[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+        t.after(() => {
+          if (original === undefined) delete process.env[key];
+          else process.env[key] = original;
+        });
+      }
+      const model = new LlamaCppEmbeddingModel(
+        entry(),
+        { modelCacheDir: modelFile.root, device: "auto" },
+        setup.dependencies,
+      );
+      try {
+        await model.embed([{ kind: "text", text: "value" }]);
+        assert.deepEqual(setup.calls.llama[0].experimental, expected);
+        assert.equal(process.env.GGML_METAL_NO_RESIDENCY, noResidency);
+      } finally {
+        await model.dispose();
+      }
+    });
+  }
+});
+
 test("local embedding loads GGUF, formats and truncates text, parallelizes, caches, and disposes", async (t) => {
   const modelFile = await ggufFile(t);
   const setup = createDependencies(modelFile.path);
