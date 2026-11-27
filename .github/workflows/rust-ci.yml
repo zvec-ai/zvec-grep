@@ -216,7 +216,7 @@ jobs:
           cache-directories: |
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-sources/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-runtimes/
-            ${{ runner.os == 'Windows' && '~/AppData/Local' || runner.os == 'macOS' && '~/Library/Caches' || '~/.cache' }}/pdfium-rs/
+            ${{ runner.os == 'macOS' && '~/Library/Caches' || runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
@@ -237,14 +237,15 @@ jobs:
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/
             ${{ env.LLAMA_CPP_RUNTIME_CACHE }}/
+            ${{ runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
             rust/target/
             !rust/target/cuda-tests.tgz
             !rust/target/cuda-tests/
             !rust/target/cargo-cli.tgz
             !rust/target/cargo-cli/
-          key: rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-${{ needs.source.outputs.sha }}
+          key: rust-ci-v4-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-${{ needs.source.outputs.sha }}
           restore-keys: |
-            rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-
+            rust-ci-v4-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-
       - name: Restore real embedding and layout models
         uses: actions/cache@v5
         with:
@@ -261,7 +262,7 @@ jobs:
         run: |
           # Keep the shared log parent runner-owned: the container writes a
           # subdirectory, then later host-side tee writes sibling CPU logs.
-          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$ZVEC_GREP_MODEL_CACHE"
+          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs" "$ZVEC_GREP_MODEL_CACHE"
           docker build --platform linux/amd64 --file rust/scripts/cuda/cuda-builder.Dockerfile \
             --build-arg CUDA_IMAGE=ubuntu:24.04 \
             --build-arg RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust/rust-toolchain.toml)" \
@@ -270,6 +271,7 @@ jobs:
             --volume "${GITHUB_WORKSPACE}:/work" \
             --volume "$HOME/.cargo/registry:/root/.cargo/registry" \
             --volume "$HOME/.cargo/git:/root/.cargo/git" \
+            --volume "$HOME/.cache/pdfium-rs:/root/.cache/pdfium-rs" \
             --volume "$ZVEC_GREP_MODEL_CACHE:/model-cache" \
             --volume "$(command -v cargo-nextest):/usr/local/bin/cargo-nextest:ro" \
             --env CARGO_INCREMENTAL --env CARGO_PROFILE_DEV_DEBUG --env CARGO_PROFILE_TEST_DEBUG \
@@ -632,8 +634,8 @@ jobs:
         if: ${{ always() && matrix.cuda && runner.os == 'Linux' }}
         shell: bash
         run: |
-          mkdir -p target "$HOME/.cargo/registry" "$HOME/.cargo/git"
-          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          mkdir -p target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"
+          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"
           if [ -n "${ZVEC_GREP_MODEL_CACHE:-}" ]; then
             mkdir -p "$ZVEC_GREP_MODEL_CACHE"
             sudo chown -R "$(id -u):$(id -g)" "$ZVEC_GREP_MODEL_CACHE"
