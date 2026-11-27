@@ -1,5 +1,6 @@
 //! File scanning and matching backed by ripgrep's embedded `grep` crates.
 
+pub(crate) mod extracted;
 pub(crate) mod files;
 mod matches;
 pub(crate) mod types;
@@ -200,10 +201,25 @@ fn search_sync(
         "running embedded grep"
     );
     let count_truncated = AtomicBool::new(false);
+    let extracted_paths = Mutex::new(Vec::new());
     let mut lexical_matches = if worker_threads == 1 {
-        search_paths_serial(root, request, &matcher, &walker, &count_truncated)?
+        search_paths_serial(
+            root,
+            request,
+            &matcher,
+            &walker,
+            &count_truncated,
+            &extracted_paths,
+        )?
     } else {
-        search_paths_parallel(root, request, &matcher, &walker, &count_truncated)?
+        search_paths_parallel(
+            root,
+            request,
+            &matcher,
+            &walker,
+            &count_truncated,
+            &extracted_paths,
+        )?
     };
 
     check_cancelled(request)?;
@@ -240,6 +256,9 @@ fn search_sync(
         } else {
             LexicalCoverage::Exhaustive
         },
+        extracted_paths: extracted_paths
+            .into_inner()
+            .map_err(|_| EngineError::internal("Extracted source path collector was poisoned"))?,
         matches: lexical_matches,
         diagnostics: diagnostics(request, checked_paths, truncated),
     })
@@ -251,6 +270,7 @@ fn search_paths_serial(
     matcher: &RegexMatcher,
     walker: &WalkBuilder,
     count_truncated: &AtomicBool,
+    extracted_paths: &Mutex<Vec<PathBuf>>,
 ) -> Result<Vec<LexicalMatch>, EngineError> {
     let mut lexical_matches = Vec::new();
     let mut searcher = build_searcher(request);
@@ -267,6 +287,9 @@ fn search_paths_serial(
         }
         let path = entry.into_path();
         if !matches_modified_time(&path, request) {
+            continue;
+        }
+        if collect_extracted_source(&path, request, extracted_paths)? {
             continue;
         }
         search_file(
@@ -288,6 +311,7 @@ fn search_paths_parallel(
     matcher: &RegexMatcher,
     walker: &WalkBuilder,
     count_truncated: &AtomicBool,
+    extracted_paths: &Mutex<Vec<PathBuf>>,
 ) -> Result<Vec<LexicalMatch>, EngineError> {
     let lexical_matches = Mutex::new(Vec::new());
     let first_error = Mutex::new(None);
@@ -329,6 +353,11 @@ fn search_paths_parallel(
                 return WalkState::Continue;
             }
 
+            match collect_extracted_source(&path, request, extracted_paths) {
+                Ok(true) => return WalkState::Continue,
+                Ok(false) => {}
+                Err(error) => return stop_parallel_search(first_error, stopped, error),
+            }
             let mut file_matches = Vec::new();
             if let Err(error) = search_file(
                 root,
@@ -592,6 +621,29 @@ impl<R: io::Read> io::Read for CancellableReader<'_, R> {
     }
 }
 
+fn collect_extracted_source(
+    path: &Path,
+    request: &LexicalSearchRequest,
+    paths: &Mutex<Vec<PathBuf>>,
+) -> Result<bool, EngineError> {
+    if !request.defer_extracted_sources
+        || !path.file_name().is_some_and(|name| {
+            crate::domain::FileFormat::from_file_name(name)
+                .iter()
+                .any(|format| format.requires_extracted_search())
+        })
+    {
+        return Ok(false);
+    }
+    if request.options.max_file_size_bytes != Some(0) {
+        paths
+            .lock()
+            .map_err(|_| EngineError::internal("Extracted source path collector was poisoned"))?
+            .push(path.to_path_buf());
+    }
+    Ok(true)
+}
+
 fn search_file(
     root: &Path,
     path: &Path,
@@ -635,6 +687,7 @@ fn search_file(
             results: &mut collected,
             options: &request.options.matching,
             count: 0,
+            source_matches: None,
             count_truncated,
         };
         match decoded {
@@ -653,16 +706,17 @@ fn search_file(
     Ok(())
 }
 
-struct MatchSink<'a> {
+struct MatchSink<'a, 's> {
     signal: Option<&'a tokio_util::sync::CancellationToken>,
     matcher: &'a RegexMatcher,
     results: &'a mut LexicalMatchBuilder,
     options: &'a crate::api::context::options::RgOptions,
     count: usize,
+    source_matches: Option<&'a mut extracted::SourceMatches<'s>>,
     count_truncated: &'a AtomicBool,
 }
 
-impl Sink for MatchSink<'_> {
+impl Sink for MatchSink<'_, '_> {
     type Error = io::Error;
 
     fn matched(
@@ -721,9 +775,10 @@ impl Sink for MatchSink<'_> {
                 }
                 selections.push(found);
                 multiline
-                    && self.options.max_count.is_none_or(|maximum| {
-                        selections.len() <= maximum.saturating_sub(self.count)
-                    })
+                    && (self.source_matches.is_some()
+                        || self.options.max_count.is_none_or(|maximum| {
+                            selections.len() <= maximum.saturating_sub(self.count)
+                        }))
             })
             .map_err(io::Error::other)?;
         let text = std::str::from_utf8(bytes).ok();
@@ -742,7 +797,7 @@ impl Sink for MatchSink<'_> {
     }
 }
 
-impl MatchSink<'_> {
+impl MatchSink<'_, '_> {
     fn record(
         &mut self,
         text: Option<(&str, &[usize])>,
@@ -750,14 +805,6 @@ impl MatchSink<'_> {
         line_offset: usize,
         first: grep::matcher::Match,
     ) -> io::Result<bool> {
-        if self
-            .options
-            .max_count
-            .is_some_and(|maximum| self.count >= maximum)
-        {
-            self.count_truncated.store(true, Ordering::Relaxed);
-            return Ok(false);
-        }
         let Some((text, line_starts)) = text else {
             return Ok(true);
         };
@@ -800,6 +847,19 @@ impl MatchSink<'_> {
             crate::utils::text_range_from_offsets(text, line_starts, content_start, content_end)
                 .map_err(io::Error::other)?,
         )?;
+        if let Some(positions) = &mut self.source_matches
+            && !positions.observe(content_range)?
+        {
+            return Ok(true);
+        }
+        if self
+            .options
+            .max_count
+            .is_some_and(|maximum| self.count >= maximum)
+        {
+            self.count_truncated.store(true, Ordering::Relaxed);
+            return Ok(false);
+        }
         let match_ranges = self
             .match_ranges(text, line_starts, content_start, content_end)?
             .into_iter()
@@ -941,6 +1001,7 @@ fn empty_reply(
         root: root.to_path_buf(),
         coverage: LexicalCoverage::Exhaustive,
         matches: Vec::new(),
+        extracted_paths: Vec::new(),
         diagnostics: diagnostics(request, checked_paths, false),
     }
 }

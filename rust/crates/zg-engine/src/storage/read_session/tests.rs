@@ -154,7 +154,7 @@ fn write_unclosed_text(
     )
     .expect("file record");
     let content = Content::Text(text.into());
-    let entity_id = EntityId::new(id, &content, Range::Full).expect("entity ID");
+    let entity_id = EntityId::new(id, &content, &Range::Full).expect("entity ID");
     let fragment_id = FragmentId::new(&entity_id, 0);
     let entity = Entity::new(
         entity_id.clone(),

@@ -25,7 +25,7 @@ extern "C" fn release_environment() {
     drop(environment);
 }
 
-pub(super) fn initialize() -> Result<Environment, ModelError> {
+pub(crate) fn initialize() -> Result<Environment, ModelError> {
     initialize_runtime()?;
     ENVIRONMENT
         .lock()
@@ -71,7 +71,7 @@ fn initialize_runtime() -> Result<(), ModelError> {
 }
 
 #[cfg(feature = "cuda")]
-pub(super) fn retain_cuda_for_shutdown() -> Result<bool, ModelError> {
+pub(crate) fn retain_cuda_for_shutdown() -> Result<bool, ModelError> {
     initialize_runtime()?;
     let mut loaded = CUDA_SHUTDOWN_REGISTERED
         .lock()
@@ -156,5 +156,5 @@ fn runtime_path(
 }
 
 #[cfg(test)]
-#[path = "native_runtime_tests.rs"]
+#[path = "onnx_tests.rs"]
 mod tests;

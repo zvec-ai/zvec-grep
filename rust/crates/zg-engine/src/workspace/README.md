@@ -39,7 +39,10 @@ cached separately.
   Search, status, and automatic refresh checks use this same recovery path;
   unrelated storage failures remain errors.
 - **Compatibility.** `indexVersion` determines index compatibility.
-  Incompatible indexes must be rebuilt.
+  The current format is v3, with PDF source mappings. Incompatible indexes
+  require `zg --index --rebuild`. Rebuilding a readable v2 manifest preserves
+  embedding, scan and graph settings; explicit options override saved settings.
+  Unreadable settings must be supplied again.
 
 ## Read and write coordination
 
@@ -62,6 +65,11 @@ embedding again.
 ## Settings and relocation
 
 Explicit index device and model-cache options become workspace defaults.
+Omitted options preserve them. The model cache is shared by embedding and PDF
+layout models and survives changing embedding models during a rebuild;
+endpoints and credentials remain per model. Settings resolve from explicit
+options, environment, workspace defaults, global configuration, then backend
+defaults.
 Query overrides remain temporary and must not be written back by automatic
 refresh or retained by watchers. Moving a workspace may require overriding
 machine-specific preferences without rebuilding its content.

@@ -12,6 +12,8 @@ changed; the workflows own the full platform and hardware matrices.
 | Collected standalone archives | `node scripts/standalone-smoke.mjs --directory dist/standalone` on the matching platform; first [prepare or download the candidate](releasing.md). |
 | npm packaging or installation | `node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs` |
 | ONNX runtime deployment | `python3 scripts/test-prepare-onnxruntime.py` and `python3 scripts/test-check-glibc.py` |
+| PDF extraction or source mapping | `cargo test --locked -p zg-engine --lib pdf` and `cargo test --locked -p zg --test pdf_direct` |
+| PDFium packaging | `python3 scripts/test-prepare-pdfium.py`; use `python3 scripts/pdf-package-smoke.py --help` for the packaged PDF index/query checks. |
 | Documentation only | Check local links, heading anchors, command examples and `git diff --check`. |
 
 The JavaScript test harnesses require Node.js; the standalone installer itself
@@ -29,6 +31,10 @@ does not. On Windows use `python` instead of `python3`.
 Build jobs run on CPU hosts. GPU jobs execute the verified binaries or packages
 without rebuilding. GPU checks require real GGUF layer offload or ORT CUDA graph
 execution; successful startup or CPU fallback is not sufficient.
+
+Ordinary PR CI runs real PDF indexing and retrieval with PP-S on Linux,
+Windows and macOS, reusing the built executable and model cache. Release checks
+reuse the same [PDF smoke test](../../scripts/pdf-package-smoke.py) against packaged runtimes.
 
 Standalone checks cover installation, upgrades, recovery and uninstall with
 Node/npm absent from the installer's PATH. A retained candidate proves artifacts

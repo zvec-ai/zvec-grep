@@ -135,6 +135,7 @@ Leave them unset for your first build.
 | llama.cpp / ggml | Select the SDK matching the locked revision, target and features; cache under `$CARGO_HOME/llama-cpp-runtimes`. | `LLAMA_CPP_BUILD_MODE=prebuilt` requires an SDK; `source` compiles native source. `LLAMA_CPP_RUNTIME_CACHE` selects the cache; `LLAMA_CPP_OFFLINE=1` requires cached SDKs. |
 | zvec | The locked `zvec-rust` and `zvec-rust-build` dependencies acquire and stage the storage library. | Use the dependency's build diagnostics when SDK acquisition or source fallback fails. |
 | ONNX Runtime | The engine build script downloads, verifies and stages the pinned runtime, including for engine tests. | See the ONNX controls below. |
+| PDFium | LiteParse's bindings download the matching patched SDK; `zg-pdfium` stages its shared library and notices for parsing and rendering. | For offline builds, cache the SDK or set `PDFIUM_LIB_PATH` and `PDFIUM_INCLUDE_PATH` to its `lib/` and `include/` directories. Use LiteParse's matching SDK, not a stock PDFium build. |
 
 Custom native source configurations require additional tools, including CMake,
 Ninja and libclang, plus the relevant backend SDK. They are not needed for the

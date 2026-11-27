@@ -44,9 +44,10 @@ gate optional request fields; unsupported capabilities require an upgrade or
 restart instead of silently changing the request's meaning. An incompatible
 live daemon must not cause `auto` mode to silently execute directly.
 
-Daemon protocol v3 covers per-workspace FTS options and the Standard default
-for new indexes. A v2 daemon uses Jieba by default. The CLI rejects the old
-daemon before submitting an index request, even when FTS options are omitted.
+Daemon protocol v4 combines page-aware PDF results with per-workspace FTS
+options and the Standard default for new indexes. Mainline v2 and v3 daemons
+use Jieba by default. The CLI rejects either version before submitting an index
+request, even when FTS options are omitted.
 Run `zg --server on` with the same home and any required token file to replace
 it. The stdio bootstrap performs the same upgrade.
 

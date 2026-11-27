@@ -241,7 +241,7 @@ fn explicit_routes_continue_to_indexed_search() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": 2,
+            "indexVersion": 3,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" },
@@ -278,6 +278,65 @@ fn explicit_routes_continue_to_indexed_search() {
             "{stderr}"
         );
         assert!(!stderr.contains(TEXT_FALLBACK_NOTICE), "{stderr}");
+    }
+}
+
+#[test]
+fn path_lookup_uses_saved_scan_rules_without_reading_index_data() {
+    let root = tempfile::tempdir().expect("workspace");
+    let storage = root.path().join(".zvec-grep");
+    std::fs::create_dir(&storage).expect("storage");
+    std::fs::create_dir(root.path().join("excluded")).expect("excluded directory");
+    std::fs::write(
+        root.path().join("README.md"),
+        "The module missing.go is mentioned here.\n",
+    )
+    .expect("readme");
+    std::fs::write(root.path().join("existing.go"), "package example\n").expect("source");
+    std::fs::write(
+        root.path().join("excluded/missing.go"),
+        "package excluded\n",
+    )
+    .expect("excluded source");
+    std::fs::write(
+        root.path().join("excluded/notes.md"),
+        "missing.go must stay hidden\n",
+    )
+    .expect("excluded text");
+    for version in [2, 3, 999] {
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "sourceRoot": { "recordedPath": root.path().to_string_lossy() },
+            "scan": { "globs": [{ "pattern": "!excluded/**" }] },
+            "indexVersion": version,
+            "createdTime": 0,
+            "updatedTime": 0,
+            "index": { "state": "disabled" },
+        }))
+        .expect("manifest");
+        std::fs::write(storage.join("manifest.json"), &manifest).expect("save settings");
+        for mode in ["direct", "server", "auto"] {
+            let output = run(root.path(), &["existing.go", "--mode", mode]);
+            assert!(output.status.success(), "{version}/{mode}: {output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "#1 existing.go\n");
+            let output = run(root.path(), &["missing.go", "--mode", mode]);
+            assert!(output.status.success(), "{version}/{mode}: {output:?}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stdout.contains("README.md"), "{stdout}");
+            assert!(stdout.contains("The module missing.go"), "{stdout}");
+            assert!(!stdout.contains("excluded"), "{stdout}");
+            assert!(stderr.contains(TEXT_FALLBACK_NOTICE), "{stderr}");
+            assert!(!stderr.contains("INDEX_INCOMPATIBLE"), "{stderr}");
+            assert!(!stderr.contains("extraction index"), "{stderr}");
+        }
+        assert_eq!(
+            std::fs::read(storage.join("manifest.json")).expect("unchanged settings"),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read_dir(&storage).expect("only manifest").count(),
+            1
+        );
     }
 }
 

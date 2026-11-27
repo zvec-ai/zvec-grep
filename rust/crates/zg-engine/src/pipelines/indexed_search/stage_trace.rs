@@ -13,7 +13,8 @@ use super::{
 };
 use crate::{
     api::context::stage_trace::{
-        CandidateStages, ObservedEntity, RecallAttempt, StagePoolSizes, StageRecall, StageTrace,
+        CandidateStages, ObservedEntity, RecallAttempt, StagePoolSizes, StageRange, StageRecall,
+        StageTrace,
     },
     domain::{EntityId, FileId},
     storage::types::StorageSearchHit,
@@ -81,10 +82,13 @@ impl StageTraceCollector {
                 path,
                 file.entities
                     .into_iter()
-                    .map(|(id, range, searchable)| {
+                    .map(|entity| {
                         (
-                            id.as_str().to_owned(),
-                            ObservedEntity::new(Some(range), searchable),
+                            entity.id.as_str().to_owned(),
+                            ObservedEntity::new(
+                                Some(StageRange::from_location(entity.range, entity.source_bytes)),
+                                entity.searchable,
+                            ),
                         )
                     })
                     .collect(),
@@ -159,7 +163,10 @@ impl StageTraceCollector {
                 stages.loaded_rrf_rank = Some(position + 1);
                 // Static ranking preserves these positions except where code hits are reordered.
                 stages.static_rank = Some(position + 1);
-                stages.loaded_range = Some(hit.entity.source_range().into());
+                stages.loaded_range = Some(StageRange::from_location(
+                    hit.entity.source_range(),
+                    hit.entity.source_byte_offsets(),
+                ));
             }
         }
     }

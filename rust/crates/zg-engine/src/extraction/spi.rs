@@ -15,15 +15,23 @@ pub(crate) struct ImageSource {
     pub content: ImageContent,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SourceKind {
     Text,
+    Pdf,
     Image(FileFormat),
 }
 
 pub(crate) enum Source<'source> {
     Text(&'source TextSource),
     Image(&'source ImageSource),
+    Pdf(&'source super::pdf::PdfMarkdownSource),
+}
+
+impl<'source> From<&'source super::pdf::PdfMarkdownSource> for Source<'source> {
+    fn from(source: &'source super::pdf::PdfMarkdownSource) -> Self {
+        Self::Pdf(source)
+    }
 }
 
 impl<'source> From<&'source TextSource> for Source<'source> {
@@ -50,6 +58,8 @@ pub(crate) struct ChunkOptions {
 pub(crate) struct ExtractedEntity {
     pub index: usize,
     pub source_range: Range,
+    /// Optional provenance over the complete entity text, shared by its fragments.
+    pub source_map: Option<std::sync::Arc<crate::domain::PdfSourceMap>>,
     pub content: Content,
     pub metadata: Option<EntityMetadata>,
     pub fragments: Vec<ExtractedEntityFragment>,

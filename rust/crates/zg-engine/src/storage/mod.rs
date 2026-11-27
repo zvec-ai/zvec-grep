@@ -13,3 +13,6 @@ mod zvec;
 
 pub(crate) use store::{IndexStore, IndexedSourceFile, ReadView, ResolutionSnapshot};
 pub(crate) use zvec::validate_fts;
+
+#[cfg(test)]
+pub(crate) use store::IndexedSourceEntity;

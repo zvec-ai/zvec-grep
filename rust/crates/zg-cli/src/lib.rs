@@ -28,6 +28,7 @@ pub use management::{
 pub use messages::{MessageKind, write_error_message, write_error_report, write_message};
 pub use paths::output_path;
 pub use progress::IndexProgressDisplay;
+pub use render::rg_warnings;
 pub use setup::{
     IndexCancellation, ModelSelection, SetupAuthorizationDecision, prompt_setup_authorization,
     prompt_setup_credential,

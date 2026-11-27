@@ -16,6 +16,9 @@ pub(crate) struct Workspace {
     #[serde(skip)]
     layout: WorkspaceLayout,
     scan: ScanRules,
+    /// Shared artifact cache preference, independent of embedding selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_cache_dir: Option<PathBuf>,
     /// Compatibility version of the persisted index metadata and storage.
     index_version: u32,
     /// Identifies an index build for publication, recovery, and caching.
@@ -44,6 +47,7 @@ impl Workspace {
             source_root,
             layout,
             scan,
+            model_cache_dir: None,
             index_version,
             storage_generation,
             created_epoch_ms,
@@ -64,12 +68,14 @@ impl Workspace {
         created_epoch_ms: u64,
         updated_epoch_ms: u64,
         index: IndexState,
+        model_cache_dir: Option<PathBuf>,
     ) -> EngineResult<Self> {
         let changed = source_root.environment_changed();
         let mut workspace = Self {
             source_root,
             layout,
             scan,
+            model_cache_dir,
             index_version,
             storage_generation,
             created_epoch_ms,
@@ -78,6 +84,7 @@ impl Workspace {
         };
         workspace.validate()?;
         if changed {
+            workspace.model_cache_dir = None;
             workspace.index.invalidate_runtime_settings();
         }
         Ok(workspace)
@@ -122,6 +129,24 @@ impl Workspace {
 
     pub(crate) fn scan(&self) -> &ScanRules {
         &self.scan
+    }
+
+    pub(crate) fn model_cache_dir(&self) -> Option<&Path> {
+        self.model_cache_dir.as_deref().or_else(|| {
+            // Released manifests stored the preference on the current embedding
+            // model. Read that model's setting even when selecting a new model.
+            let index = self.index.descriptor()?;
+            index
+                .embedding_configs()
+                .get(&index.default_embedding_model().model().reference())?
+                .cache_dir
+                .as_deref()
+        })
+    }
+
+    pub(crate) fn with_model_cache_dir(mut self, cache_dir: Option<PathBuf>) -> Self {
+        self.model_cache_dir = cache_dir;
+        self
     }
 
     pub(crate) fn index_version(&self) -> u32 {
@@ -575,6 +600,7 @@ mod tests {
             serde_json::from_value(saved["createdTime"].clone()).expect("created time"),
             serde_json::from_value(saved["updatedTime"].clone()).expect("updated time"),
             serde_json::from_value(saved["index"].clone()).expect("index fields"),
+            serde_json::from_value(saved["modelCacheDir"].clone()).expect("model cache"),
         )
         .expect("workspace from manifest")
     }
