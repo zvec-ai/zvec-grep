@@ -277,6 +277,36 @@ fn server_on_uses_bracketed_global_ipv6_host_when_available() {
 }
 
 #[test]
+fn vector_index_default_applies_only_to_new_builds() {
+    let fixture = Fixture::new();
+    let descriptor = fixture.root.path().join(".zvec-grep/index/schema.json");
+    let stored_engine = || {
+        let schema: serde_json::Value =
+            serde_json::from_slice(&fs::read(&descriptor).expect("storage schema")).expect("JSON");
+        schema["vector_engine"]
+            .as_str()
+            .expect("stored engine")
+            .to_owned()
+    };
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "local/potion-code-16m-v2",
+    ]);
+    assert_eq!(stored_engine(), "zvec_hnsw_fp16_v1");
+    fixture.write_config(&json!({"version": 1, "defaults": {"vectorIndex": "diskann"}}));
+    fixture.success(&["--index", "--mode", "direct"]);
+    assert_eq!(stored_engine(), "zvec_hnsw_fp16_v1");
+    fixture.success(&["--index", "--mode", "direct", "--rebuild"]);
+    assert_eq!(stored_engine(), "zvec_diskann_fp16_v1");
+    fixture.write_config(&json!({"version": 1}));
+    fixture.success(&["--index", "--mode", "direct"]);
+    assert_eq!(stored_engine(), "zvec_diskann_fp16_v1");
+}
+
+#[test]
 fn config_merges_settings_and_index_consumes_model_defaults() {
     let fixture = Fixture::new();
     let output = fixture.success(&[

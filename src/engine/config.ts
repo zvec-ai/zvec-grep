@@ -7,6 +7,7 @@ import { acquireReadWriteLock } from "./utils/lock.js";
 export type ZvecGrepGlobalDefaults = {
   embedding?: string;
   modelCacheDir?: string;
+  vectorIndex?: "hnsw" | "diskann";
 };
 
 export type ZvecGrepProviderConfig = {
@@ -364,7 +365,12 @@ function parseDefaults(
   if (!isRecord(value)) {
     throw invalidConfig(path, "defaults must be an object");
   }
-  assertKnownFields(value, ["embedding", "modelCacheDir"], path, "defaults");
+  assertKnownFields(
+    value,
+    ["embedding", "modelCacheDir", "vectorIndex"],
+    path,
+    "defaults",
+  );
 
   const embedding = optionalNonEmptyString(
     value.embedding,
@@ -376,7 +382,16 @@ function parseDefaults(
     path,
     "defaults.modelCacheDir",
   );
+  const vectorIndex = value.vectorIndex;
+  if (
+    vectorIndex !== undefined &&
+    vectorIndex !== "hnsw" &&
+    vectorIndex !== "diskann"
+  ) {
+    throw invalidConfig(path, "defaults.vectorIndex must be hnsw or diskann");
+  }
   const defaults: ZvecGrepGlobalDefaults = {
+    ...(vectorIndex ? { vectorIndex } : {}),
     ...(embedding ? { embedding } : {}),
     ...(modelCacheDir ? { modelCacheDir } : {}),
   };

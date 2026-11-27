@@ -73,7 +73,7 @@ for the shared Direct, Server and MCP selection policy.
 
 ### Vector storage
 
-Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. See [index compatibility](src/workspace/README.md#key-conventions) for the current format and rebuild policy.
+Vector search defaults to native zvec HNSW. To build with DiskANN, set `defaults.vectorIndex` to `diskann` in `~/.zvec-grep/config.json`. Both engines use IEEE binary16 storage and narrow `f32` embeddings and query vectors at the native boundary. Compatible indexes keep their stored algorithm for queries and updates. Run `zg --index --rebuild` to apply the new selection to an existing workspace. See [index compatibility](src/workspace/README.md#key-conventions) for the format and rebuild policy.
 
 ### Embedding models
 

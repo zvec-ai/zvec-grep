@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,9 +7,215 @@ import {
   ZVecCollectionSchema,
   ZVecCreateAndOpen,
   ZVecDataType,
-} from "@zvec/zvec";
+  ZVecIndexType,
+} from "../../dist/engine/storage/native.js";
+import { updateGlobalConfig } from "../../dist/engine/config.js";
 import { createWorkspaceIndexStorage } from "../../dist/engine/storage/index.js";
 import { queryFileMetadataDocs } from "../../dist/engine/storage/zvec.js";
+
+function useTemporaryHome(t, path) {
+  const key = process.platform === "win32" ? "USERPROFILE" : "HOME";
+  const original = process.env[key];
+  process.env[key] = path;
+  t.after(() => {
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  });
+}
+
+test("default HNSW vectors persist, respect metadata filters, and follow replacement and deletion", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-diskann-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  useTemporaryHome(t, parent);
+  const options = storageOptions(parent);
+  const write = (storage, id, vector) => {
+    const file = fileInfo(id, parent, `${id}.ts`);
+    storage.replaceFile(file, [
+      {
+        fragment: {
+          id,
+          fileId: file.id,
+          range: {
+            kind: "text",
+            startLine: 1,
+            endLine: 1,
+            startOffset: 0,
+            endOffset: 6,
+          },
+          content: { kind: "text", text: "orchard" },
+        },
+        vector,
+      },
+    ]);
+  };
+  const original = createWorkspaceIndexStorage(options);
+  try {
+    write(original, "a", [1, 0]);
+    write(original, "b", [0, 1]);
+    assert.equal(original.searchVector([1, 0], 1)[0].fragment.id, "a");
+    assert.equal(
+      original.searchVector([1, 0], 1, { fileIds: ["b".repeat(64)] })[0]
+        .fragment.id,
+      "b",
+    );
+    assert.equal(original.searchVector([1, 0], 1, { fileIds: [] }).length, 0);
+    assert.equal(original.searchFts("orchard", 10).length, 2);
+    write(original, "a", [-1, 0]);
+    assert.equal(original.searchVector([1, 0], 1)[0].fragment.id, "b");
+    await original.finalizeWrites();
+    assert.equal(
+      original.collection.schema.vector("embedding").indexParams.indexType,
+      ZVecIndexType.HNSW,
+    );
+    assert.equal(
+      original.collection.schema.vector("embedding").dataType,
+      ZVecDataType.VECTOR_FP32,
+    );
+    original.deleteFile("b".repeat(64));
+    await original.finalizeWrites();
+  } finally {
+    original.close();
+  }
+  updateGlobalConfig({ defaults: { vectorIndex: "diskann" } });
+  const reader = createWorkspaceIndexStorage({ ...options, readOnly: true });
+  try {
+    assert.deepEqual(
+      reader.searchVector([-1, 0], 10).map((hit) => hit.fragment.id),
+      ["a"],
+    );
+    assert.equal(reader.searchFts("orchard", 10).length, 1);
+  } finally {
+    reader.close();
+  }
+  // Recreate the previous metadata-only collection in this temporary test index.
+  const indexPath = join(options.storagePath, "index.zvec");
+  await rm(indexPath, { recursive: true });
+  const legacy = ZVecCreateAndOpen(
+    indexPath,
+    new ZVecCollectionSchema({
+      name: "legacy",
+      fields: [{ name: "document_id", dataType: ZVecDataType.STRING }],
+    }),
+  );
+  legacy.closeSync();
+  for (const readOnly of [true, false]) {
+    assert.throws(
+      () => createWorkspaceIndexStorage({ ...options, readOnly }),
+      /rebuild/,
+    );
+  }
+});
+
+test("DiskANN sync keeps a partial segment searchable as Flat after reopen", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-native-diskann-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  useTemporaryHome(t, parent);
+  const options = storageOptions(parent);
+  updateGlobalConfig({ defaults: { vectorIndex: "diskann" } });
+  options.embedding.dimension = 32;
+  const file = fileInfo("a", parent, "vectors.ts");
+  let seed = 17;
+  const entries = Array.from({ length: 1024 }, (_, i) => ({
+    fragment: {
+      id: `vector-${i}`,
+      fileId: file.id,
+      range: {
+        kind: "text",
+        startLine: 1,
+        endLine: 1,
+        startOffset: 0,
+        endOffset: 6,
+      },
+      content: { kind: "text", text: "orchard" },
+    },
+    vector: Array.from({ length: 32 }, () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 2 ** 32 - 0.5;
+    }),
+  }));
+  const writer = createWorkspaceIndexStorage(options);
+  try {
+    writer.replaceFile(file, entries);
+    await writer.finalizeWrites();
+    assert.equal(writer.collection.stats.indexCompleteness.embedding, 0);
+  } finally {
+    writer.close();
+  }
+  updateGlobalConfig({ defaults: { vectorIndex: "hnsw" } });
+  const root = join(options.storagePath, "index.zvec");
+  const files = (await readdir(root, { recursive: true })).filter((path) =>
+    path.endsWith(".proxima"),
+  );
+  const segments = await Promise.all(
+    files.map((path) => readFile(join(root, path))),
+  );
+  assert.ok(segments.length > 0);
+  assert.ok(
+    segments.every((bytes) => !bytes.includes(Buffer.from("diskann.pq_data"))),
+  );
+  const reader = createWorkspaceIndexStorage({
+    storagePath: options.storagePath,
+    readOnly: true,
+  });
+  try {
+    assert.equal(reader.searchFts("orchard", 10).length, 10);
+    for (const entry of entries.slice(0, 20)) {
+      const hits = reader.searchVector(entry.vector, 10, {
+        fileIds: [file.id],
+      });
+      assert.equal(hits[0].fragment.id, entry.fragment.id);
+      assert.ok(hits[0].score > 0.99);
+    }
+  } finally {
+    reader.close();
+  }
+});
+
+test("zvec vector scores preserve larger-is-better semantics for each metric", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-diskann-scores-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  for (const [metric, expected] of [
+    ["cosine", 1],
+    ["dot_product", 2],
+    ["euclidean", -1],
+  ]) {
+    const options = storageOptions(join(parent, metric));
+    options.embedding.metric = metric;
+    const storage = createWorkspaceIndexStorage(options);
+    try {
+      const file = fileInfo("a", parent, "a.ts");
+      storage.replaceFile(
+        file,
+        [
+          [2, 0],
+          [0, 1],
+        ].map((vector, i) => ({
+          fragment: {
+            id: String(i),
+            fileId: file.id,
+            range: {
+              kind: "text",
+              startLine: 1,
+              endLine: 1,
+              startOffset: 0,
+              endOffset: 1,
+            },
+            content: { kind: "text", text: "x" },
+          },
+          vector,
+        })),
+      );
+      await storage.finalizeWrites();
+      const hits = storage.searchVector([1, 0], 2);
+      assert.equal(hits[0].fragment.id, "0");
+      assert.equal(hits[0].score, expected);
+      assert.ok(hits[0].score > hits[1].score);
+      assert.deepEqual(storage.searchVector([1, 0], 0), []);
+    } finally {
+      storage.close();
+    }
+  }
+});
 
 function doc(id) {
   return {

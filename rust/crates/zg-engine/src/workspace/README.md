@@ -39,8 +39,9 @@ cached separately.
   Search, status, and automatic refresh checks use this same recovery path;
   unrelated storage failures remain errors.
 - **Compatibility.** `indexVersion` determines index compatibility.
-  The current format is v3, with PDF source mappings. Incompatible indexes
-  require `zg --index --rebuild`. Rebuilding a readable v2 manifest preserves
+  The current format is v6, with PDF source mappings and a persisted vector engine.
+  Incompatible indexes require `zg --index --rebuild`. A rebuild can reuse
+  validated settings from a v2, v3 or v5 manifest. This preserves
   embedding, scan and graph settings; explicit options override saved settings.
   Unreadable settings must be supplied again.
 

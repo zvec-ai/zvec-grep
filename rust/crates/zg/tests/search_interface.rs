@@ -241,7 +241,7 @@ fn explicit_routes_continue_to_indexed_search() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": 3,
+            "indexVersion": 6,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" },
@@ -303,7 +303,7 @@ fn path_lookup_uses_saved_scan_rules_without_reading_index_data() {
         "missing.go must stay hidden\n",
     )
     .expect("excluded text");
-    for version in [2, 3, 999] {
+    for version in [2, 6, 999] {
         let manifest = serde_json::to_vec(&serde_json::json!({
             "sourceRoot": { "recordedPath": root.path().to_string_lossy() },
             "scan": { "globs": [{ "pattern": "!excluded/**" }] },

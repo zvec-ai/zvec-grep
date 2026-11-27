@@ -44,15 +44,36 @@ runs:
     # No Cargo build cache: callers run on pull_request events, so saved entries
     # stay in PR-scoped caches that other PRs never restore while each one
     # still costs about 400 MB of the repository cache quota.
+    - name: Isolate the candidate from the harness Cargo configuration
+      if: steps.rust-package-cache.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: candidate
+      run: git worktree add --detach "$RUNNER_TEMP/rust-candidate-source" "${{ steps.source.outputs.commit }}"
     - name: Install the candidate's pinned Rust toolchain
       if: steps.rust-package-cache.outputs.cache-hit != 'true'
       shell: bash
-      working-directory: candidate/rust
+      working-directory: ${{ runner.temp }}/rust-candidate-source/rust
       run: rustup show active-toolchain
+    - uses: actions/setup-python@v6
+      if: steps.rust-package-cache.outputs.cache-hit != 'true' && hashFiles('candidate/scripts/build-zvec.py') != ''
+      with:
+        python-version: "3.12"
+    - name: Build the candidate's pinned zvec runtime when required
+      if: steps.rust-package-cache.outputs.cache-hit != 'true' && hashFiles('candidate/scripts/build-zvec.py') != ''
+      shell: bash
+      working-directory: ${{ runner.temp }}/rust-candidate-source
+      run: |
+        python -m pip install cmake==3.30.0
+        npm ci --ignore-scripts
+        python scripts/build-zvec.py \
+          --source "$RUNNER_TEMP/candidate-zvec" \
+          --node-source "$RUNNER_TEMP/candidate-zvec-node" \
+          --build-dir "$RUNNER_TEMP/candidate-zvec-build" \
+          --jobs 2
     - name: Build and pack the selected Rust candidate
       if: steps.rust-package-cache.outputs.cache-hit != 'true'
       shell: bash
-      working-directory: candidate/rust
+      working-directory: ${{ runner.temp }}/rust-candidate-source/rust
       run: |
         npm ci
         npm run pack:local

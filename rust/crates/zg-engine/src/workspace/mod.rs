@@ -9,12 +9,10 @@ pub(crate) mod index;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 
-// Compatibility version of persisted index metadata and storage. Every manifest
-// declares it, including uninitialized and disabled workspaces without an index.
-// Incompatible formats require an explicit rebuild instead of an implicit upgrade.
-// Version 3 adds PDF provenance, including raw rectangles and page dimensions,
-// to canonical entity source ranges.
-pub(crate) const CURRENT_INDEX_VERSION: u32 = 3;
+// Every manifest declares its persisted index format, including unbuilt workspaces.
+// v6 combines the stored vector engine with PDF source mappings. Earlier main
+// and DiskANN branch formats require an explicit rebuild.
+pub(crate) const CURRENT_INDEX_VERSION: u32 = 6;
 
 /// Finds the nearest workspace at or above the given directory.
 pub(crate) fn find_nearest_workspace(

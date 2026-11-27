@@ -15,3 +15,12 @@ pub(crate) use store::{IndexStore, IndexedSourceFile, ReadView, ResolutionSnapsh
 
 #[cfg(test)]
 pub(crate) use store::IndexedSourceEntity;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum VectorEngine {
+    #[default]
+    #[serde(rename = "zvec_hnsw_fp16_v1")]
+    Hnsw,
+    #[serde(rename = "zvec_diskann_fp16_v1")]
+    Diskann,
+}

@@ -140,6 +140,12 @@ Use repeated `--hybrid`, `--fts`, or `--vector` flags for separate queries.
 Each nonempty result group starts with its original query and position, such as
 `-- query 2/2: timeout --`; colored output uses a dim rule and a magenta label.
 
+New workspaces use HNSW by default. To create a DiskANN index, set
+`defaults.vectorIndex` to `"diskann"` in `~/.zvec-grep/config.json`.
+Existing indexes keep their algorithm until you run `zg --index --rebuild`.
+DiskANN builds a graph for each 200,000 vector writes, including replacement
+versions. A partial segment stays writable and searchable with Flat across syncs.
+
 <a id="benchmarks"></a>
 
 ## 📊 Benchmarks

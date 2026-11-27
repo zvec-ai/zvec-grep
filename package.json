@@ -31,15 +31,17 @@
     "README.md",
     "README_CN.md",
     "LICENSE",
-    "dist"
+    "dist",
+    "native"
   ],
   "scripts": {
+    "build:native": "python3 scripts/build-zvec.py",
     "build": "tsc -p tsconfig.json",
     "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:coverage && npm run test:package",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "postbuild": "node --input-type=module --eval \"import { chmod } from 'node:fs/promises'; await chmod('dist/cli/index.js', 0o755);\"",
-    "prepack": "npm run build",
+    "prepack": "npm run build && node scripts/check-native.mjs",
     "test:coverage": "npm run build && c8 --all --include=dist/**/*.js --check-coverage --lines=80 --statements=80 --functions=80 --branches=80 npm run test:all",
     "test:all": "npm run test:run:root && npm run test:run:unit && npm run test:run:integration && npm run test:run:e2e",
     "test:e2e": "npm run build && npm run test:run:e2e",
@@ -55,6 +57,7 @@
     "test": "npm run build && npm run test:all"
   },
   "devDependencies": {
+    "node-addon-api": "8.8.0",
     "@eslint/js": "^10.0.1",
     "@modelcontextprotocol/conformance": "0.1.16",
     "@types/node": "^22.20.1",
@@ -73,7 +76,7 @@
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@vscode/ripgrep": "^1.18.0",
-    "@zvec/zvec": "^0.7.0",
+    "@zvec/zvec": "0.8.0",
     "jsonc-parser": "^3.3.1",
     "rotating-file-stream": "^3.2.10",
     "tree-sitter-wasms": "^0.1.13",

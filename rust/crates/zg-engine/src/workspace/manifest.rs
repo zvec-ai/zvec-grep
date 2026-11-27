@@ -127,9 +127,9 @@ pub(crate) fn inspect_workspace_manifest(
         }
     };
     if let Some(reason) = version_mismatch(version) {
-        // v2 has the same settings schema. Reuse only validated configuration
+        // These earlier formats share the settings schema. Reuse validated configuration
         // during an explicit rebuild; ordinary readers still reject its data.
-        let rebuild_settings = if version == 2 {
+        let rebuild_settings = if matches!(version, 2 | 3 | 5) {
             serde_json::from_slice::<ManifestFields>(&bytes)
                 .ok()
                 .and_then(|fields| fields.into_workspace(source_root, layout).ok())
@@ -1451,28 +1451,30 @@ mod tests {
     }
 
     #[test]
-    fn v2_settings_are_available_only_for_an_explicit_rebuild() {
+    fn compatible_settings_are_available_only_for_an_explicit_rebuild() {
         let directory = tempdir().expect("workspace");
         let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
         let manifest = fixture_manifest(&layout);
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
         let mut value = serde_json::to_value(&manifest).expect("JSON");
-        value["indexVersion"] = 2.into();
-        fs::write(layout.manifest_path(), value.to_string()).expect("v2 manifest");
-        assert_eq!(
-            read_workspace_manifest(directory.path(), &layout)
-                .expect_err("rebuild required")
-                .code(),
-            EngineError::INDEX_INCOMPATIBLE
-        );
-        let saved = inspect_workspace_manifest(directory.path(), &layout)
-            .expect("inspect")
-            .into_workspace(true)
-            .expect("read settings")
-            .expect("saved configuration");
-        assert_eq!(saved.index_version(), 2);
-        assert_eq!(saved.index(), manifest.index());
-        assert_eq!(saved.scan(), manifest.scan());
+        for version in [2_u32, 3, 5] {
+            value["indexVersion"] = version.into();
+            fs::write(layout.manifest_path(), value.to_string()).expect("legacy manifest");
+            assert_eq!(
+                read_workspace_manifest(directory.path(), &layout)
+                    .expect_err("rebuild required")
+                    .code(),
+                EngineError::INDEX_INCOMPATIBLE
+            );
+            let saved = inspect_workspace_manifest(directory.path(), &layout)
+                .expect("inspect")
+                .into_workspace(true)
+                .expect("read settings")
+                .expect("saved configuration");
+            assert_eq!(saved.index_version(), version);
+            assert_eq!(saved.index(), manifest.index());
+            assert_eq!(saved.scan(), manifest.scan());
+        }
         // Unknown versions and malformed settings must never be reused.
         for version in [1, super::super::CURRENT_INDEX_VERSION + 1] {
             value["indexVersion"] = version.into();

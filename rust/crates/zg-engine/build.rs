@@ -1,4 +1,16 @@
 fn main() {
+    let native = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../native");
+    println!("cargo:rerun-if-changed={}", native.display());
+    let expected = native
+        .canonicalize()
+        .expect("run npm run build:native first");
+    let selected = zvec_rust_build::lib_dir().expect("optimized zvec runtime is required");
+    assert_eq!(
+        selected.canonicalize().expect("native library directory"),
+        expected,
+        "zvec must use the source build from npm run build:native"
+    );
+    zvec_rust_build::configure();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
     let script = root.join("prepare-onnxruntime.py");
     println!("cargo:rerun-if-changed={}", script.display());

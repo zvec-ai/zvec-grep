@@ -11,7 +11,54 @@ use std::os::raw::{c_char, c_void};
 
 use half::f16;
 use zvec_rust::sys::{self, zvec_error_code_t};
-use zvec_rust::{Doc, Error, ErrorCode, Result, SearchQuery};
+use zvec_rust::{
+    Collection, DataType, Doc, Error, ErrorCode, IndexType, MetricType, Result, SearchQuery,
+};
+
+/// Native vector field properties not exposed by zvec-rust's schema reader.
+pub struct VectorFieldInfo {
+    pub data_type: DataType,
+    pub index_type: IndexType,
+    pub dimension: u32,
+    pub metric: MetricType,
+}
+
+/// Reads a vector field's storage and index configuration.
+///
+/// # Errors
+/// Returns an error if the field name contains NUL or zvec cannot read the schema.
+pub fn vector_field_info(collection: &Collection, name: &str) -> Result<Option<VectorFieldInfo>> {
+    let name = to_cstring(name)?;
+    let mut schema = std::ptr::null_mut();
+    // SAFETY: collection owns its live handle; zvec returns an owned schema copy.
+    check_error(unsafe { sys::zvec_collection_get_schema(collection.as_raw(), &raw mut schema) })?;
+    if schema.is_null() {
+        return Err(invalid_argument("zvec returned a null collection schema"));
+    }
+    // SAFETY: field and params are borrowed from schema and read before it is freed.
+    // Only the owned schema is destroyed; no borrowed pointer escapes this function.
+    let info = unsafe {
+        let field = sys::zvec_collection_schema_get_vector_field(schema, name.as_ptr());
+        let info = if field.is_null() {
+            None
+        } else {
+            let params = sys::zvec_field_schema_get_index_params(field);
+            Some(VectorFieldInfo {
+                data_type: DataType::from(sys::zvec_field_schema_get_data_type(field)),
+                index_type: IndexType::from(sys::zvec_field_schema_get_index_type(field)),
+                dimension: sys::zvec_field_schema_get_dimension(field),
+                metric: MetricType::from(if params.is_null() {
+                    0
+                } else {
+                    sys::zvec_index_params_get_metric_type(params)
+                }),
+            })
+        };
+        sys::zvec_collection_schema_destroy(schema);
+        info
+    };
+    Ok(info)
+}
 
 /// Writes an embedding as IEEE binary16 values.
 ///
@@ -166,12 +213,16 @@ fn check_error(code: zvec_error_code_t) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use zvec_rust::{Collection, CollectionSchema, DataType, Doc, IndexParams, MetricType};
+    use zvec_rust::{
+        Collection, CollectionOptions, CollectionSchema, DataType, DiskannQueryParams, Doc,
+        IndexParams, IndexType, MetricType,
+    };
 
-    use super::{add_embedding, decode_embedding, embedding_query, f16};
+    use super::{add_embedding, decode_embedding, embedding_query, f16, vector_field_info};
 
     fn initialize() {
-        zvec_rust::initialize(None).expect("initialize zvec");
+        static INITIALIZED: std::sync::Once = std::sync::Once::new();
+        INITIALIZED.call_once(|| zvec_rust::initialize(None).expect("initialize zvec"));
     }
 
     #[test]
@@ -240,5 +291,63 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(keys.first().map(String::as_str), Some("near"));
         assert!(keys.contains(&"mid".to_owned()));
+    }
+
+    #[test]
+    fn native_diskann_single_vector_reopens_with_pq_and_all_metrics() {
+        initialize();
+        for (metric, expected_score) in [
+            (MetricType::Cosine, 0.0),
+            (MetricType::Ip, 2.0),
+            (MetricType::L2, 1.0),
+        ] {
+            let directory = tempfile::tempdir().expect("collection directory");
+            let path = directory.path().join("vectors");
+            let schema = CollectionSchema::builder("vectors")
+                .add_vector_field(
+                    "embedding",
+                    DataType::VectorFp16,
+                    2,
+                    IndexParams::diskann(metric, 32, 100, 2).expect("DiskANN params"),
+                )
+                .build()
+                .expect("schema");
+            let collection =
+                Collection::create_and_open(path.to_str().expect("path"), &schema, None)
+                    .expect("create");
+            let mut doc = Doc::new().expect("document");
+            doc.set_pk("only");
+            add_embedding(&mut doc, "embedding", &[2.0, 0.0]).expect("FP16");
+            let result = collection.insert(&[&doc]).expect("insert");
+            assert_eq!(result.error_count, 0);
+            collection.optimize().expect("build DiskANN and PQ");
+            drop(collection);
+            let mut options = CollectionOptions::new().expect("options");
+            options.set_read_only(true).expect("read only");
+            let collection =
+                Collection::open(path.to_str().expect("path"), Some(&options)).expect("reopen");
+            let field = vector_field_info(&collection, "embedding")
+                .expect("schema")
+                .expect("field");
+            assert_eq!(field.data_type, DataType::VectorFp16);
+            assert_eq!(field.index_type, IndexType::Diskann);
+            assert_eq!(field.dimension, 2);
+            assert_eq!(field.metric, metric);
+            assert!(
+                vector_field_info(&collection, "missing")
+                    .expect("absent field")
+                    .is_none()
+            );
+            let mut query = embedding_query("embedding", &[1.0, 0.0], 10).expect("query");
+            query
+                .set_diskann_params(DiskannQueryParams::new(300))
+                .expect("query params");
+            let hits = collection
+                .query(&query)
+                .expect("query reopened single-node index");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].get_pk(), Some("only"));
+            assert!((hits[0].get_score() - expected_score).abs() < 0.001);
+        }
     }
 }

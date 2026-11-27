@@ -32,6 +32,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-runtime:
+    uses: ./.github/workflows/zvec-native.yml
+    permissions:
+      contents: read
+
   quality:
     name: quality
     runs-on: ubuntu-latest
@@ -55,9 +60,10 @@ jobs:
       - run: npm run build
 
   coverage:
+    needs: native-runtime
     name: coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -69,9 +75,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - uses: ./.github/actions/restore-zvec
       - run: npm run test:coverage
 
   package-candidate:
+    needs: native-runtime
     name: package candidate
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -86,6 +94,12 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: zvec-native-*
+          path: native/
+      - name: Verify all packaged platforms
+        run: node scripts/check-native.mjs --all
       - name: Build the candidate tarball
         run: |
           mkdir -p "$RUNNER_TEMP/package"
@@ -98,6 +112,7 @@ jobs:
           retention-days: 1
 
   unit:
+    needs: native-runtime
     name: unit (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -128,9 +143,11 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - uses: ./.github/actions/restore-zvec
       - run: npm run test:unit
 
   integration-e2e:
+    needs: native-runtime
     name: integration-e2e (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -157,10 +174,12 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - uses: ./.github/actions/restore-zvec
       - run: npm run test:integration
       - run: npm run test:e2e
 
   package-consumer:
+    needs: native-runtime
     name: package-consumer (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
@@ -179,6 +198,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - uses: ./.github/actions/restore-zvec
       - run: npm run test:package
 
   local-model-smoke:
@@ -222,6 +242,7 @@ jobs:
         run: npm run test:smoke:local-model
 
   isolated-install:
+    needs: native-runtime
     name: isolated-install
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -237,4 +258,5 @@ jobs:
           cache: npm
       - run: npm ci --install-strategy=nested
       - run: npm run build
+      - uses: ./.github/actions/restore-zvec
       - run: npm run test:unit

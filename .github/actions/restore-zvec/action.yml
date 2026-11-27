@@ -1,0 +1,24 @@
+name: Restore pinned zvec runtime
+description: Restore the current platform's optimized Node and Rust native runtime.
+runs:
+  using: composite
+  steps:
+    - id: platform
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: echo "target=$(node -p 'process.platform + "-" + process.arch')" >> "$GITHUB_OUTPUT"
+    - uses: actions/download-artifact@v8
+      with:
+        name: zvec-native-${{ steps.platform.outputs.target }}
+        path: native/
+    - name: Install the Linux asynchronous I/O runtime
+      if: runner.os == 'Linux'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libaio-dev
+    - name: Verify the restored native runtime
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: python scripts/build-zvec.py --verify
