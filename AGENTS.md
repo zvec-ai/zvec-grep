@@ -6,4 +6,4 @@ If you change any README, show the human reviewer the README diff and call out a
 
 # Direct and server modes
 
-Keep the behavior of direct and server modes consistent wherever possible. If they need to differ, explain the reason.
+Keep direct and server modes consistent. Allow their behavior to differ only when there is a sound reason, and explain why the difference is necessary.
