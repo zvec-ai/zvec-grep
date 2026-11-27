@@ -1,10 +1,13 @@
-//! R2 fixtures from `INDEX_FAILURES_DIAGNOSIS.md`.
 //!
 //! Content that carries no text used to fail the whole file: the workspace
 //! stayed `Failed` and the CLI exited non-zero on every run. Binary content is
 //! now skipped, keeping the rest of the index published and ready. A BOM that
 //! does not decode stays malformed text, so it still fails its own path and is
 //! retried on the next pass.
+//!
+//! A skipped path keeps the snapshot its bytes produced, so status and diffs
+//! answer for it: unchanged binary content is neither counted as a new file on
+//! every run nor left `Stale`, and rewriting the path as text indexes it again.
 
 #[allow(dead_code)] // Shared harness; each test binary uses a different subset.
 mod support;
@@ -15,8 +18,16 @@ use std::path::Path;
 use support::{EmbeddingServer, configure_remote_model, index_options, info_options};
 use zg_engine::{
     ZvecGrep,
-    api::index::{IndexOptions, result::SkippedFileReason},
+    api::{
+        index::{IndexOptions, result::SkippedFileReason},
+        info::result::IndexStatus,
+    },
 };
+
+/// A skip count map names every reason, so only the sum says "nothing skipped".
+fn skip_total(counts: &std::collections::BTreeMap<String, usize>) -> usize {
+    counts.values().sum()
+}
 
 /// A PNG signature: invalid UTF-8, and C0 bytes that mark binary content.
 const PNG_HEADER: [u8; 16] = [
@@ -46,7 +57,6 @@ async fn binary_content_is_skipped_while_a_malformed_bom_still_fails()
             ..index_options(root)
         })
         .await?;
-    engine.close();
 
     assert_eq!(
         result.files_failed, 1,
@@ -79,24 +89,38 @@ async fn binary_content_is_skipped_while_a_malformed_bom_still_fails()
         "{reasons:?}"
     );
 
-    // A failed path stays pending, so the retry reports it again while the
-    // binary sample is rediscovered as a skip.
+    // A failed path stays pending, so the retry reports it again. The binary
+    // path kept its record, so this run does not rediscover it as a new file.
     let engine = ZvecGrep::new();
     let second = engine
         .index(IndexOptions {
             ..index_options(root)
         })
         .await?;
-    engine.close();
     assert_eq!(second.files_failed, 1, "{second:?}");
     assert_eq!(second.failed_files[0].path, Path::new("bom.js"));
-    assert_eq!(second.skipped_counts.get("binary"), Some(&1));
+    assert_eq!(second.files_added, 0, "{second:?}");
+    assert!(second.skipped.is_empty(), "{second:?}");
+    assert_eq!(skip_total(&second.skipped_counts), 0, "{second:?}");
+
+    let info = engine.info(info_options(root)).await?;
+    let status = info.status.as_ref().expect("status was requested");
+    assert_eq!(status.files_added, 0, "{status:?}");
+    assert_eq!(status.files_pending, 1, "{status:?}");
+    assert_eq!(status.files_indexed, 1, "{status:?}");
+    assert_eq!(status.files_stored, 3, "{status:?}");
+    assert_eq!(
+        info.index_status(),
+        IndexStatus::Failed,
+        "only the malformed BOM keeps the workspace unready: {status:?}"
+    );
+    engine.close();
 
     Ok(())
 }
 
 #[tokio::test]
-async fn a_file_that_turns_binary_loses_its_entities_and_stays_skipped()
+async fn a_file_that_turns_binary_leaves_the_index_and_keeps_the_workspace_ready()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
@@ -115,7 +139,15 @@ async fn a_file_that_turns_binary_loses_its_entities_and_stays_skipped()
         .await?;
     assert_eq!(first.files_failed, 0, "{first:?}");
     assert!(first.entities_created > 0);
+    let indexed = engine.info(info_options(root)).await?;
+    assert_eq!(indexed.index_status(), IndexStatus::Ready);
+    assert_eq!(
+        indexed.status.expect("status was requested").files_indexed,
+        1
+    );
 
+    // The same path now holds binary content: its entities leave the index and
+    // the skip is reported by the pass that read the new bytes.
     fs::write(root.join("source.js"), PNG_HEADER)?;
     let second = engine
         .index(IndexOptions {
@@ -123,13 +155,50 @@ async fn a_file_that_turns_binary_loses_its_entities_and_stays_skipped()
         })
         .await?;
     assert_eq!(second.files_failed, 0, "{second:?}");
+    assert_eq!(second.files_modified, 1, "{second:?}");
     assert_eq!(second.skipped_counts.get("binary"), Some(&1));
 
-    // The skipped path kept no snapshot, so its old entities cannot be served.
-    let info = engine.info(info_options(root)).await?;
-    let status = info.status.expect("status was requested");
+    let after = engine.info(info_options(root)).await?;
+    let status = after.status.as_ref().expect("status was requested");
     assert_eq!(status.files_indexed, 0, "{status:?}");
     assert_eq!(status.entities_indexed, 0, "{status:?}");
+    assert_eq!(status.files_added, 0, "{status:?}");
+    assert_eq!(status.files_pending, 0, "{status:?}");
+    assert_eq!(
+        after.index_status(),
+        IndexStatus::Ready,
+        "a remembered skip must not leave the index stale: {status:?}"
+    );
+
+    // The stored snapshot answers for the unchanged bytes, so a later run has
+    // nothing to rediscover.
+    let third = engine
+        .index(IndexOptions {
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!(third.files_unchanged, 1, "{third:?}");
+    assert!(third.skipped.is_empty(), "{third:?}");
+    assert_eq!(skip_total(&third.skipped_counts), 0, "{third:?}");
+
+    // Rewriting the same path as text takes it back into the index.
+    fs::write(
+        root.join("source.js"),
+        "export function work() { return 3; }\n",
+    )?;
+    let fourth = engine
+        .index(IndexOptions {
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!(fourth.files_failed, 0, "{fourth:?}");
+    assert!(fourth.entities_created > 0, "{fourth:?}");
+
+    let restored = engine.info(info_options(root)).await?;
+    let status = restored.status.as_ref().expect("status was requested");
+    assert_eq!(status.files_indexed, 1, "{status:?}");
+    assert!(status.entities_indexed > 0, "{status:?}");
+    assert_eq!(restored.index_status(), IndexStatus::Ready, "{status:?}");
     engine.close();
 
     Ok(())

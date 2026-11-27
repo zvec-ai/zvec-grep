@@ -467,19 +467,29 @@ impl IndexStore {
         self.write(|state| replace_file(state, &file, &[], &[], &FileGraphResult::default()))
     }
 
+    /// Records that a path carries no indexable text, keeping the snapshot the
+    /// bytes produced so status and diffs stop counting it as new. Content the
+    /// path published before leaves with it.
+    pub(crate) fn mark_file_skipped(&self, file: &FileRecord) -> EngineResult<()> {
+        let mut file = file.clone();
+        file.set_index_status(FileIndexStatus::Skipped)?;
+        self.write(|state| replace_file(state, &file, &[], &[], &FileGraphResult::default()))
+    }
+
     pub(crate) fn update_file_snapshot(&self, file: &FileRecord) -> EngineResult<()> {
         self.write(|state| {
             let existing = state.files.fetch(&[file.id()])?.remove(&file.id());
             let valid = existing.as_ref().is_some_and(|existing| {
-                existing.index_status().is_indexed()
-                    && existing.index_status() == file.index_status()
+                let status = existing.index_status();
+                (status.is_indexed() || status.is_skipped())
+                    && status == file.index_status()
                     && existing.relative_path() == file.relative_path()
                     && existing.snapshot().size_bytes == file.snapshot().size_bytes
                     && existing.snapshot().content_hash == file.snapshot().content_hash
             });
             if !valid {
                 return Err(EngineError::invalid_argument(
-                    "snapshot refresh requires the same indexed file, content hash and size",
+                    "snapshot refresh requires the same file in the same state, content hash and size",
                 ));
             }
             let directories = state.directories.ensure(file.relative_path())?;

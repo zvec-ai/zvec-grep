@@ -262,9 +262,11 @@ pub(crate) async fn get_workspace_index_status(
         resolve_status_modifications(scanner, &control, &mut diff).await?;
     }
 
+    // A skipped path owes nothing: it was read, holds no text, and only its
+    // bytes changing brings it back.
     let pending_files = stored_files
         .iter()
-        .filter(|file| !file.index_status().is_indexed())
+        .filter(|file| file.index_status().needs_indexing())
         .collect::<Vec<_>>();
     let indexed_files = stored_files
         .iter()
@@ -556,7 +558,8 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
                 continue;
             }
             None => CandidateKind::Added,
-            Some(existing) if !existing.index_status().is_indexed() => CandidateKind::Pending,
+            // A skipped file answers for the bytes it read, exactly like a
+            // published one: identical bytes mean there is nothing to redo.
             Some(existing)
                 if scanned.detection_error.is_none()
                     && file_is_unchanged(existing, &scanned.discovered) =>
@@ -564,6 +567,7 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
                 plan.unchanged += 1;
                 continue;
             }
+            Some(existing) if existing.index_status().needs_indexing() => CandidateKind::Pending,
             Some(_) => CandidateKind::Modified,
         };
         plan.increment(kind);
@@ -580,7 +584,8 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
 }
 
 fn file_is_unchanged(existing: &FileRecord, discovered: &DiscoveredFile) -> bool {
-    existing.index_status().is_indexed()
+    let status = existing.index_status();
+    (status.is_indexed() || status.is_skipped())
         && existing.snapshot().modified_epoch_ms.is_some()
         && existing.snapshot().size_bytes == discovered.size_bytes
         && existing.snapshot().modified_epoch_ms == discovered.modified_epoch_ms
@@ -742,12 +747,11 @@ async fn index_candidates_inner<'context>(
             }
             Ok(PreparedCandidate::File(prepared)) => *prepared,
             Ok(PreparedCandidate::Skipped { file, reason }) => {
-                // A path with no indexable text keeps no entry: drop any
-                // previous snapshot so stale entities cannot be served, then
-                // count the skip without failing the workspace.
-                if candidate.existing.is_some() {
-                    context.storage.delete_file(file.id())?;
-                }
+                // The path keeps the snapshot its bytes produced but no
+                // content: entities it published before leave with the write,
+                // and status and diffs answer for it until its bytes change
+                // instead of counting it as a new file on every run.
+                record_file_skipped(context.storage, &file)?;
                 note_skipped(&mut stats, context.workspace, &file, reason);
                 report_indexing(
                     context,
@@ -1423,6 +1427,17 @@ fn skipped_candidate(file: FileRecord) -> PreparedCandidate {
         file,
         reason: SkippedFileReason::Binary,
     }
+}
+
+/// Keeps a skipped path in the index as a record with no content, so the next
+/// status scan and diff see a file they already decided about.
+fn record_file_skipped(storage: &dyn IndexStorage, file: &FileRecord) -> Result<(), EngineError> {
+    storage.mark_file_skipped(file).map_err(|error| {
+        EngineError::storage_failure(format!(
+            "record skip for {}: {error}",
+            file.relative_path().display()
+        ))
+    })
 }
 
 /// Counts a path whose bytes carry no indexable text. Skipped paths never
@@ -2507,6 +2522,7 @@ fn build_index_result(
 ) -> IndexResult {
     let first = &passes[0];
     let final_pass = passes.last().expect("an index pass is always present");
+    let (skipped, skipped_counts) = merge_skip_diagnostics(passes);
     IndexResult {
         files_scanned: first.files_scanned,
         files_added: passes.iter().map(|pass| pass.diff.added).sum(),
@@ -2529,9 +2545,29 @@ fn build_index_result(
         entities_created: passes.iter().map(|pass| pass.stats.entities_created).sum(),
         duration_micros: duration.as_micros().try_into().unwrap_or(u64::MAX),
         timings: timings.entries,
-        skipped: first.skipped.clone(),
-        skipped_counts: first.skipped_counts.clone(),
+        skipped,
+        skipped_counts,
     }
+}
+
+/// Folds the skip diagnostics of every pass into the final result. A retry
+/// pass reads the bytes a failed path holds *now*, so a file that turned
+/// binary after the first read is only reported there; dropping its pass would
+/// clear the failure without naming the skip. Each pass reports paths the other
+/// cannot: a skipped path keeps no stored record, so it is never retried.
+fn merge_skip_diagnostics(
+    passes: &[IndexPassResult],
+) -> (Vec<SkippedFile>, std::collections::BTreeMap<String, usize>) {
+    let mut skipped = Vec::new();
+    let mut skipped_counts = std::collections::BTreeMap::new();
+    for pass in passes {
+        skipped.extend(pass.skipped.iter().cloned());
+        for (reason, count) in &pass.skipped_counts {
+            *skipped_counts.entry(reason.clone()).or_default() += count;
+        }
+    }
+    skipped.truncate(MAX_SKIPPED_FILE_SAMPLES);
+    (skipped, skipped_counts)
 }
 
 #[derive(Default)]
@@ -2753,6 +2789,152 @@ mod tests {
         );
         assert_eq!(assembled.nodes.len(), 1);
         assert_eq!(assembled.nodes[0].id, kept_id);
+    }
+
+    fn skipped_sample(path: &str, reason: SkippedFileReason) -> SkippedFile {
+        SkippedFile {
+            path: PathBuf::from(path),
+            reason,
+            size_bytes: Some(16),
+            limit_bytes: None,
+        }
+    }
+
+    #[test]
+    fn a_retry_pass_contributes_the_skips_it_discovers() {
+        // The path failed the first read, so the first pass named it as a
+        // failure and nothing else; by the retry its bytes hold binary content.
+        let first = IndexPassResult {
+            files_scanned: 2,
+            diff: DiffPlan::default(),
+            stats: IndexWriteStats {
+                files_failed: 1,
+                failed_files: vec![PathBuf::from("late.js")],
+                failed_reasons: vec!["read failed".to_owned()],
+                ..IndexWriteStats::default()
+            },
+            skipped: Vec::new(),
+            skipped_counts: std::collections::BTreeMap::default(),
+        };
+        let retry = IndexPassResult {
+            files_scanned: 1,
+            diff: DiffPlan::default(),
+            stats: IndexWriteStats::default(),
+            skipped: vec![skipped_sample(
+                "/workspace/late.js",
+                SkippedFileReason::Binary,
+            )],
+            skipped_counts: [("binary".to_owned(), 1)].into_iter().collect(),
+        };
+
+        let result =
+            build_index_result(&[first, retry], Duration::ZERO, TimingCollector::default());
+
+        assert_eq!(result.files_failed, 0, "the retry cleared the failure");
+        assert_eq!(result.skipped_counts.get("binary"), Some(&1), "{result:?}");
+        let samples = result
+            .skipped
+            .iter()
+            .map(|file| (file.path.clone(), file.reason))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples,
+            vec![(
+                PathBuf::from("/workspace/late.js"),
+                SkippedFileReason::Binary
+            )],
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn skip_diagnostics_accumulate_across_passes_within_the_sample_bound() {
+        let pass =
+            |reason: SkippedFileReason, count: usize, samples: Vec<SkippedFile>| IndexPassResult {
+                files_scanned: 0,
+                diff: DiffPlan::default(),
+                stats: IndexWriteStats::default(),
+                skipped: samples,
+                skipped_counts: [(skip_reason_key(reason).to_owned(), count)]
+                    .into_iter()
+                    .collect(),
+            };
+        let passes = vec![
+            pass(
+                SkippedFileReason::Binary,
+                3,
+                (0..MAX_SKIPPED_FILE_SAMPLES)
+                    .map(|index| {
+                        skipped_sample(
+                            &format!("/workspace/bin{index}.png"),
+                            SkippedFileReason::Binary,
+                        )
+                    })
+                    .collect(),
+            ),
+            pass(
+                SkippedFileReason::Empty,
+                1,
+                vec![skipped_sample(
+                    "/workspace/blank.rs",
+                    SkippedFileReason::Empty,
+                )],
+            ),
+        ];
+
+        let (skipped, counts) = merge_skip_diagnostics(&passes);
+
+        assert_eq!(counts.get("binary"), Some(&3));
+        assert_eq!(counts.get("empty"), Some(&1));
+        assert_eq!(skipped.len(), MAX_SKIPPED_FILE_SAMPLES);
+    }
+
+    fn scanned_bytes(path: &str, size_bytes: u64) -> ScannedFile {
+        ScannedFile {
+            id: Some(FileId::new(7)),
+            relative_path: SourcePath::new(path).expect("source path"),
+            formats: Some(vec![FileFormat::JavaScript]),
+            discovered: DiscoveredFile {
+                root: PathBuf::from("/workspace"),
+                relative_path: PathBuf::from(path),
+                size_bytes,
+                modified_epoch_ms: Some(1_000),
+                source_fingerprint: "fingerprint".to_owned(),
+            },
+            detection_error: None,
+        }
+    }
+
+    fn skipped_record(path: &str, size_bytes: u64) -> FileRecord {
+        FileRecord::new(
+            FileId::new(7),
+            SourcePath::new(path).expect("source path"),
+            FileSnapshot {
+                size_bytes,
+                modified_epoch_ms: Some(1_000),
+                content_hash: Some("content-hash".to_owned()),
+            },
+            FileIndexStatus::Skipped,
+        )
+        .expect("skipped record")
+    }
+
+    #[test]
+    fn a_skipped_record_answers_for_the_bytes_it_read() {
+        let stored = [skipped_record("binary.js", 16)];
+
+        let plan = compute_diff(vec![scanned_bytes("binary.js", 16)], &stored);
+        assert_eq!(plan.unchanged, 1);
+        assert_eq!(plan.added, 0);
+        assert!(plan.candidates.is_empty());
+
+        // New bytes mean the skip no longer describes the file, so the path
+        // comes back as work for the next pass.
+        let plan = compute_diff(vec![scanned_bytes("binary.js", 17)], &stored);
+        assert_eq!(plan.modified, 1);
+        assert_eq!(plan.unchanged, 0);
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].kind, CandidateKind::Modified);
     }
 
     #[derive(Default)]
@@ -3339,6 +3521,29 @@ mod tests {
             stored.set_index_status(FileIndexStatus::Failed {
                 error: error.to_owned(),
             })?;
+            let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(existing) = files
+                .iter_mut()
+                .find(|existing| existing.id() == stored.id())
+            {
+                *existing = stored;
+            } else {
+                files.push(stored);
+            }
+            Ok(())
+        }
+
+        fn mark_file_skipped(&self, file: &FileRecord) -> EngineResult<()> {
+            self.graphs
+                .lock()
+                .expect("stored graphs")
+                .remove(&file.id());
+            self.entries
+                .lock()
+                .expect("stored entries")
+                .remove(&file.id());
+            let mut stored = file.clone();
+            stored.set_index_status(FileIndexStatus::Skipped)?;
             let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(existing) = files
                 .iter_mut()

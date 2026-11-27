@@ -402,14 +402,16 @@ pub(super) fn validate(
                 "file snapshots require pending references",
             ));
         }
-        if !names_something(reference) {
-            dropped += 1;
-            continue;
-        }
+        // Ownership and position are read before the name: a nameless row is
+        // dropped from the snapshot, not from the contract, so one that names
+        // another file's node or a line no source has still fails the write.
         if !owns(&reference.owner_id) || reference.line == 0 {
             return Err(Error::InvalidInput(
                 "pending refs require local ownership and one-based lines",
             ));
+        }
+        if !names_something(reference) {
+            dropped += 1;
         }
     }
     if dropped > 0 {

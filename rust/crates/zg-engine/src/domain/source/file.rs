@@ -65,9 +65,12 @@ impl FileRecord {
         snapshot: &FileSnapshot,
         index_status: &FileIndexStatus,
     ) -> EngineResult<()> {
-        if index_status.is_indexed() && snapshot.content_hash.is_none() {
+        // A skip answers for the bytes it inspected just as a published file
+        // does: without a hash every later scan would see a different file.
+        let answers_for_bytes = index_status.is_indexed() || index_status.is_skipped();
+        if answers_for_bytes && snapshot.content_hash.is_none() {
             return Err(EngineError::invalid_argument(format!(
-                "indexed files must have a content hash: {}",
+                "indexed and skipped files must have a content hash: {}",
                 relative_path.display()
             )));
         }
@@ -108,6 +111,10 @@ pub(crate) enum FileIndexStatus {
         indexed_epoch_ms: u64,
         entity_count: u64,
     },
+    /// The path was read and its bytes carry no indexable text. Keeping the
+    /// snapshot makes the decision answer for later status scans and diffs,
+    /// which otherwise count the path as new on every run.
+    Skipped,
     Deleting,
     Failed {
         error: String,
@@ -119,26 +126,39 @@ impl FileIndexStatus {
         self.indexed_epoch_ms().is_some()
     }
 
+    pub(crate) const fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped)
+    }
+
+    /// Whether a pass still owes this path work, as opposed to a file that is
+    /// published or one that was read and left out for good.
+    pub(crate) const fn needs_indexing(&self) -> bool {
+        matches!(
+            self,
+            Self::NotIndexed | Self::Deleting | Self::Failed { .. }
+        )
+    }
+
     pub(crate) const fn indexed_epoch_ms(&self) -> Option<u64> {
         match self {
             Self::Indexed {
                 indexed_epoch_ms, ..
             } => Some(*indexed_epoch_ms),
-            Self::NotIndexed | Self::Deleting | Self::Failed { .. } => None,
+            Self::NotIndexed | Self::Skipped | Self::Deleting | Self::Failed { .. } => None,
         }
     }
 
     pub(crate) const fn entity_count(&self) -> u64 {
         match self {
             Self::Indexed { entity_count, .. } => *entity_count,
-            Self::NotIndexed | Self::Deleting | Self::Failed { .. } => 0,
+            Self::NotIndexed | Self::Skipped | Self::Deleting | Self::Failed { .. } => 0,
         }
     }
 
     pub(crate) fn error(&self) -> Option<&str> {
         match self {
             Self::Failed { error } => Some(error),
-            Self::NotIndexed | Self::Indexed { .. } | Self::Deleting => None,
+            Self::NotIndexed | Self::Indexed { .. } | Self::Skipped | Self::Deleting => None,
         }
     }
 }
