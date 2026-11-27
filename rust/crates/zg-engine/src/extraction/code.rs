@@ -31,6 +31,16 @@ use super::{
 const DEFAULT_CODE_CHUNK_CHARS: usize = 3_600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS: usize = 540;
 const COMPONENT_CODE_FORMATS: [FileFormat; 2] = [FileFormat::Vue, FileFormat::Svelte];
+/// Deepest nesting the walk and the graph scans follow before a file answers as
+/// plain text.
+///
+/// Every pass below recurses once per level of the syntax tree, so the bound is
+/// set for the smallest stack the pass runs on — a daemon's blocking worker
+/// (2 MiB) rather than the CLI's main thread (8 MiB) — with room to spare.
+/// Sources written by hand nest an order of magnitude less; the depth shows up
+/// in generated code, where the alternative is an abort that takes the whole
+/// index down instead of one file's graph.
+const MAX_TREE_DEPTH: usize = 256;
 
 pub(super) fn extract_for_indexing(
     source: &TextSource,
@@ -107,6 +117,14 @@ fn extract_code(
     let Some(tree) = parser.parse(&source.text, None) else {
         return Ok(fallback_output(source, max_chars, overlap_chars));
     };
+    // The scan and the walk that follow recurse once per level of this tree,
+    // and a generated file can nest deeper than the stack the pass runs on. The
+    // depth is read without recursion, before either pass starts, so a tree
+    // neither of them can bound answers as plain text in both graph settings:
+    // the file stays searchable and no abort ends the whole index.
+    if tree_depth(&tree) > MAX_TREE_DEPTH {
+        return Ok(fallback_output(source, max_chars, overlap_chars));
+    }
     let bytes = source.text.as_bytes();
     let mut entities = Vec::new();
     // The walk buffers containment edges and name references; the post-walk
@@ -157,6 +175,33 @@ fn extract_code(
         code_format,
         (max_chars, overlap_chars),
     ))
+}
+
+/// Deepest nesting one parsed tree holds, read with a cursor rather than a
+/// recursive descent: the measurement decides whether the recursive passes
+/// below can run, so it must hold for any depth the parser produced.
+fn tree_depth(tree: &tree_sitter::Tree) -> usize {
+    let mut cursor = tree.walk();
+    let mut depth = 0;
+    let mut deepest = 0;
+    loop {
+        if cursor.goto_first_child() {
+            depth += 1;
+            deepest = deepest.max(depth);
+            continue;
+        }
+        // A leaf: take the next sibling, or climb until one exists. Reaching
+        // the root without one ends the traversal.
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return deepest;
+            }
+            depth -= 1;
+        }
+    }
 }
 
 /// Turns the walked entities into what retrieval indexes and the resolver
@@ -4235,5 +4280,82 @@ public class Service {
         let fragments = extract(&member, ChunkOptions::default()).expect("py member extraction");
         // The leading receiver is excluded; class members are not importable.
         assert_eq!(code_fields(named(&fragments, "fetch")), (Some(1), false));
+    }
+
+    /// One function whose body nests `depth` blocks, each holding the next, so
+    /// the syntax tree grows with the argument.
+    fn nested_blocks(depth: usize) -> String {
+        let mut text = String::from("fn deep() {\n");
+        for _ in 0..depth {
+            text.push_str("    if flag { ");
+        }
+        text.push_str("let leaf = 1;");
+        for _ in 0..depth {
+            text.push_str(" }");
+        }
+        text.push_str("\n}\n");
+        text
+    }
+
+    #[test]
+    fn a_tree_deeper_than_the_walk_bound_answers_as_plain_text() {
+        // Generated sources nest far past what the walk and the graph scans can
+        // follow; walking this one used to abort the whole index.
+        let source = test_source(FileFormat::Rust, "generated.rs", &nested_blocks(8_000));
+        let indexed = extract_for_indexing(&source, ChunkOptions::default()).expect("extraction");
+        let searched = crate::extraction::extract_without_graph(&source, ChunkOptions::default())
+            .expect("graph-free extraction");
+        for (setting, output) in [("indexing", &indexed), ("search", &searched)] {
+            assert!(
+                output.graph.is_none(),
+                "{setting}: a tree this deep carries no graph"
+            );
+            assert!(
+                !output.fragments.is_empty(),
+                "{setting}: the text must stay searchable"
+            );
+            for fragment in &output.fragments {
+                assert!(
+                    test_metadata(fragment).is_none(),
+                    "{setting}: plain text carries no entity metadata"
+                );
+            }
+        }
+        assert_eq!(
+            indexed.fragments.len(),
+            searched.fragments.len(),
+            "the entity set must not depend on the graph setting"
+        );
+        let text: String = indexed
+            .fragments
+            .iter()
+            .filter_map(|fragment| match test_content(fragment) {
+                Content::Code(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.contains("let leaf"),
+            "the source text survives the fallback"
+        );
+    }
+
+    #[test]
+    fn a_tree_within_the_walk_bound_still_names_its_entities() {
+        // Hand-written nesting stays well under the bound, and the guard must
+        // leave ordinary files with their named entities and their graph.
+        let source = test_source(FileFormat::Rust, "nested.rs", &nested_blocks(40));
+        let output = extract_for_indexing(&source, ChunkOptions::default()).expect("extraction");
+        assert!(
+            matches!(
+                test_metadata(named(&output.fragments, "deep")),
+                Some(EntityMetadata::Code(_))
+            ),
+            "an ordinary tree keeps its code metadata"
+        );
+        assert!(
+            output.graph.is_some(),
+            "an ordinary tree still builds its graph"
+        );
     }
 }
