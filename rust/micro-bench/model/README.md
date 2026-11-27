@@ -222,7 +222,7 @@ baseline profile and adequate resource sampling. Unavailable metrics stay N/A.
 Schema 5 uses new result directories. Do not rewrite or resume historical v3/v4
 datasets under this protocol. Execution diagnostics and batching profile fields
 are additive to schema 5; older schema 5 records without them remain readable.
-The new policy/source fingerprint still requires a fresh experiment directory.
+Use a fresh experiment directory when the policy or source fingerprint changes.
 
 ## Single-table output
 
@@ -289,9 +289,8 @@ including admission. `session_initializations` counts
 native Session creations; `pool_fallbacks` counts successful whole-pool GPU-to-CPU
 transitions. Neither should increase during a steady measured phase.
 
-Historical main records without execution diagnostics remain readable. Intermediate
-PR reports use their archived source snapshot or the harness at their recorded
-commit; the current harness validates only the final execution format.
+To validate archived reports with an older execution format, use the harness
+from the recorded commit.
 
 ## Optional mixed MiniLM regression
 

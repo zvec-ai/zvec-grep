@@ -14,7 +14,10 @@ These instructions apply to `zg-engine/src/models/**`.
 ## Layout
 
 - `mod.rs`: module declarations and deliberate crate-private re-exports only.
-- `spi.rs`: backend-neutral embedding contracts and request-scoped options.
+- `spi/`: backend-neutral model contracts and request-scoped options.
+  `mod.rs` only declares and re-exports modules; `embedding.rs` and `layout.rs`
+  own their respective interfaces and input/output types. Keep concrete models,
+  PDF parsing, and download logic out of these contracts.
 - `error.rs`: structured model failures and conversion to engine errors.
 - `catalog/`: immutable model metadata and reference resolution. Keep backend
   execution and network access out of the catalog.
@@ -25,6 +28,8 @@ These instructions apply to `zg-engine/src/models/**`.
   `*/tests.rs`.
 - `backends/factory.rs`: the only switch that maps catalog entries to concrete
   backend implementations.
+- `backends/pp_doclayout/`: implements the layout contract; extraction calls it
+  through a runtime lease, never through concrete backend types.
 - `runtime/`: process-level model reuse, leases, concurrency admission, shared
   compute resources, and eviction. Pipelines must use runtime leases rather than
   concrete backends.
@@ -39,8 +44,16 @@ These instructions apply to `zg-engine/src/models/**`.
   own resources scoped to one cached runtime, but must honor the runtime-provided
   execution budget and must not create an independent process-global scheduler.
 - Preparation must be explicit, cancellable, and idempotent for one runtime.
-  Indexing invokes it only immediately before the first real embedding batch, so
-  empty or unchanged operations do not download or load a model.
+  Prepare embedding models immediately before the first real embedding batch
+  and layout models before the first page requiring detection, so empty or
+  unchanged operations do not download or load a model.
+- Layout inference reuses the shared compute runtime and ORT environment. Keep
+  PP-S admission at one operation per cached model unless explicitly changed;
+  embedding concurrency settings must not implicitly change layout concurrency.
+- PP-S currently uses a pinned Hugging Face ONNX export through the shared
+  artifact resolver. Add a ModelScope fallback only after verifying an identical
+  mirror: pin its revision and retain the same file size and SHA-256 hash.
+  Do not substitute a different model export as a mirror.
 - Preserve cancellation and progress through every layer, including artifact
   acquisition and backend initialization.
 - Use structured error metadata for retry and failure-scope decisions. Do not parse

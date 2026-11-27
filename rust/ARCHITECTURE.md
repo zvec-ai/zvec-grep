@@ -90,6 +90,7 @@ resources for the command's lifetime. Mode differences are recorded in
 - `zg-cli` and `zg`: argument parsing, terminal rendering, and binary lifecycle.
 - `zg-host-native`: native scanner and watcher implementations used by the engine.
 - `zg-llama-native`: native llama/ggml backend loading boundary.
+- `zg-pdfium`: shared PDFium loading for native PDF parsing and page rendering.
 - `zg-daemon`: resident process, HTTP endpoints, jobs, and stdio bootstrap.
 - `zg-daemon-protocol`: transport-only command, reply, and progress DTOs.
 - `zg-transport-mcp`: tool schemas, input validation, result presentation,

@@ -15,9 +15,9 @@ either or both of the following:
 CUDA components can carry their own inputs under
 `<target>/<component-suffix>/LICENSES/` and `SBOM.spdx.json`, for example
 `linux-x64-gnu/ort-cuda-part1/` or `win32-x64-msvc/ggml-cuda13/`.
-Any supplied SBOM should describe that package's actual payload (including fragment
-provenance and the original library where relevant), not an unchanged SBOM for
-the former monolithic package. See `platforms.json` for all component names.
+Each SBOM should describe the payload of its own package, including fragment
+provenance and the original library where relevant. See
+[`platforms.json`](../platforms.json) for component names.
 
 When preparing these documents, account for redistributed Rust dependencies,
 native SDKs, model runtimes, dictionary data, and their transitive components.

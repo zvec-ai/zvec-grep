@@ -127,7 +127,17 @@ fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
         "{help}"
     );
     assert!(
-        help.contains("including --rebuild without --embedding"),
+        help.contains("Rebuilds reuse readable stored settings"),
+        "{help}"
+    );
+    assert!(
+        help.contains(
+            "including v2 embedding, scan and graph configuration; explicit options override"
+        ),
+        "{help}"
+    );
+    assert!(
+        help.contains("If settings cannot be read, supply them again"),
         "{help}"
     );
     assert!(

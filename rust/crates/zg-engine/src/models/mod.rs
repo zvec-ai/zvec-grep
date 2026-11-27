@@ -1,4 +1,4 @@
-//! Private embedding model implementations matching the TypeScript engine.
+//! Private embedding and layout model contracts, runtimes, and implementations.
 
 // Model definitions and selection.
 mod catalog;
@@ -23,6 +23,7 @@ pub(crate) use runtime::{batch_concurrency, resolve_index_concurrency};
 pub(crate) use spi::{
     EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelProgressReporter,
 };
+pub(crate) use spi::{LayoutImage, LayoutKind, LayoutModelConfig, LayoutOptions, LayoutRegion};
 
 #[cfg(test)]
 mod tests;

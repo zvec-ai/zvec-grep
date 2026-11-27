@@ -15,6 +15,7 @@ use crate::{
 struct ManifestFields {
     source_root: SourceRoot,
     scan: ScanRules,
+    model_cache_dir: Option<PathBuf>,
     index_version: u32,
     storage_generation: Option<String>,
     created_time: u64,
@@ -38,6 +39,7 @@ impl ManifestFields {
             self.created_time,
             self.updated_time,
             self.index,
+            self.model_cache_dir,
         )
     }
 }
@@ -50,6 +52,7 @@ pub(crate) enum ManifestState {
         source_root: PathBuf,
         actual_version: Option<u32>,
         reason: String,
+        rebuild_settings: Option<Box<Workspace>>,
     },
 }
 
@@ -59,7 +62,9 @@ impl ManifestState {
         match self {
             Self::Missing => Ok(None),
             Self::Current(manifest) => Ok(Some(*manifest)),
-            Self::RebuildRequired { .. } if rebuild => Ok(None),
+            Self::RebuildRequired {
+                rebuild_settings, ..
+            } if rebuild => Ok(rebuild_settings.map(|workspace| *workspace)),
             Self::RebuildRequired {
                 source_root,
                 reason,
@@ -98,6 +103,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: None,
+                rebuild_settings: None,
                 reason: format!(
                     "workspace index '{}' has no manifest",
                     layout.index_dir().display(),
@@ -112,6 +118,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: None,
+                rebuild_settings: None,
                 reason: format!(
                     "invalid workspace manifest '{}': {error}",
                     layout.manifest_path().display()
@@ -120,9 +127,20 @@ pub(crate) fn inspect_workspace_manifest(
         }
     };
     if let Some(reason) = version_mismatch(version) {
+        // v2 has the same settings schema. Reuse only validated configuration
+        // during an explicit rebuild; ordinary readers still reject its data.
+        let rebuild_settings = if version == 2 {
+            serde_json::from_slice::<ManifestFields>(&bytes)
+                .ok()
+                .and_then(|fields| fields.into_workspace(source_root, layout).ok())
+                .map(Box::new)
+        } else {
+            None
+        };
         return Ok(ManifestState::RebuildRequired {
             source_root: source_root.to_path_buf(),
             actual_version: Some(version),
+            rebuild_settings,
             reason: format!(
                 "workspace manifest '{}': {reason}",
                 layout.manifest_path().display()
@@ -136,6 +154,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: Some(version),
+                rebuild_settings: None,
                 reason: format!(
                     "invalid workspace manifest '{}': {error}",
                     layout.manifest_path().display()
@@ -150,6 +169,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: Some(version),
+                rebuild_settings: None,
                 reason: format!(
                     "invalid workspace manifest '{}': {error}",
                     layout.manifest_path().display()
@@ -216,6 +236,30 @@ pub(crate) fn read_workspace_manifest(
     layout: &WorkspaceLayout,
 ) -> Result<Option<Workspace>, EngineError> {
     inspect_workspace_manifest(source_root, layout)?.into_workspace(false)
+}
+
+/// File enumeration needs scan settings, not a compatible index or its schema.
+/// Decode the original bytes to retain `ScanRules` validation and duplicate checks.
+pub(crate) fn read_workspace_scan(
+    layout: &WorkspaceLayout,
+) -> Result<Option<ScanRules>, EngineError> {
+    #[derive(Deserialize)]
+    struct ScanFields {
+        scan: ScanRules,
+    }
+
+    read_manifest_bytes(layout)?
+        .map(|bytes| {
+            serde_json::from_slice::<ScanFields>(&bytes)
+                .map(|fields| fields.scan)
+                .map_err(|error| {
+                    invalid_manifest(format!(
+                        "scan settings in '{}': {error}",
+                        layout.manifest_path().display()
+                    ))
+                })
+        })
+        .transpose()
 }
 
 pub(crate) fn write_workspace_manifest(
@@ -1174,6 +1218,7 @@ mod tests {
         .expect("workspace");
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
         let mut original = serde_json::to_value(&manifest).expect("JSON");
+        original["modelCacheDir"] = serde_json::json!(directory.path().join("shared-models"));
         let key = crate::domain::model::EncryptedApiKey {
             nonce: vec![1; 24],
             ciphertext: vec![2; 32],
@@ -1196,6 +1241,7 @@ mod tests {
                 .expect("load relocated metadata")
                 .expect("manifest");
             let descriptor = loaded.index().descriptor().expect("enabled index");
+            assert_eq!(loaded.model_cache_dir(), None);
             let config = &descriptor.embedding_configs()["local/minilm"];
             assert_eq!(config.device, None);
             assert_eq!(config.cache_dir, None);
@@ -1261,15 +1307,86 @@ mod tests {
             config.remove("cacheDir");
         }
         assert_eq!(serde_json::to_value(&restored).expect("JSON"), expected);
+        let expected_cache =
+            expected["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["cacheDir"]
+                .as_str()
+                .map(Path::new);
+        assert_eq!(restored.model_cache_dir(), expected_cache);
         manifest
             .index()
             .descriptor()
             .expect("index")
             .ensure_index_compatible(restored.index().descriptor().expect("index"))
             .expect("runtime preferences do not require rebuilding");
+        let shared_cache = directory.path().join("shared-models");
+        json["modelCacheDir"] = serde_json::json!(shared_cache);
+        let shared = decode_manifest(&json, manifest.layout()).expect("shared cache preference");
+        assert_eq!(
+            shared.model_cache_dir(),
+            expected_cache.map(|_| shared_cache.as_path())
+        );
+        manifest
+            .index()
+            .descriptor()
+            .expect("index")
+            .ensure_index_compatible(shared.index().descriptor().expect("index"))
+            .expect("shared cache does not change the stored vectors");
         json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["apiKey"] =
             serde_json::json!("plaintext-secret");
         assert!(decode_manifest(&json, manifest.layout()).is_err());
+    }
+
+    #[test]
+    fn scan_settings_are_independent_of_index_version_and_schema() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        assert_eq!(read_workspace_scan(&layout).expect("no manifest"), None);
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
+        for version in [2, super::super::CURRENT_INDEX_VERSION, 999] {
+            let mut value = serde_json::to_value(&manifest).expect("JSON");
+            value["indexVersion"] = version.into();
+            fs::write(layout.manifest_path(), value.to_string()).expect("manifest");
+            assert_eq!(
+                read_workspace_scan(&layout).expect("scan settings"),
+                Some(manifest.scan().clone())
+            );
+            if version != super::super::CURRENT_INDEX_VERSION {
+                assert_eq!(
+                    read_workspace_manifest(directory.path(), &layout)
+                        .expect_err("index readers still reject incompatible data")
+                        .code(),
+                    EngineError::INDEX_INCOMPATIBLE
+                );
+            }
+            value["index"] = serde_json::json!({"futureSchema": true});
+            fs::write(layout.manifest_path(), value.to_string()).expect("other index schema");
+            assert_eq!(
+                read_workspace_scan(&layout).expect("scan-only read"),
+                Some(manifest.scan().clone())
+            );
+        }
+        assert!(!layout.index_dir().exists());
+    }
+
+    #[test]
+    fn scan_settings_reject_missing_malformed_and_duplicate_fields() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        fs::create_dir(layout.storage_dir()).expect("storage");
+        for invalid in [
+            "{broken",
+            r#"{"indexVersion":2}"#,
+            r#"{"scan":null}"#,
+            r#"{"scan":{},"scan":{}}"#,
+            r#"{"scan":{"include_hidden":true,"include_hidden":false}}"#,
+            r#"{"scan":{"max_depth":-1}}"#,
+            r#"{"scan":{"included_formats":["unknown-format"]}}"#,
+            r#"{"scan":{"unknown_rule":true}}"#,
+        ] {
+            fs::write(layout.manifest_path(), invalid).expect("manifest");
+            assert!(read_workspace_scan(&layout).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -1283,7 +1400,9 @@ mod tests {
         let current = fixture_manifest(&layout);
         write_workspace_manifest(layout.manifest_path(), &current).expect("current manifest");
         let bytes = fs::read(layout.manifest_path()).expect("persisted manifest");
-        for version in [0, 1, 3, 4, 5, u32::MAX] {
+        for version in (0..super::super::CURRENT_INDEX_VERSION)
+            .chain([super::super::CURRENT_INDEX_VERSION + 1, u32::MAX])
+        {
             let mut unsupported = current.clone();
             unsupported = crate::domain::Workspace::new(
                 directory.path(),
@@ -1322,10 +1441,60 @@ mod tests {
             );
             let diagnostics = error.help().expect("version diagnostics");
             assert!(diagnostics.contains(&format!("unsupported index version {version}")));
-            assert!(diagnostics.contains("expected 2"));
+            assert!(diagnostics.contains(&format!(
+                "expected {}",
+                crate::workspace::CURRENT_INDEX_VERSION
+            )));
             assert!(diagnostics.contains("zg --index --rebuild"));
             fs::write(layout.manifest_path(), &bytes).expect("restore current manifest");
         }
+    }
+
+    #[test]
+    fn v2_settings_are_available_only_for_an_explicit_rebuild() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
+        let mut value = serde_json::to_value(&manifest).expect("JSON");
+        value["indexVersion"] = 2.into();
+        fs::write(layout.manifest_path(), value.to_string()).expect("v2 manifest");
+        assert_eq!(
+            read_workspace_manifest(directory.path(), &layout)
+                .expect_err("rebuild required")
+                .code(),
+            EngineError::INDEX_INCOMPATIBLE
+        );
+        let saved = inspect_workspace_manifest(directory.path(), &layout)
+            .expect("inspect")
+            .into_workspace(true)
+            .expect("read settings")
+            .expect("saved configuration");
+        assert_eq!(saved.index_version(), 2);
+        assert_eq!(saved.index(), manifest.index());
+        assert_eq!(saved.scan(), manifest.scan());
+        // Unknown versions and malformed settings must never be reused.
+        for version in [1, super::super::CURRENT_INDEX_VERSION + 1] {
+            value["indexVersion"] = version.into();
+            fs::write(layout.manifest_path(), value.to_string()).expect("unknown version");
+            assert!(
+                inspect_workspace_manifest(directory.path(), &layout)
+                    .expect("inspect")
+                    .into_workspace(true)
+                    .expect("rebuild")
+                    .is_none()
+            );
+        }
+        value["indexVersion"] = 2.into();
+        value["scan"] = serde_json::Value::Null;
+        fs::write(layout.manifest_path(), value.to_string()).expect("invalid settings");
+        assert!(
+            inspect_workspace_manifest(directory.path(), &layout)
+                .expect("inspect")
+                .into_workspace(true)
+                .expect("rebuild")
+                .is_none()
+        );
     }
 
     #[test]
