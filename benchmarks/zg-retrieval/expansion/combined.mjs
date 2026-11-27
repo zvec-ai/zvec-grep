@@ -118,6 +118,11 @@ async function checkPilot(name, report, candidateCommit) {
     for (const row of report.rows) {
       const task = pilot.lock.tasks.find((item) => item.id === row.task_id);
       assert.equal(row.query, task.query, `rewritten query ${row.task_id}`);
+      assert.equal(
+        row.evaluation_role,
+        task.evaluation_role,
+        "Changed query role",
+      );
       assert.deepEqual(
         row.targets,
         targetsForTask(pilot, task),

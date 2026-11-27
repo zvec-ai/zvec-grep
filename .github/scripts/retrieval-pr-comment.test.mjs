@@ -35,9 +35,9 @@ const request = {
 };
 const models = {
   sweqa: "local/potion-code-16m-v2",
-  beir: "local/bekko-256-int8",
-  duretrieval: "local/bekko-256-int8",
-  quarry: "local/potion-code-16m-v2",
+  ...Object.fromEntries(
+    Object.entries(PILOT_SUITES).map(([name, config]) => [name, config.model]),
+  ),
 };
 const readTrustedJson = async (path) =>
   JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
@@ -211,7 +211,7 @@ async function fixture(t) {
   return x;
 }
 
-test("a fork PR gets four File/Entity tables, commit links and a source run link", async (t) => {
+test("a fork PR gets all File/Entity tables, commit links and a source run link", async (t) => {
   const x = await fixture(t);
   await publish(x);
   assert.equal(x.messages().length, 1);
@@ -226,13 +226,18 @@ test("a fork PR gets four File/Entity tables, commit links and a source run link
       .filter((line) =>
         /^\| (fts|vector|hybrid) \| (File|Entity) \|/.test(line),
       ).length,
-    24,
+    Object.keys(models).length * 6,
   );
   assert.deepEqual(
-    [...input.body.matchAll(/^### (SWE-QA20|BEIR|DuRetrieval|Quarry)$/gm)].map(
-      (match) => match[1],
-    ),
-    ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
+    [
+      ...input.body.matchAll(
+        /^### (SWE-QA20|BEIR|DuRetrieval|Quarry|AACR traces)$/gm,
+      ),
+    ].map((match) => match[1]),
+    [
+      "SWE-QA20",
+      ...Object.values(PILOT_SUITES).map((suite) => suite.report.comparison),
+    ],
   );
   assert.ok(input.body.includes(`/commit/${base}`));
   assert.ok(input.body.includes(`/commit/${head}`));
@@ -362,7 +367,10 @@ test("the publisher validates corpus totals and renders each suite once", async 
   await x.write("comparison/summary.json", payload);
   await publish(x);
   const body = x.messages()[0][1].body;
-  assert.equal((body.match(/^Indexed corpus:/gm) ?? []).length, 4);
+  assert.equal(
+    (body.match(/^Indexed corpus:/gm) ?? []).length,
+    Object.keys(models).length,
+  );
   assert.match(body, /1,000 → 1,001 Entities · 2,000 → N\/A Fragments/);
   assert.match(body, /N\/A Entities · N\/A Fragments/);
   assert.doesNotMatch(body, /everyone|forged|evil/);
@@ -412,7 +420,7 @@ test("the publisher requires every frozen corpus ID while retaining unknown coun
   };
   assert.deepEqual(
     Object.values(corpusIds).map((ids) => ids.length),
-    [11, 6, 1, 20],
+    [11, 6, 1, 20, 3],
   );
   for (const suite of Object.keys(models)) {
     for (const side of ["baseline", "candidate"]) {
@@ -449,7 +457,7 @@ test("the publisher requires every frozen corpus ID while retaining unknown coun
   }
 });
 
-test("the publisher validates and displays collected model budgets for all four suites", async (t) => {
+test("the publisher validates and displays collected model budgets for all suites", async (t) => {
   const budget = {
     max_input_tokens: 1024,
     unit: "utf16_code_units",
@@ -490,8 +498,14 @@ test("the publisher validates and displays collected model budgets for all four 
   await x.write("comparison/summary.json", payload);
   await publish(x);
   const body = x.messages()[0][1].body;
-  assert.equal((body.match(/^Embedding:.*ZG input limit:/gm) ?? []).length, 4);
-  assert.equal((body.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+  assert.equal(
+    (body.match(/^Embedding:.*ZG input limit:/gm) ?? []).length,
+    Object.keys(models).length,
+  );
+  assert.equal(
+    (body.match(/^\| Mode \| Level \|/gm) ?? []).length,
+    Object.keys(models).length,
+  );
   assert.match(body, /ZG input limit: \*\*N\/A → 1,024 tokens\*\*/);
   assert.match(body, /normal \*\*N\/A → 1,894 \/ 284\*\*/);
   assert.doesNotMatch(body, /everyone|forged|evil/);

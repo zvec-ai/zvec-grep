@@ -39,7 +39,7 @@ on:
           - local
           - remote
       gold_stages:
-        description: Capture Gold coverage at search stages in all four suites
+        description: Capture Gold coverage at search stages in all five suites
         type: boolean
         default: false
 
@@ -433,6 +433,77 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  aacr:
+    name: AACR / search traces (six enabled queries)
+    env:
+      RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
+    needs: [authorize, package-candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.authorize.outputs.harness-commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
+          path: ${{ runner.temp }}/package
+      - name: Verify the candidate package identity
+        run: |
+          node benchmarks/shared/rust-package-cache.mjs verify \
+            --directory "$RUNNER_TEMP/package" \
+            --commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+      - name: Cache the code model
+        if: inputs.embedding == 'local'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/aacr-model-cache
+          key: retrieval-aacr-potion-code-16m-v2-v1-${{ runner.os }}-${{ runner.arch }}
+      - name: Run AACR retrieval suite
+        env:
+          ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
+          ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
+        run: |
+          node benchmarks/zg-retrieval/expansion/run.mjs \
+            --suite aacr \
+            --package "$RUNNER_TEMP/package/candidate.tgz" \
+            --output "$RUNNER_TEMP/aacr" \
+            --model-cache "$RUNNER_TEMP/aacr-model-cache" \
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
+      - name: Publish AACR results for this job
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        run: |
+          if [ -f "$RUNNER_TEMP/aacr/report.md" ]; then
+            cat "$RUNNER_TEMP/aacr/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## AACR: no report produced' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve AACR report
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-aacr-report
+          path: |
+            ${{ runner.temp }}/aacr/report.json
+            ${{ runner.temp }}/aacr/report.md
+            ${{ runner.temp }}/aacr/gold-stages.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve AACR public evidence
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-aacr-evidence
+          path: |
+            ${{ runner.temp }}/aacr/evidence/
+            !${{ runner.temp }}/aacr/evidence/**/runtime-home/**
+          if-no-files-found: warn
+          retention-days: 14
+
   results:
     name: Retrieval results
     env:
@@ -447,6 +518,7 @@ jobs:
         beir,
         duretrieval,
         quarry,
+        aacr,
       ]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -485,6 +557,13 @@ jobs:
         with:
           name: ${{ inputs.artifact_prefix || 'retrieval' }}-quarry-report
           path: ${{ runner.temp }}/results-input/quarry
+      - name: Download AACR report
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-aacr-report
+          path: ${{ runner.temp }}/results-input/aacr
       - name: Build the unified results page
         if: ${{ always() && steps.access.outcome == 'success' }}
         env:
@@ -498,6 +577,7 @@ jobs:
             --beir "$RUNNER_TEMP/results-input/beir/report.json" \
             --duretrieval "$RUNNER_TEMP/results-input/duretrieval/report.json" \
             --quarry "$RUNNER_TEMP/results-input/quarry/report.json" \
+            --aacr "$RUNNER_TEMP/results-input/aacr/report.json" \
             --output "$RUNNER_TEMP/retrieval-results"
       - name: Publish the unified results page
         if: ${{ always() && steps.access.outcome == 'success' }}

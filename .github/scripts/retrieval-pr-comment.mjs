@@ -182,7 +182,8 @@ export function validateComparison(report, request) {
     );
   }
   assert.ok(
-    Array.isArray(report.rows) && report.rows.length === 12,
+    Array.isArray(report.rows) &&
+      report.rows.length === (PILOT_NAMES.length + 1) * 3,
     "Incomplete suite/mode coverage",
   );
   const hasQa =

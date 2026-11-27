@@ -1,6 +1,6 @@
 # ZG Retrieval-only benchmark
 
-Compare FTS, Vector and Hybrid search on four frozen suites. Each request uses the original question through the Rust public MCP search interface; there is no answering agent, query rewriting or LLM judge.
+Compare FTS, Vector and Hybrid search on five frozen suites. Each request uses the original question through the Rust public MCP search interface; there is no answering agent, query rewriting or LLM judge.
 
 ## Run
 
@@ -24,9 +24,9 @@ The PR comment shows File/Entity quality tables and a **download link to `retrie
 | --- | --- |
 | `retrieval-trace.html` | Interactive stage trace for paired runs; select suite, question, baseline/candidate and repetition. |
 | `retrieval-comparison` | Paired `summary.md` and `summary.json`; exact scores and deltas remain in JSON. |
-| `retrieval-results` | Single-version combined summary across all four suites. |
-| `retrieval-{zg,beir,duretrieval,quarry}-report` | Suite scores and per-question results. SWE-QA20 also retains `report.json`, `report.md` and `scores.jsonl`. |
-| `retrieval-{zg,beir,duretrieval,quarry}-evidence` | Public requests/responses, corpus/model inventories and index status. |
+| `retrieval-results` | Single-version combined summary across all five suites. |
+| `retrieval-{zg,beir,duretrieval,quarry,aacr}-report` | Suite scores and per-question results. SWE-QA20 also retains `report.json`, `report.md` and `scores.jsonl`. |
+| `retrieval-{zg,beir,duretrieval,quarry,aacr}-evidence` | Public requests/responses, corpus/model inventories and index status. |
 
 Paired runs prefix underlying artifacts with `retrieval-base-` or `retrieval-head-`. Combined report bundles retain stage sidecars as `reports/{suite}-gold-stages.json`.
 
@@ -40,6 +40,7 @@ Equal comparison values appear once; changes show **baseline → candidate**. **
 | BEIR | 20 | Four datasets; 75,128 unique documents |
 | DuRetrieval | 10 | 100,001 passages |
 | Quarry | 20 | 20 pinned preimages across eight languages |
+| AACR traces | 6 | Three pinned PR heads; five semantic diagnostics and one separately reported lookup control |
 
 | Mode | Public search input |
 | --- | --- |
@@ -62,6 +63,8 @@ Repeated chunks keep their native ranks. Entity matches require full containment
 Frozen SWE-QA20 inputs are [the source lock](data/source.lock.json), [queries](data/queries.jsonl), [protocol](configs/protocol.json) and [Gold](gold/). Protocol `sweqa20-zg-rust-three-modes-mcp-full-v8` uses report schema 7. QA containment scoring is version 2. Compare matching protocols and Gold versions; legacy SWE-QA20 File nDCG retains its repository macro average.
 
 See [SWE-QA20 design](zg-retrieval-only-sweqa20-design.md), [pilot data and scoring](expansion/README.md), [QA labels](gold/qa-pairs.md) and [matching / nDCG reference](../docs/retrieval-only-qa-reference.md) for full definitions.
+
+AACR uses [six enabled code-review queries](expansion/AACR.md). Its source-review gates apply to both File and Entity metrics; pending labels are N/A while retrieval completion, ranking stability and cost remain available.
 
 ## Gold coverage by retrieval stage
 

@@ -38,6 +38,10 @@ runner and combined report free of repeated suite-specific constants.
   queries, qrels and target IDs. This is a ten-query pilot on the C-MTEB corpus
   subset, not a score on DuReader's original full 8.09-million-passage corpus.
 
+- **AACR search traces:** six queries from three pinned PRs: five semantic
+  diagnostics and one exact-lookup control reported separately. See
+  [inputs, source-review scope and reproduction](AACR.md).
+
 Each suite uses its own specified embedding model. The MCP requests use the
 same fixed mode order (hybrid, fts, vector), explicit `preview: "full"`,
 `limit: 10`, no agent, and five calls per query; all five results supply quality and stability, while the fifth
@@ -54,7 +58,7 @@ overall nDCG, while these pilots use a query average. Absolute scores across
 suites do not share a corpus or relevance definition.
 
 Indexed Entity and Fragment totals sum the independently built corpus indexes:
-six for BEIR, one for DuRetrieval and twenty for Quarry. Shared content across
+six for BEIR, one for DuRetrieval, twenty for Quarry and three for AACR. Shared content across
 separate indexes is counted in each index; modes and repeated calls do not
 multiply counts. The JSON retains each index's counts. Missing counts remain
 N/A, including Fragment counts from older candidates that did not expose them.
@@ -70,20 +74,20 @@ Full preview displays each retrieved Entity's complete content; short preview
 displays excerpts. Preserve earlier default-short artifacts and use their
 matching scorer for review.
 
-All four suites use the same public response parser. It tolerates one empty
+All five suites use the same public response parser. It tolerates one empty
 trailing source line immediately after a result's public range, matching the
 Rust MCP presentation of files ending in a newline. Nonempty or further
 out-of-range source lines are still rejected.
 
-After one shared Rust package build, SWE-QA20, BEIR, DuRetrieval and Quarry run
-in four parallel suite jobs. BEIR and DuRetrieval use
-`local/bekko-256-int8`; the two code suites use
+After one shared Rust package build, SWE-QA20, BEIR, DuRetrieval, Quarry and AACR
+run in five parallel suite jobs. BEIR and DuRetrieval use
+`local/bekko-256-int8`; the three code suites use
 `local/potion-code-16m-v2`. These configured models are the default `local`
-workflow choice. The optional `remote` choice overrides all four suites with
+workflow choice. The optional `remote` choice overrides all five suites with
 `qwen/qwen3.7-text-embedding` without changing the pinned dataset files. Each
 job publishes its own aggregate metrics and
 per-question results, including failed questions. The final `Retrieval results`
-job publishes one page with all four suite sections, even if a suite fails.
+job publishes one page with all five suite sections, even if a suite fails.
 
 BEIR and DuRetrieval's Parquet readers are pinned in separate requirements
 files and installed only in their CI jobs. A local run needs the corresponding
@@ -93,9 +97,9 @@ original query/qrel records are checked in.
 
 ## Gold and scoring
 
-All three pilots support the opt-in [Gold stage diagnostic](../README.md#gold-coverage-by-retrieval-stage).
+All four pilots support the opt-in [Gold stage diagnostic](../README.md#gold-coverage-by-retrieval-stage).
 Add `--gold-stages` to the local `expansion/run.mjs` command with `--suite beir`,
-`--suite duretrieval`, or `--suite quarry`.
+`--suite duretrieval`, `--suite quarry`, or `--suite aacr`.
 The shared runner receives captures through MCP response metadata and matches
 them against each suite's verified File and Entity targets. New suites reuse
 this path after preparing their corpus and Gold; ZG has no suite-specific
@@ -106,6 +110,10 @@ capture or scoring rules.
 | BEIR | Original positive document qrels | Original SciFact evidence sentences where available, LLM-annotated evidence spans for NFCorpus and FiQA, and the paired ArguAna argument body |
 | DuRetrieval | Original positive passage qrels | LLM-annotated answer spans within the published passages |
 | Quarry | Unique paths of original positive units | Original function ranges on the pinned preimage, with indentation and separators outside the function excluded |
+| AACR | Twelve semantic File targets; Q09 control separate | Seventeen semantic Entity targets; Q09 is one separate two-span control target |
+
+AACR requires explicit per-question review gates before either File or Entity
+scoring; operational completion still reports ranking stability and cost.
 
 ZG's [Gold manifests](gold/) are assembled, annotated, and checked with LLM
 assistance against the pinned data above. Entity scores are diagnostic, not

@@ -81,11 +81,20 @@ test("npm package contains and exposes the supported public surface", async (t) 
     JSON.stringify({ private: true, type: "module" }),
   );
   await runNpm(
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+    [
+      "install",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+      "--fetch-timeout=600000",
+      tarball,
+    ],
     {
       cwd: consumerDirectory,
       env: npmEnvironment,
-      timeout: 300_000,
+      // A fresh consumer cache also downloads large native runtime packages.
+      timeout: 900_000,
+      killSignal: "SIGKILL",
     },
   );
 

@@ -85,6 +85,23 @@ export const PILOT_SUITES = {
       ].join(" "),
     },
   },
+  aacr: {
+    suite: "aacr6",
+    goldVersion: 2,
+    lockFile: "aacr.json",
+    taskCount: 6,
+    model: "local/potion-code-16m-v2",
+    targetKind: "positive_units",
+    breakdownBy: "repository",
+    indexTimeoutMinutes: 60,
+    fileExtensions: { PHP: "php", Rust: "rs", Python: "py", C: "c", Go: "go" },
+    report: {
+      comparison: "AACR traces",
+      title: "AACR search traces (six enabled queries)",
+      overview: "AACR / natural code-review searches",
+      note: "Five semantic diagnostics; one exact-lookup control reported separately. Source-reviewed AI labels are scoped development evidence, not exhaustive answers or OCR review scores.",
+    },
+  },
 };
 
 export const PILOT_NAMES = Object.keys(PILOT_SUITES);

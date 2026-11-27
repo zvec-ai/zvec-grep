@@ -97,6 +97,7 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
     "beir",
     "duretrieval",
     "quarry",
+    "aacr",
     "results",
   ]);
   assert.doesNotMatch(workflow, /setup-node|node-version|NODE_VERSION/);
@@ -206,7 +207,7 @@ test("local embedding is the default and remote Qwen credentials stay scoped to 
   assert.match(jobs.authorize, /if: inputs\.embedding == 'remote'/);
   assert.match(jobs.authorize, /secrets\.QWEN_EMBEDDING_API_KEY/);
   assert.match(jobs.authorize, /vars\.QWEN_EMBEDDING_ENDPOINT/);
-  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+  for (const suite of ["sweqa", "beir", "duretrieval", "quarry", "aacr"]) {
     assert.match(
       jobs[suite],
       /RETRIEVAL_EMBEDDING: \$\{\{ inputs\.embedding \}\}/,
@@ -230,7 +231,7 @@ test("local embedding is the default and remote Qwen credentials stay scoped to 
   assert.doesNotMatch(jobs["quality-contract"], /RETRIEVAL_EMBEDDING/);
 });
 
-test("the four suites run in independent jobs using one candidate package", async () => {
+test("the five suites run in independent jobs using one candidate package", async () => {
   const protocol = JSON.parse(
     await readFile(
       new URL("benchmarks/zg-retrieval/configs/protocol.json", repository),
@@ -251,7 +252,7 @@ test("the four suites run in independent jobs using one candidate package", asyn
     new Set(lock.repositories.map((repo) => repo.repository)).size,
     11,
   );
-  assert.equal(Object.keys(jobs).length, 8);
+  assert.equal(Object.keys(jobs).length, 9);
   assert.doesNotMatch(workflow, /strategy:|fromJSON\(/);
   const runner = steps(jobs.sweqa).find((entry) =>
     entry.includes("node benchmarks/zg-retrieval/run.mjs"),
@@ -261,7 +262,7 @@ test("the four suites run in independent jobs using one candidate package", asyn
     runner,
     /--(?:modes|preview)\b|RETRIEVAL_MODES|inputs\.(?!gold_stages\b)/,
   );
-  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+  for (const suite of ["sweqa", "beir", "duretrieval", "quarry", "aacr"]) {
     assert.match(jobs[suite], /inputs\.gold_stages && '--gold-stages'/);
     assert.match(jobs[suite], /gold-stages\.json/);
   }
@@ -271,7 +272,7 @@ test("the four suites run in independent jobs using one candidate package", asyn
   assert.match(jobs.sweqa, /ci-report\.mjs/);
   assert.match(jobs.sweqa, /name:.*-zg-report/);
   assert.match(jobs.sweqa, /\$GITHUB_STEP_SUMMARY/);
-  for (const suite of ["beir", "duretrieval", "quarry"]) {
+  for (const suite of ["beir", "duretrieval", "quarry", "aacr"]) {
     assert.match(jobs[suite], /needs: \[authorize, package-candidate\]/);
     assert.match(jobs[suite], new RegExp(`--suite ${suite}`));
     assert.match(jobs[suite], new RegExp(`name:.*-${suite}-report`));
@@ -300,6 +301,7 @@ test("the selected workflow ref is frozen once for every downstream job", () => 
     "beir",
     "duretrieval",
     "quarry",
+    "aacr",
     "results",
   ])
     assert.match(
@@ -346,7 +348,7 @@ test("the selected source is built from rust/ and exact-commit package caching b
     job,
     /node-version[^\n]*\$\{\{|NODE_VERSION|node.*cache.*key/i,
   );
-  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+  for (const suite of ["sweqa", "beir", "duretrieval", "quarry", "aacr"]) {
     assert.match(jobs[suite], /Verify the candidate package identity/);
     assert.match(
       jobs[suite],
@@ -356,7 +358,7 @@ test("the selected source is built from rust/ and exact-commit package caching b
 });
 
 test("every independently rerunnable job checks benchmark access before doing work", () => {
-  assert.equal(Object.keys(jobs).length, 8);
+  assert.equal(Object.keys(jobs).length, 9);
   assert.ok(jobs.results && jobs.sweqa && jobs.authorize);
   for (const [name, job] of Object.entries(jobs)) {
     const entries = steps(job);
@@ -405,13 +407,14 @@ test("one final page combines all suite reports after successful or failed jobs"
       "beir",
       "duretrieval",
       "quarry",
+      "aacr",
     ],
   );
   const finalSteps = steps(jobs.results);
   const downloads = finalSteps.filter((entry) =>
     entry.includes("uses: actions/download-artifact@"),
   );
-  assert.equal(downloads.length, 4);
+  assert.equal(downloads.length, 5);
   assert.match(downloads[0], /name:.*-zg-report/);
   assert.match(downloads[0], /continue-on-error: true/);
   assert.match(downloads[1], /name:.*-beir-report/);
@@ -425,7 +428,7 @@ test("one final page combines all suite reports after successful or failed jobs"
   assert.match(builder, /RETRIEVAL_JOB_RESULTS: \$\{\{ toJSON\(needs\) \}\}/);
   assert.deepEqual(
     [...builder.matchAll(/^\s+--([\w-]+)/gm)].map((match) => match[1]),
-    ["zg", "beir", "duretrieval", "quarry", "output"],
+    ["zg", "beir", "duretrieval", "quarry", "aacr", "output"],
   );
   assert.doesNotMatch(builder, /comparison|baseline|preview|modes/);
   const overviewArtifact = finalSteps.find(
@@ -442,16 +445,16 @@ test("one final page combines all suite reports after successful or failed jobs"
       .filter((entry) => entry.includes("$GITHUB_STEP_SUMMARY"))
       .map((entry) => ({ name, entry })),
   );
-  assert.equal(publishers.length, 5);
+  assert.equal(publishers.length, 6);
   assert.deepEqual(
     publishers.map((entry) => entry.name),
-    ["sweqa", "beir", "duretrieval", "quarry", "results"],
+    ["sweqa", "beir", "duretrieval", "quarry", "aacr", "results"],
   );
   for (const publisher of publishers)
     assert.match(publisher.entry, /if:.*always\(\)/);
   assert.match(publishers[0].entry, /summary\.md/);
-  assert.match(publishers[4].entry, /summary\.md/);
-  assert.match(publishers[4].entry, /missing results are not zero scores/);
+  assert.match(publishers[5].entry, /summary\.md/);
+  assert.match(publishers[5].entry, /missing results are not zero scores/);
 });
 
 const scriptStart = action.indexOf("        script: |\n");

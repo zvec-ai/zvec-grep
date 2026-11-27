@@ -1,0 +1,447 @@
+{
+  "schema_version": 2,
+  "suite": "aacr6",
+  "source_lock_sha256": "55df60ae988919b81371cf1fc103fc1e45f96bb75c32f255ebc140d5a1f62ff0",
+  "tasks": {
+    "Q02": {
+      "files": [
+        {
+          "path": "lib/beacon-api/src/client.rs",
+          "sha256": "de41c7355203a178685b7a70b849d750fa17fab339933a2880687c779b934018",
+          "bytes": 8328
+        },
+        {
+          "path": "lib/beacon-api-types/src/light_client_finality_update.rs",
+          "sha256": "0b82e1a573e513cfd60859ccd14023a3ef40a7571bdf5b1d169a4e41e2159f83",
+          "bytes": 838
+        },
+        {
+          "path": "lib/beacon-api-types/src/light_client_header.rs",
+          "sha256": "534633850c7d45ae87f936f250fe280dd534f95230a67dfa4878741f7b17c139",
+          "bytes": 954
+        },
+        {
+          "path": "lib/beacon-api-types/src/execution_payload_header.rs",
+          "sha256": "74cce012ced4424dc5b042920a7d18033e826bc719c9ab30a1bb409e0405fdfc",
+          "bytes": 6702
+        },
+        {
+          "path": "voyager/modules/consensus/ethereum/src/main.rs",
+          "sha256": "2ef195d2191b13b6b00b890e0d848ddce738b775cd350f1c1a52d0fd828416a9",
+          "bytes": 6046
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "src-41fe63a3e1f1bb76",
+          "path": "lib/beacon-api/src/client.rs",
+          "symbol": "BeaconApiClient::finality_update",
+          "kind": "function",
+          "start_line": 59,
+          "end_line": 62,
+          "start_byte": 1594,
+          "end_byte": 1781,
+          "sha256": "68d51404f7c62781d9973aa7e26b04ffddd74161ca979626cbc6c9e70ef5ac20",
+          "source_text": "pub async fn finality_update(&self) -> Result<Response<LightClientFinalityUpdate, Version>> {\n        self.get_json(\"/eth/v1/beacon/light_client/finality_update\")\n            .await\n    }",
+          "reason": "finality_update 请求指定 Beacon API 端点，返回 Response<LightClientFinalityUpdate, Version>。",
+          "source_url": "https://github.com/unionlabs/union/blob/d840723278f1d4cecc02ac540385725a1c54ca84/lib/beacon-api/src/client.rs#L59-L62"
+        },
+        {
+          "source_id": "src-8293f6d035c20968",
+          "path": "lib/beacon-api-types/src/light_client_finality_update.rs",
+          "symbol": "LightClientFinalityUpdate",
+          "kind": "struct",
+          "start_line": 11,
+          "end_line": 22,
+          "start_byte": 267,
+          "end_byte": 837,
+          "sha256": "fe6988d562c2b0f5b5fbea2e1a409888fb065fbcc843d66117a99a3010306f49",
+          "source_text": "pub struct LightClientFinalityUpdate {\n    /// Header attested to by the sync committee\n    pub attested_header: LightClientHeader,\n    /// Finalized header corresponding to `attested_header.state_root`\n    pub finalized_header: LightClientHeader,\n    pub finality_branch: [H256; floorlog2(FINALIZED_ROOT_INDEX)],\n    /// Sync committee aggregate signature\n    pub sync_aggregate: SyncAggregate,\n    /// Slot at which the aggregate signature was created (untrusted)\n    #[cfg_attr(feature = \"serde\", serde(with = \"::serde_utils::string\"))]\n    pub signature_slot: u64,\n}",
+          "reason": "声明 finalized_header 的类型，同时展示与 attested_header 的区别。",
+          "source_url": "https://github.com/unionlabs/union/blob/d840723278f1d4cecc02ac540385725a1c54ca84/lib/beacon-api-types/src/light_client_finality_update.rs#L11-L22"
+        },
+        {
+          "source_id": "src-8727ca36d7b4bf7a",
+          "path": "lib/beacon-api-types/src/light_client_header.rs",
+          "symbol": "LightClientHeader",
+          "kind": "struct",
+          "start_line": 11,
+          "end_line": 15,
+          "start_byte": 305,
+          "end_byte": 485,
+          "sha256": "e5a51fef9334d302e13f244f0d766dff6adaa7fa1109f5889e83cafb118992c0",
+          "source_text": "pub struct LightClientHeader {\n    pub beacon: BeaconBlockHeader,\n    pub execution: ExecutionPayloadHeader,\n    pub execution_branch: [H256; floorlog2(EXECUTION_PAYLOAD_INDEX)],\n}",
+          "reason": "声明 execution 对应 ExecutionPayloadHeader，区别于 beacon 部分。",
+          "source_url": "https://github.com/unionlabs/union/blob/d840723278f1d4cecc02ac540385725a1c54ca84/lib/beacon-api-types/src/light_client_header.rs#L11-L15"
+        },
+        {
+          "source_id": "src-3666f2e2d3f281ad",
+          "path": "lib/beacon-api-types/src/execution_payload_header.rs",
+          "symbol": "ExecutionPayloadHeader",
+          "kind": "evidence_group",
+          "role": "direct",
+          "reason": "ExecutionPayloadHeader 内的 timestamp 字段声明为 u64。",
+          "evidence_sets": [
+            {
+              "id": "execution-payload-header-timestamp",
+              "spans": [
+                {
+                  "path": "lib/beacon-api-types/src/execution_payload_header.rs",
+                  "symbol": "ExecutionPayloadHeader",
+                  "kind": "evidence_span",
+                  "role": "bridge",
+                  "start_line": 13,
+                  "end_line": 13,
+                  "start_byte": 297,
+                  "end_byte": 330,
+                  "source_text": "pub struct ExecutionPayloadHeader",
+                  "sha256": "2a6d4811c0a85a3d72b07854b2fced3301f2c9d8690fd4632ad2a09b6b008af7",
+                  "relevance_reason": "把 timestamp 限定在 API 的 ExecutionPayloadHeader 声明中。"
+                },
+                {
+                  "path": "lib/beacon-api-types/src/execution_payload_header.rs",
+                  "symbol": "ExecutionPayloadHeader::timestamp",
+                  "kind": "evidence_span",
+                  "role": "direct",
+                  "start_line": 29,
+                  "end_line": 29,
+                  "start_byte": 1008,
+                  "end_byte": 1026,
+                  "source_text": "pub timestamp: u64",
+                  "sha256": "dd89bcc819654dfd036d5f25277c258d230618c042c483a44b060ca17f155aec",
+                  "relevance_reason": "API Rust 字段类型为 u64。"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "source_id": "Q02/query",
+          "path": "voyager/modules/consensus/ethereum/src/main.rs",
+          "symbol": "<Module as ConsensusModuleServer>::query_latest_timestamp",
+          "kind": "evidence_span",
+          "start_line": 166,
+          "end_line": 177,
+          "start_byte": 5055,
+          "end_byte": 5490,
+          "sha256": "8f907129fb76c469cde99acdcc8ba83b5da23c7155c01e8085c9951b27a15858",
+          "source_text": "if finalized {\n            Ok(Timestamp::from_nanos(\n                self.beacon_api_client\n                    .finality_update()\n                    .await\n                    .map_err(|err| {\n                        ErrorObject::owned(-1, ErrorReporter(err).to_string(), None::<()>)\n                    })?\n                    .data\n                    .finalized_header\n                    .execution\n                    .timestamp",
+          "reason": "读取 finalized 分支的 finality_update().data.finalized_header.execution.timestamp。",
+          "source_url": "https://github.com/unionlabs/union/blob/d840723278f1d4cecc02ac540385725a1c54ca84/voyager/modules/consensus/ethereum/src/main.rs#L166-L177"
+        },
+        {
+          "source_id": "Q02/response",
+          "path": "lib/beacon-api/src/client.rs",
+          "symbol": "Response",
+          "kind": "evidence_span",
+          "start_line": 222,
+          "end_line": 223,
+          "start_byte": 6728,
+          "end_byte": 6788,
+          "sha256": "730f6c1ffe47541ca5f1ab0ff7b16eb96a491e9fdaf4dc188f7568fbe1d159e0",
+          "source_text": "pub struct Response<Data, Extra = Nil> {\n    pub data: Data,",
+          "reason": "第 59 行的返回类型将 Response 的 Data 实例化为 LightClientFinalityUpdate，并将 Extra 实例化为 Version。第 222–223 行保留泛型声明头和完结于逗号的 data 字段，足以确立冻结任务要求的外层包装及其 payload 类型。作者删去 derive 和末尾换行有据。提案额外纳入的 #[serde(flatten)] 描述 extra 的序列化布局，pub extra: Extra 声明另一字段，右花括号结束 Rust 项。这三处均未给 data: Data 提供类型证据。冻结任务的最小充分范围停在 data 字段末尾的逗号。",
+          "source_url": "https://github.com/unionlabs/union/blob/d840723278f1d4cecc02ac540385725a1c54ca84/lib/beacon-api/src/client.rs#L222-L223"
+        }
+      ],
+      "unresolved": []
+    },
+    "Q03": {
+      "files": [
+        {
+          "path": "packages/tables/src/Columns/Concerns/CanFormatState.php",
+          "sha256": "0e153a293cb6b1bed8a0460f00b18ffc25979998893043e1ab8144c5cd2dce1c",
+          "bytes": 11439
+        },
+        {
+          "path": "packages/tables/src/Columns/TextColumn.php",
+          "sha256": "b291bdb28e36670aa6951a0b8d679f1681218ee93afdd51f61ee2babfd02e5b7",
+          "bytes": 20614
+        },
+        {
+          "path": "packages/tables/src/Table.php",
+          "sha256": "336c8582ffd0e50187a10bc2b108e3f359ed6b7341cd5c6c1f3522b7163af888",
+          "bytes": 3094
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "src-57f898e91b04e112",
+          "path": "packages/tables/src/Columns/Concerns/CanFormatState.php",
+          "symbol": "CanFormatState.time",
+          "kind": "method",
+          "start_line": 215,
+          "end_line": 224,
+          "start_byte": 6703,
+          "end_byte": 6959,
+          "sha256": "e583a6130b149cdefe77fd054e7effb24a2f227d817e499d3e833d64593ab563",
+          "source_text": "public function time(string | Closure | null $format = null, ?string $timezone = null): static\n    {\n        $this->isTime = true;\n\n        $format ??= Table::$defaultTimeDisplayFormat;\n\n        $this->date($format, $timezone);\n\n        return $this;\n    }",
+          "reason": "设置时间标志，填充 Table 默认格式，携带时区参数委托 date()。",
+          "source_url": "https://github.com/filamentphp/filament/blob/871ec75815e1f92da141e9aef80f287f7779dfe7/packages/tables/src/Columns/Concerns/CanFormatState.php#L215-L224"
+        },
+        {
+          "source_id": "src-448e3e0cc4a3c188",
+          "path": "packages/tables/src/Columns/Concerns/CanFormatState.php",
+          "symbol": "CanFormatState.date",
+          "kind": "method",
+          "start_line": 55,
+          "end_line": 72,
+          "start_byte": 1348,
+          "end_byte": 1937,
+          "sha256": "6c515aa28384f1f0cb77dae76b8c3a56ac921ab7855142fb6098e90b94860645",
+          "source_text": "public function date(string | Closure | null $format = null, ?string $timezone = null): static\n    {\n        $this->isDate = true;\n\n        $format ??= Table::$defaultDateDisplayFormat;\n\n        $this->formatStateUsing(static function (TextColumn $column, $state) use ($format, $timezone): ?string {\n            if (blank($state)) {\n                return null;\n            }\n\n            return Carbon::parse($state)\n                ->setTimezone($timezone ?? $column->getTimezone())\n                ->translatedFormat($column->evaluate($format));\n        });\n\n        return $this;\n    }",
+          "reason": "实现对空值的处理、Carbon 解析、时区选择和 evaluate 后的 translatedFormat。",
+          "source_url": "https://github.com/filamentphp/filament/blob/871ec75815e1f92da141e9aef80f287f7779dfe7/packages/tables/src/Columns/Concerns/CanFormatState.php#L55-L72"
+        },
+        {
+          "source_id": "src-ccb3b33a6e0cf3a6",
+          "path": "packages/tables/src/Columns/TextColumn.php",
+          "symbol": "TextColumn trait binding",
+          "kind": "code_span",
+          "start_line": 25,
+          "end_line": 28,
+          "start_byte": 757,
+          "end_byte": 880,
+          "sha256": "4e1acdce312e0b1498c72d4230070883a49a2f3cc8f292e34b0ba9e97077ff60",
+          "source_text": "class TextColumn extends Column implements HasEmbeddedView\n{\n    use Concerns\\CanBeCopied;\n    use Concerns\\CanFormatState;",
+          "reason": "代码跨度直接显示 TextColumn 类声明和 use Concerns\\\\CanFormatState，建立同名方法的确切类归属。",
+          "source_url": "https://github.com/filamentphp/filament/blob/871ec75815e1f92da141e9aef80f287f7779dfe7/packages/tables/src/Columns/TextColumn.php#L25-L28"
+        },
+        {
+          "source_id": "src-adb563d77e30e2fd",
+          "path": "packages/tables/src/Table.php",
+          "symbol": "Table.defaultTimeDisplayFormat",
+          "kind": "property",
+          "start_line": 69,
+          "end_line": 69,
+          "start_byte": 1984,
+          "end_byte": 2041,
+          "sha256": "76e5fde329f7dd846547f737d25e687e8f788914743335feec061d70c849c615",
+          "source_text": "public static string $defaultTimeDisplayFormat = 'H:i:s';",
+          "reason": "单行属性声明给出 H:i:s，满足默认值问题。",
+          "source_url": "https://github.com/filamentphp/filament/blob/871ec75815e1f92da141e9aef80f287f7779dfe7/packages/tables/src/Table.php#L69-L69"
+        }
+      ],
+      "unresolved": []
+    },
+    "Q04": {
+      "files": [
+        {
+          "path": "hubble/src/indexer/aptos/block_handle.rs",
+          "sha256": "e54acc0769aa3f8f86bf3f4b30f596ecb32ebbba183bef750fe62a767bd7a267",
+          "bytes": 7932
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "src-e988f650bc8f7d25",
+          "path": "hubble/src/indexer/aptos/block_handle.rs",
+          "symbol": "BlockReferenceProvider for Block.block_reference",
+          "kind": "evidence_span",
+          "start_line": 30,
+          "end_line": 37,
+          "start_byte": 751,
+          "end_byte": 1174,
+          "sha256": "8648805b4e1801a469b3b79fbf954f4f623bf96e7d32622855f922d6abfdb968",
+          "source_text": "impl BlockReferenceProvider for Block {\n    fn block_reference(&self) -> Result<BlockReference, Report> {\n        let block_timestamp: i128 = self.block_timestamp.0.into();\n        Ok(BlockReference {\n            height: self.block_height.into(),\n            hash: self.block_hash.to_string(),\n            timestamp: OffsetDateTime::from_unix_timestamp_nanos(block_timestamp * 1000)\n                .map_err(Report::from)?,",
+          "reason": "Block 的 BlockReferenceProvider 实现读取 block_timestamp，乘以 1000 后按 Unix 纳秒构造结果。",
+          "source_url": "https://github.com/unionlabs/union/blob/d840723278f1d4cecc02ac540385725a1c54ca84/hubble/src/indexer/aptos/block_handle.rs#L30-L37"
+        },
+        {
+          "source_id": "Q04/aptos-import",
+          "path": "hubble/src/indexer/aptos/block_handle.rs",
+          "symbol": "aptos_rest_client::aptos_api_types::Block",
+          "kind": "evidence_span",
+          "start_line": 3,
+          "end_line": 4,
+          "start_byte": 25,
+          "end_byte": 78,
+          "sha256": "871fe7e0e55012a09ef66a47c775b30123498166d05b3628ea00ea7b939ef94e",
+          "source_text": "use aptos_rest_client::{\n    aptos_api_types::{Block,",
+          "reason": "第 30–37 行确认时间戳转换代码所在的实现块以 Block 为接收类型。第 3–4 行的两层导入前缀和逗号终止的 Block 项唯一确定 aptos_rest_client::aptos_api_types::Block，并表明该项以原名导入。作者提案的 TransactionPayload 和 Transaction 是同一语句内的其他导入，后续花括号及分号结束分组和语句。这些字节与作者删去的末尾换行均无需用于确认 Block 的来源或类型身份。冻结任务的最小充分范围停在 Block 后的逗号。",
+          "source_url": "https://github.com/unionlabs/union/blob/d840723278f1d4cecc02ac540385725a1c54ca84/hubble/src/indexer/aptos/block_handle.rs#L3-L4"
+        }
+      ],
+      "unresolved": []
+    },
+    "Q05": {
+      "files": [
+        {
+          "path": "lib/ethereum-light-client-types/src/consensus_state.rs",
+          "sha256": "2fa13aaa43fc3e095e9a21d3229d2ff3e6c9785153dc5021e27c7a139efae413",
+          "bytes": 3015
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "src-2b0e1c5627197f90",
+          "path": "lib/ethereum-light-client-types/src/consensus_state.rs",
+          "symbol": "ethereum_light_client_types.ConsensusState",
+          "kind": "evidence_group",
+          "role": "direct",
+          "reason": "Ethereum Rust ConsensusState 的 timestamp 字段声明为 u64。",
+          "evidence_sets": [
+            {
+              "id": "ethereum-consensus-state-timestamp",
+              "spans": [
+                {
+                  "path": "lib/ethereum-light-client-types/src/consensus_state.rs",
+                  "symbol": "ConsensusState",
+                  "kind": "evidence_span",
+                  "role": "bridge",
+                  "start_line": 5,
+                  "end_line": 5,
+                  "start_byte": 161,
+                  "end_byte": 186,
+                  "source_text": "pub struct ConsensusState",
+                  "sha256": "55ccbed3b9ffb668920b0a363b97c845347fe0ae90a6e1280a3bb85dc4664886",
+                  "relevance_reason": "给目标字段提供 Ethereum crate 内的 Rust 类型声明锚点。"
+                },
+                {
+                  "path": "lib/ethereum-light-client-types/src/consensus_state.rs",
+                  "symbol": "ConsensusState::timestamp",
+                  "kind": "evidence_span",
+                  "role": "direct",
+                  "start_line": 11,
+                  "end_line": 11,
+                  "start_byte": 450,
+                  "end_byte": 468,
+                  "source_text": "pub timestamp: u64",
+                  "sha256": "dd89bcc819654dfd036d5f25277c258d230618c042c483a44b060ca17f155aec",
+                  "relevance_reason": "timestamp 的 Rust 可见性和类型为 pub、u64。"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    "Q07": {
+      "files": [
+        {
+          "path": "tsl/src/compression/create.c",
+          "sha256": "dcad2823f460d5c682552d176ca79820c9315339921fe8ac3c3ef6850d1dc29f",
+          "bytes": 48938
+        },
+        {
+          "path": "tsl/src/compression/compression_storage.c",
+          "sha256": "54695fee64c2b02ab0a9aa979f5cb15482966feefe90a4fa4ad822951bbef2e5",
+          "bytes": 13576
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "Q07/column-groups",
+          "path": "tsl/src/compression/create.c",
+          "symbol": "build_columndefs",
+          "kind": "evidence_span",
+          "start_line": 436,
+          "end_line": 450,
+          "start_byte": 13658,
+          "end_byte": 14143,
+          "sha256": "f305faa37659a9f2401927acfefa0a70e7a20a069cdca4fb3055dcbe3aa56181",
+          "source_text": "\tList *all_column_defs = list_make1(makeColumnDef(COMPRESSION_COLUMN_METADATA_COUNT_NAME,\n\t\t\t\t\t\t\t\t\t\t\t\t\t INT4OID,\n\t\t\t\t\t\t\t\t\t\t\t\t\t -1 /* typemod */,\n\t\t\t\t\t\t\t\t\t\t\t\t\t 0 /*collation*/));\n\n\t/*\n\t * Then, put all segmentby columns. They are likely to be used in filters\n\t * before decompression.\n\t */\n\tall_column_defs = list_concat(all_column_defs, segmentby_column_defs);\n\n\t/*\n\t * Then, put all the compressed columns.\n\t */\n\tall_column_defs = list_concat(all_column_defs, compressed_column_defs);",
+          "role": "direct",
+          "reason": "从 list_make1 的 count 列开始，依次拼接 segmentby 列组和压缩列组。"
+        },
+        {
+          "source_id": "Q07/create-chunk",
+          "path": "tsl/src/compression/create.c",
+          "symbol": "create_compress_chunk",
+          "kind": "evidence_span",
+          "start_line": 571,
+          "end_line": 578,
+          "start_byte": 18233,
+          "end_byte": 18495,
+          "sha256": "1ee037f92b1b8d59a4bfed6a7884e0a4fe4cac930ad39bc38ede186f51325c19",
+          "source_text": "\tif (OidIsValid(table_id))\n\t\tcompress_chunk->table_id = table_id;\n\telse\n\t{\n\t\tList *column_defs = build_columndefs(settings, src_chunk->table_id);\n\t\tcompress_chunk->table_id =\n\t\t\tcompression_chunk_create(src_chunk, compress_chunk, column_defs, tablespace_oid);\n\t}",
+          "role": "bridge",
+          "reason": "有效 table_id 走现有表分支。新建分支用源 chunk 的 table_id 生成列列表，传给 compression_chunk_create。"
+        },
+        {
+          "source_id": "Q07/table-elements",
+          "path": "tsl/src/compression/compression_storage.c",
+          "symbol": "compression_chunk_create",
+          "kind": "evidence_span",
+          "start_line": 115,
+          "end_line": 116,
+          "start_byte": 4264,
+          "end_byte": 4329,
+          "sha256": "f71aa68117a25d9c774328311ecc2b7cc68a93b3f2cc0d0346823f2ba76fbfbe",
+          "source_text": "\tcreate = makeNode(CreateStmt);\n\tcreate->tableElts = column_defs;",
+          "role": "bridge",
+          "reason": "初始化 CreateStmt 并把上游的列列表直接赋给 tableElts。"
+        },
+        {
+          "source_id": "Q07/define-relation",
+          "path": "tsl/src/compression/compression_storage.c",
+          "symbol": "compression_chunk_create",
+          "kind": "evidence_span",
+          "start_line": 131,
+          "end_line": 134,
+          "start_byte": 4884,
+          "end_byte": 5090,
+          "sha256": "42ab7d553504c93f012a562bb6f0d7ac6273944cc330f8d51e30e3f057ade3bb",
+          "source_text": "\tcompress_rel = makeRangeVar(NameStr(chunk->fd.schema_name), NameStr(chunk->fd.table_name), -1);\n\n\tcreate->relation = compress_rel;\n\ttbladdress = DefineRelation(create, RELKIND_RELATION, owner, NULL, NULL);",
+          "role": "bridge",
+          "reason": "给 CreateStmt 绑定新压缩 chunk 的表名，并实际调用 DefineRelation。"
+        }
+      ],
+      "unresolved": []
+    },
+    "Q09": {
+      "files": [
+        {
+          "path": "lib/beacon-api-types/src/execution_payload.rs",
+          "sha256": "171972243bfc921a9c1c82f17dc33f6202fbfe862ccfa8ae18412bfc59669bd6",
+          "bytes": 5174
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "Q09/payload-timestamp",
+          "path": "lib/beacon-api-types/src/execution_payload.rs",
+          "symbol": "ExecutionPayload.timestamp",
+          "kind": "evidence_group",
+          "role": "direct",
+          "reason": "The exact Rust type declaration and its timestamp field together establish the requested definition identity and field type.",
+          "evidence_sets": [
+            {
+              "id": "exact-rust-type-and-field",
+              "spans": [
+                {
+                  "path": "lib/beacon-api-types/src/execution_payload.rs",
+                  "symbol": "ExecutionPayload",
+                  "kind": "evidence_span",
+                  "role": "bridge",
+                  "start_line": 18,
+                  "end_line": 18,
+                  "start_byte": 428,
+                  "end_byte": 457,
+                  "source_text": "pub struct ExecutionPayload {",
+                  "sha256": "cb5809ebef9c1d2256e606b9f4357526b2c24ac913bbe7002c80535f6362f021",
+                  "relevance_reason": "绑定 timestamp 所属的精确类型名，排除同文件中的 SSZ 表示与另文件的 Header。"
+                },
+                {
+                  "path": "lib/beacon-api-types/src/execution_payload.rs",
+                  "symbol": "ExecutionPayload.timestamp",
+                  "kind": "evidence_span",
+                  "role": "direct",
+                  "start_line": 36,
+                  "end_line": 36,
+                  "start_byte": 1189,
+                  "end_byte": 1212,
+                  "source_text": "    pub timestamp: u64,",
+                  "sha256": "1842fc9df615fcbc583064911c3fce2dcf9a12022463b8d96038895543cce1d4",
+                  "relevance_reason": "字面目标的 timestamp 字段类型为 u64。"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "unresolved": []
+    }
+  }
+}

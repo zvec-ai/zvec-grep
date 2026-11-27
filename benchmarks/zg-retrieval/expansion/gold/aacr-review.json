@@ -1,0 +1,91 @@
+{
+  "scope": "Selected development queries; reviewed source targets, not exhaustive repository answers.",
+  "review": {
+    "method": "Independent AI source review, sealed before author proposal adjudication.",
+    "model": "unknown",
+    "limitations": [
+      "Not human validation.",
+      "Sealing records the review process but does not prove perfect blindness."
+    ]
+  },
+  "queries": {
+    "Q02": {
+      "interpretation": "Locate the actual finalized-header execution-timestamp read and its local response/type chain. Do not infer external API time units or bug correctness.",
+      "conditions": [
+        "Include the actual Voyager query_latest_timestamp read and response/type chain.",
+        "Interpret all time-unit evidence as local source usage only; external API correctness is outside this diagnostic."
+      ],
+      "target_ids": [
+        "src-41fe63a3e1f1bb76",
+        "src-8293f6d035c20968",
+        "src-8727ca36d7b4bf7a",
+        "src-3666f2e2d3f281ad",
+        "Q02/query",
+        "Q02/response"
+      ]
+    },
+    "Q03": {
+      "interpretation": "Locate TextColumn time formatting, trait binding, date delegation and default time format. Timezone resolution, formatter execution and rendering are conditional expanded context.",
+      "conditions": [
+        "Binding, time-to-date delegation and the default format are complementary source targets.",
+        "Include timezone, formatter execution or rendering evidence only when that additional behavior is requested."
+      ],
+      "target_ids": [
+        "src-57f898e91b04e112",
+        "src-448e3e0cc4a3c188",
+        "src-ccb3b33a6e0cf3a6",
+        "src-adb563d77e30e2fd"
+      ]
+    },
+    "Q04": {
+      "interpretation": "Locate the Hubble Aptos consumer, its imported type identity and local microseconds-to-nanoseconds conversion. Do not infer Movement behavior or all Aptos API specifications.",
+      "conditions": [
+        "Include the Aptos Block import to establish local type identity.",
+        "Interpret microseconds as the local Hubble consumer assumption; no external API specification claim."
+      ],
+      "target_ids": ["src-e988f650bc8f7d25", "Q04/aptos-import"]
+    },
+    "Q05": {
+      "interpretation": "Locate the Rust ConsensusState declaration in the Ethereum crate. ABI and protobuf representations apply only when those representations are requested; readers, writers and import chains are conditional context.",
+      "conditions": [
+        "Match the Ethereum crate semantic identity, not a required literal EthereumConsensusState identifier.",
+        "ABI or protobuf definitions are conditional representation alternatives; do not count them as additional mandatory Rust declaration targets."
+      ],
+      "target_ids": ["src-2b0e1c5627197f90"]
+    },
+    "Q07": {
+      "interpretation": "Column-group definition order and the creation chain for a new physical compressed chunk.",
+      "conditions": [
+        "Applies to newly created physical compressed chunks in the pinned commit; existing relation reuse, historical layouts and post-ALTER layouts are outside this diagnostic.",
+        "Detailed within-group metadata order is conditional expanded context, retained in the review ledger rather than made mandatory.",
+        "The decoded second phrase is a nonvoting creation-chain variant, not another independent question.",
+        "The internal compressed hypertable root starts with an empty schema; that alternative interpretation is recorded but is outside the selected physical-chunk scope."
+      ],
+      "target_ids": [
+        "Q07/column-groups",
+        "Q07/create-chunk",
+        "Q07/table-elements",
+        "Q07/define-relation"
+      ],
+      "query_origin": {
+        "tool_input": "[\"compressed table schema creation column order\", \"create compressed chunk relation columns\"]",
+        "sha256": "598b6aa5cdc07bf91ae32aa139742c59bafd3b2d0393780a9db6fb4c2eabbcee",
+        "transformation": "Decode the JSON-shaped string and select its first phrase."
+      }
+    },
+    "Q09": {
+      "interpretation": "Exact lookup of the ordinary Rust ExecutionPayload.timestamp declaration; reported separately from semantic questions.",
+      "conditions": [
+        "Requires the exact ordinary Rust type identity and timestamp field; it does not ask for a time-unit specification.",
+        "SSZ and light-client Header alternatives apply only to expanded interpretations and remain in the review ledger; they are not silent substitutes for this exact-name control.",
+        "This lookup control uses the unchanged scorer and is excluded from semantic quality means."
+      ],
+      "target_ids": ["Q09/payload-timestamp"]
+    }
+  },
+  "evidence_archive": {
+    "name": "aacr-source-review-history.tar.gz",
+    "sha256": "3e695d623c831c84b4d6c1c5c76337e4813d98c0d52919756b19977142136c66",
+    "access": "Retained by the dataset contributor; attach or obtain the archive before auditing the original sealed review."
+  }
+}
