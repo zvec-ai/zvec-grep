@@ -17,12 +17,14 @@ import {
   goldStagesMarkdown,
   writeGoldStages,
 } from "../reports/gold-stages.mjs";
+import { corpusManifest, modelArtifactManifest } from "../core/corpus.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import {
   rankedLocations,
   summarizeRepeatedQuality,
 } from "../metrics/repetitions.mjs";
+import { prepareAacrRepository } from "./aacr.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { QA_ENTITY_METRICS, qaPercentCell } from "../reports/zg.mjs";
 import {
@@ -104,9 +106,23 @@ export function summarizePilotRows(
   return modes.map((mode) => {
     const selected = rows.filter((row) => row.mode === mode);
     const valid = selected.filter((row) => row.status === "success");
+    const qualityRows = selected.filter(
+      (row) => row.evaluation_role !== "lookup_control",
+    );
+    const qualityValid = valid.filter(
+      (row) => row.evaluation_role !== "lookup_control",
+    );
+    const controls = selected.filter(
+      (row) => row.evaluation_role === "lookup_control",
+    );
     const average = (select) =>
       valid.length
         ? valid.reduce((sum, row) => sum + select(row), 0) / valid.length
+        : null;
+    const qualityAverage = (select) =>
+      qualityValid.length
+        ? qualityValid.reduce((sum, row) => sum + select(row), 0) /
+          qualityValid.length
         : null;
     const latencies = selected.flatMap(measuredCallLatencies);
     const hasQa = selected.some((row) => row.qa_quality_mean);
@@ -115,23 +131,40 @@ export function summarizePilotRows(
       completed: valid.length,
       planned,
       metrics: {
-        file_hit_at_1: average((row) => row.quality_mean.file.hit_at_1),
-        file_hit_at_5: average((row) => row.quality_mean.file.hit_at_5),
-        file_hit_at_10: average((row) => row.quality_mean.file.hit_at_10),
-        file_mrr_at_10: average((row) => row.quality_mean.file.rr_at_10),
-        ndcg_at_10: average((row) => row.quality_mean.ndcg_at_10),
+        file_hit_at_1: qualityAverage((row) => row.quality_mean.file.hit_at_1),
+        file_hit_at_5: qualityAverage((row) => row.quality_mean.file.hit_at_5),
+        file_hit_at_10: qualityAverage(
+          (row) => row.quality_mean.file.hit_at_10,
+        ),
+        file_mrr_at_10: qualityAverage((row) => row.quality_mean.file.rr_at_10),
+        ndcg_at_10: qualityAverage((row) => row.quality_mean.ndcg_at_10),
         ...(hasQa
           ? Object.fromEntries(
               PILOT_FILE_RECALL_METRICS.map((metric) => [
                 metric,
-                average(
+                qualityAverage(
                   (row) => row.quality_mean.file[metric.slice("file_".length)],
                 ),
               ]),
             )
           : {}),
       },
-      ...(hasQa ? { qa_retrieval: summarizeQaRetrieval(selected) } : {}),
+      ...(hasQa ? { qa_retrieval: summarizeQaRetrieval(qualityRows) } : {}),
+      ...(controls.length
+        ? {
+            lookup_control: {
+              task_ids: controls.map(({ task_id }) => task_id),
+              ...summarizePilotRows(
+                controls.map((row) => ({
+                  ...row,
+                  evaluation_role: "semantic",
+                })),
+                [mode],
+                controls.length,
+              )[0],
+            },
+          }
+        : {}),
       ranking_repeatable_cases: valid.filter(
         (row) => row.quality_mean.ranking_repeatable,
       ).length,
@@ -183,6 +216,9 @@ function fillMissingRows(pilot, report) {
       if (!row) {
         row = {
           task_id: task.id,
+          ...(task.evaluation_role
+            ? { evaluation_role: task.evaluation_role }
+            : {}),
           mode,
           query: task.query,
           targets,
@@ -222,7 +258,7 @@ export function markdownPilotReport(report) {
   const lines = [
     `## ${report.label} · ${report.status === "success" ? "✅ Complete" : "❌ Incomplete"}`,
     "",
-    `${planned} original queries · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
+    `${planned} ${report.suite === "aacr7" ? "queries (six semantic diagnostics, one exact-lookup control)" : "original queries"} · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
     "",
     indexCountsMarkdown(report.index_counts),
     "",
@@ -272,6 +308,24 @@ export function markdownPilotReport(report) {
       );
     }
   }
+  if (report.summary.some((row) => row.lookup_control)) {
+    lines.push(
+      "",
+      "### Exact-lookup control (excluded from semantic means)",
+      "",
+      "| Mode | Query | File Recall@10 | Entity Recall@10 |",
+      "| --- | --- | ---: | ---: |",
+    );
+    for (const row of report.summary) {
+      const control = row.lookup_control;
+      if (!control) continue;
+      const percent = (value) =>
+        Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "N/A";
+      lines.push(
+        `| zg-${row.mode} | ${control.task_ids.join(", ")} | ${percent(control.metrics.file_recall_at_10)} | ${percent(control.qa_retrieval?.diagnostic.entity.recall_at_10)} |`,
+      );
+    }
+  }
   if (report.breakdown?.length) {
     lines.push(
       "",
@@ -316,7 +370,7 @@ export function markdownPilotReport(report) {
         callLatencies.length
       : null;
     lines.push(
-      `| ${tableCell(row.task_id)} | zg-${row.mode} | ${row.status === "success" ? "✅ Scored" : `❌ ${tableCell(row.reason ?? row.calls.find((call) => call.error)?.error ?? "failed")}`} | ${row.quality_mean ? (row.quality_mean.ranking_repeatable ? "Yes" : "No") : "—"} | ${row.quality_mean ? `${row.quality_mean.hit_at_10_calls}/5` : "—"} | ${formatNumber(row.quality_mean?.file.hit_at_1)} | ${formatNumber(row.quality_mean?.file.hit_at_5)} | ${formatNumber(row.quality_mean?.file.hit_at_10)} | ${formatNumber(row.quality_mean?.file.rr_at_10)} | ${formatNumber(row.quality_mean?.ndcg_at_10)} | ${formatNumber(row.output_bytes == null ? null : row.output_bytes / 1024, 2)} | ${formatNumber(latencyMean, 2)} | ${formatNumber(latency, 2)} |`,
+      `| ${tableCell(row.task_id)} | zg-${row.mode} | ${row.status === "success" ? (row.evaluation_role === "lookup_control" ? "✅ Scored control" : "✅ Scored") : `❌ ${tableCell(row.reason ?? row.calls.find((call) => call.error)?.error ?? "failed")}`} | ${row.quality_mean ? (row.quality_mean.ranking_repeatable ? "Yes" : "No") : "—"} | ${row.quality_mean ? `${row.quality_mean.hit_at_10_calls}/5` : "—"} | ${formatNumber(row.quality_mean?.file.hit_at_1)} | ${formatNumber(row.quality_mean?.file.hit_at_5)} | ${formatNumber(row.quality_mean?.file.hit_at_10)} | ${formatNumber(row.quality_mean?.file.rr_at_10)} | ${formatNumber(row.quality_mean?.ndcg_at_10)} | ${formatNumber(row.output_bytes == null ? null : row.output_bytes / 1024, 2)} | ${formatNumber(latencyMean, 2)} | ${formatNumber(latency, 2)} |`,
     );
   }
   lines.push("", "</details>");
@@ -354,6 +408,9 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
   const evidence = join(options.output, "evidence", group.id);
   await mkdir(evidence, { recursive: true });
   const root = resolve(group.root);
+  const sourceBefore = group.captureSourceInventory
+    ? await corpusManifest(root)
+    : null;
   const goldSources = await verifyPilotGoldSources(pilot.gold, group);
   if (options.goldStages) {
     const offsets = indexedSourceOffsets(goldSources);
@@ -424,10 +481,12 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
           options.modelCache,
           ...(!embedding.remote ? ["--device", "cpu"] : []),
           ...embedding.indexArguments,
-          "--max-filesize",
-          "1000000",
-          "--iglob",
-          group.indexGlob,
+          ...(group.indexArguments ?? [
+            "--max-filesize",
+            "1000000",
+            "--iglob",
+            group.indexGlob,
+          ]),
           "--debug",
         ],
         {
@@ -470,6 +529,13 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
         group.expectedIndexedFiles,
         `${pilot.name} corpus was not fully indexed`,
       );
+    const modelBefore = group.captureSourceInventory
+      ? await modelArtifactManifest(options.modelCache)
+      : null;
+    if (sourceBefore) {
+      await writeJson(join(evidence, "source-before.json"), sourceBefore);
+      await writeJson(join(evidence, "model-before.json"), modelBefore);
+    }
     const transport = new mcp.StdioClientTransport({
       command: command[0],
       args: command.slice(1),
@@ -495,6 +561,9 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       for (const task of group.tasks) {
         const row = {
           task_id: task.id,
+          ...(task.evaluation_role
+            ? { evaluation_role: task.evaluation_role }
+            : {}),
           mode,
           query: task.query,
           targets: task.targets,
@@ -606,6 +675,33 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       before.index_settings,
       "index settings changed during retrieval",
     );
+    if (sourceBefore) {
+      const sourceAfter = await corpusManifest(root);
+      const modelAfter = await modelArtifactManifest(options.modelCache);
+      await writeJson(join(evidence, "source-after.json"), sourceAfter);
+      await writeJson(join(evidence, "model-after.json"), modelAfter);
+      assert.equal(
+        sourceAfter.sha256,
+        sourceBefore.sha256,
+        "AACR source changed during retrieval",
+      );
+      assert.equal(
+        modelAfter.sha256,
+        modelBefore.sha256,
+        "AACR embedding artifacts changed during retrieval",
+      );
+      assert.equal(
+        (await run("git", ["-C", root, "rev-parse", "HEAD"])).stdout.trim(),
+        group.sourceCommit,
+        "AACR commit changed during retrieval",
+      );
+      report.source_audits[group.id] = {
+        commit: group.sourceCommit,
+        source_sha256: sourceAfter.sha256,
+        model_sha256: modelAfter.sha256,
+        verified: true,
+      };
+    }
     const counts = {
       id: group.id,
       entities: after.entities,
@@ -688,6 +784,7 @@ export async function main(args = process.argv.slice(2)) {
     rows: [],
     failures: [],
     index_seconds: {},
+    ...(pilot.name === "aacr" ? { source_audits: {} } : {}),
     ...(options.goldStages ? { gold_stage_source_offsets: {} } : {}),
     index_counts: summarizeIndexCounts(
       pilotCorpusIds(pilot).map((id) => ({
@@ -753,6 +850,21 @@ export async function main(args = process.argv.slice(2)) {
             report.failures.push({ task_id: task.id, reason: error.message });
           console.error(`${group.id}: ${error.message}`);
         }
+    } else if (pilot.name === "aacr") {
+      for (const repo of pilot.lock.repositories) {
+        try {
+          const group = await prepareAacrRepository(pilot, repo, output);
+          await runGroup(pilot, group, candidate, options, report, mcp);
+        } catch (error) {
+          for (const task of pilot.lock.tasks.filter(
+            (task) =>
+              task.repository === repo.repository &&
+              task.revision === repo.commit,
+          ))
+            report.failures.push({ task_id: task.id, reason: error.message });
+          console.error(`${repo.repository}: ${error.message}`);
+        }
+      }
     } else {
       await verifyQuarrySource(pilot, output);
       for (const task of pilot.lock.tasks) {

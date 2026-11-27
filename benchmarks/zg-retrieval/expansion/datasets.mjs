@@ -7,6 +7,7 @@ import { embeddingModel } from "../core/embedding.mjs";
 import { prepareCorpus } from "../core/corpus.mjs";
 import { PILOT_SUITES } from "./config.mjs";
 import { loadPilotGold } from "./gold.mjs";
+import { validateAacrLock, aacrCorpusId } from "./aacr.mjs";
 
 const data = join(dirname(fileURLToPath(import.meta.url)), "data");
 const MODES = ["hybrid", "fts", "vector"];
@@ -57,6 +58,7 @@ export async function loadPilot(
       );
     }
   }
+  if (name === "aacr") validateAacrLock(lock);
   return {
     name,
     config,
@@ -108,6 +110,7 @@ function jsonl(content) {
 
 // Match the independently indexed groups produced by the preparation adapters.
 export function pilotCorpusIds(pilot) {
+  if (pilot.name === "aacr") return pilot.lock.repositories.map(aacrCorpusId);
   if (pilot.name === "beir")
     return pilot.lock.datasets.flatMap((dataset) =>
       dataset.id === "arguana"

@@ -10,16 +10,16 @@ resource use. Setup, frozen inputs and scoring details live with each suite.
 
 ## Contributors: run a benchmark
 
-| Benchmark | Scope | Local instructions |
-| --- | --- | --- |
-| Retrieval-only | SWE-QA20, BEIR, DuRetrieval and Quarry; hybrid, fts and vector | [SWE-QA20 runner](zg-retrieval/README.md#run-locally), [expansion runners](zg-retrieval/expansion/README.md) |
-| SWE-QA e2e | 20 software-engineering questions; baseline vs zvec-grep agent profiles | [Setup and smoke runs](swe-qa-bench/README.md#local-setup) |
-| BrowseComp-Plus e2e | 100 questions over a fixed document corpus | [Setup and execution](browse-comp-plus/README.md) |
+| Benchmark           | Scope                                                                                                                       | Local instructions                                                                                                    |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Retrieval-only      | SWE-QA20, BEIR, DuRetrieval, Quarry and AACR traces (six semantic diagnostics; one lookup control); hybrid, fts and vector | [SWE-QA20 runner](zg-retrieval/README.md#run-swe-qa20-locally), [expansion runners](zg-retrieval/expansion/README.md) |
+| SWE-QA e2e          | 20 software-engineering questions; baseline vs zvec-grep agent profiles                                                     | [Setup and smoke runs](swe-qa-bench/README.md#local-setup)                                                            |
+| BrowseComp-Plus e2e | 100 questions over a fixed document corpus                                                                                  | [Setup and execution](browse-comp-plus/README.md)                                                                     |
 
 For development CI, use your own fork. In **Actions → Retrieval-only → Run
 workflow**, select the harness revision, set `candidate_ref` to the Rust source
 branch/tag/commit, and leave `embedding=local` for a run without model API keys.
-See the [Retrieval guide](zg-retrieval/README.md#run-ci-and-read-the-result) for
+See the [Retrieval guide](zg-retrieval/README.md#run) for
 single-version results and artifacts. The separate **Retrieval-only PR** manual
 dispatch compares two full commit SHAs under one harness.
 
@@ -27,19 +27,19 @@ For optional SWE-QA e2e, follow the [fork run guide](swe-qa-bench/docs/run-in-fo
 to configure model credentials and dispatch a small `repro-3` or `smoke` run
 before choosing `all-full`. Execution and judging both consume model quota.
 Remote embedding also requires its own key and endpoint; see
-[corpus size and embedding load](zg-retrieval/README.md#corpus-size-and-remote-embedding-load).
+[corpus size and embedding load](zg-retrieval/README.md#run-swe-qa20-locally).
 
 ## Maintainers: defaults and additional runs
 
 ### Triggers and results
 
-| Trigger | Runs | Results |
-| --- | --- | --- |
-| PR opened, reopened or updated, including fork PRs | Retrieval-only on the exact PR base and head; local embedding | Updated PR bot comment, Actions summaries and `retrieval-comparison` artifact |
-| New PR Conversation comment with `@zg-bench` on its own line | The same Retrieval version comparison | One bot comment, updated from queued status to results |
-| Manual **ZG Bench** dispatch with `pr_number` | Retrieval comparison; e2e only with explicit `run_e2e: true` | The same bot comment and run artifacts |
-| Manual **SWE-QA Bench** dispatch | Selected e2e scope, model and embedding runtime | Task evidence and aggregate report |
-| Relevant benchmark source/workflow changes | Offline benchmark regression checks | CI logs; no model calls |
+| Trigger                                                      | Runs                                                          | Results                                                                       |
+| ------------------------------------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| PR opened, reopened or updated, including fork PRs           | Retrieval-only on the exact PR base and head; local embedding | Updated PR bot comment, Actions summaries and `retrieval-comparison` artifact |
+| New PR Conversation comment with `@zg-bench` on its own line | The same Retrieval version comparison                         | One bot comment, updated from queued status to results                        |
+| Manual **ZG Bench** dispatch with `pr_number`                | Retrieval comparison; e2e only with explicit `run_e2e: true`  | The same bot comment and run artifacts                                        |
+| Manual **SWE-QA Bench** dispatch                             | Selected e2e scope, model and embedding runtime               | Task evidence and aggregate report                                            |
+| Relevant benchmark source/workflow changes                   | Offline benchmark regression checks                           | CI logs; no model calls                                                       |
 
 Automatic PR checks require no maintainer role or model secrets. A new push
 cancels the previous automatic run for that PR. All version comparisons show
@@ -50,8 +50,8 @@ commits. `retrieval-base-*` and `retrieval-head-*` retain per-version evidence.
 the completed automatic run through a separate `workflow_run` job. It creates
 one English result comment per PR and updates it on later runs and reruns,
 including for fork contributions. It links both commits and the source run,
-shows all twelve suite/mode rows with base / head / delta, and marks missing or
-invalid results as incomplete. Cancelled runs and results for outdated base/head
+shows all fifteen suite/mode rows with base / head / delta, separates diagnostic
+scores from formal scores, and marks missing or invalid results as incomplete. Cancelled runs and results for outdated base/head
 commits are skipped. Manual comparison dispatches do not post this automatic
 comment; `@zg-bench` retains its own per-request comment.
 
@@ -111,7 +111,7 @@ workspace. Use general-purpose tool guidance, blind judging and repeated trials;
 do not tailor prompts to reference answers or force tool use. Missing or invalid
 evidence must not become zero scores or successful results.
 
-Start with the [Retrieval code map](zg-retrieval/README.md#code-structure) or
+Start with the [Retrieval code map](zg-retrieval/README.md#code-map) or
 [SWE-QA code map](swe-qa-bench/README.md#code-structure). Runners capture evidence;
 validators check identities, protocol and coverage; metric functions score
 validated records; aggregators and comment rendering publish the results.
@@ -128,7 +128,7 @@ uv sync --project benchmarks/swe-qa-bench --frozen
 uv run --project benchmarks/swe-qa-bench python -m unittest discover -s benchmarks/swe-qa-bench/tests -v
 ```
 
-Lint changed workflows with `actionlint`. Use [offline replay](zg-retrieval/README.md#offline-replay-and-comparisons)
+Lint changed workflows with `actionlint`. Use [offline replay](zg-retrieval/README.md#replay-saved-evidence)
 to check scoring/report changes against saved evidence, and use a fork run to
 check workflow integration. Add a focused regression for changed failure,
 identity or retry behavior. Record run-specific validation evidence in the PR;

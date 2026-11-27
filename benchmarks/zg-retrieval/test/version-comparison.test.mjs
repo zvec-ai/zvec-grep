@@ -77,7 +77,7 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
     after = result(headSha, 0.5);
   after.pilots.beir.report.summary[0].metrics.file_hit_at_1 = 1;
   const comparison = compareCombinedResults(before, after, metadata);
-  assert.equal(comparison.rows.length, 12);
+  assert.equal(comparison.rows.length, (PILOT_NAMES.length + 1) * 3);
   assert.equal(comparison.preview, "full");
   assert.deepEqual(comparison.qa_scoring, QA_SCORING);
   assert.equal(comparison.rows[0].metrics.file_hit_at_1.delta, -0.25);
@@ -86,18 +86,27 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
   assert.doesNotMatch(markdown, /Stage capture incomplete/);
   assert.deepEqual(
     [...markdown.matchAll(/^### (.+)$/gm)].map((match) => match[1]),
-    ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
+    [
+      "SWE-QA20",
+      ...Object.values(PILOT_SUITES).map((suite) => suite.report.comparison),
+    ],
   );
-  assert.equal((markdown.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+  assert.equal(
+    (markdown.match(/^\| Mode \| Level \|/gm) ?? []).length,
+    PILOT_NAMES.length + 1,
+  );
   assert.equal(
     (
       markdown.match(
         /Indexed corpus: \*\*N\/A Entities · N\/A Fragments\*\*\./g,
       ) ?? []
     ).length,
-    4,
+    PILOT_NAMES.length + 1,
   );
-  for (const suite of ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"])
+  for (const suite of [
+    "SWE-QA20",
+    ...Object.values(PILOT_SUITES).map((suite) => suite.report.comparison),
+  ])
     for (const mode of ["fts", "vector", "hybrid"]) {
       const file = tableRow(markdown, suite, mode, "File");
       assert.equal(file.length, 10);
@@ -174,6 +183,7 @@ test("indexed corpus counts compare once per suite and preserve unknown totals",
       "Indexed corpus: **1,007 → 1,008 Entities · 2,011 Fragments**.",
       "Indexed corpus: **N/A Entities · N/A → 11 Fragments**.",
       "Indexed corpus: **N/A Entities · N/A Fragments**.",
+      "Indexed corpus: **N/A Entities · N/A Fragments**.",
     ],
   );
   before.sweqa.index_counts.corpora[0].entities = 0;
@@ -204,7 +214,10 @@ test("comparison links HTML without forwarding stage summaries to comments", () 
     markdownVersionComparison(comparison),
     /Download stage trace/,
   );
-  assert.equal((markdown.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+  assert.equal(
+    (markdown.match(/^\| Mode \| Level \|/gm) ?? []).length,
+    PILOT_NAMES.length + 1,
+  );
 });
 
 test("a newly registered suite retains its trusted report title", async () => {
@@ -251,7 +264,10 @@ test("model budgets propagate to each dataset without changing retrieval metrics
     budget,
   );
   const markdown = markdownVersionComparison(comparison);
-  assert.equal((markdown.match(/^Embedding:/gm) ?? []).length, 4);
+  assert.equal(
+    (markdown.match(/^Embedding:/gm) ?? []).length,
+    PILOT_NAMES.length + 1,
+  );
   assert.match(markdown, /N\/A → 1,024 tokens/);
   assert.match(markdown, /before metadata allowance/);
   after.sweqa.index_settings = summarizeIndexSettings([

@@ -182,7 +182,8 @@ export function validateComparison(report, request) {
     );
   }
   assert.ok(
-    Array.isArray(report.rows) && report.rows.length === 12,
+    Array.isArray(report.rows) &&
+      report.rows.length === (PILOT_NAMES.length + 1) * 3,
     "Incomplete suite/mode coverage",
   );
   const hasQa =
@@ -292,7 +293,7 @@ export function validateComparison(report, request) {
       }
     }
   }
-  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+  for (const suite of ["sweqa", ...PILOT_NAMES]) {
     for (const mode of ["hybrid", "fts", "vector"]) {
       const matches = report.rows.filter(
         (row) => row?.suite === suite && row.mode === mode,
