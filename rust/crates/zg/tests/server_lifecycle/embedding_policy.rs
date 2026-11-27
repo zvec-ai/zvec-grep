@@ -106,7 +106,7 @@ fn embedding_policy_matches_direct_server_and_mcp() -> Result<(), Box<dyn Error>
     let port = guard.listen.parse::<SocketAddr>()?.port();
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(home.path().join("daemon/instance.lock"))?)?;
-    assert_eq!(record["daemonProtocolVersion"], 4);
+    assert_eq!(record["daemonProtocolVersion"], 3);
     for text in [false, true] {
         let expected = if text { TEXT } else { CODE };
         for mode in ["direct", "server", "mcp"] {

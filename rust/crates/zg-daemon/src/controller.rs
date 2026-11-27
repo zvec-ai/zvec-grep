@@ -30,7 +30,7 @@ const STARTUP_FILE: &str = "startup.lock";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
-const DAEMON_PROTOCOL_VERSION: u32 = 4;
+const DAEMON_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StopMode {
@@ -644,7 +644,7 @@ async fn start_server_with_lock(
 ) -> Result<DaemonStatus, DaemonError> {
     let token = crate::resolve_token(config.token_file.as_deref())?;
     if let Some(record) = read_running_instance(&config.home).await?
-        && matches!(record.daemon_protocol_version, None | Some(1..=3))
+        && matches!(record.daemon_protocol_version, None | Some(1 | 2))
     {
         // A different target can be checked while the legacy service is still
         // available. Its own listening address must be released before binding.
@@ -798,7 +798,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
     };
     match record.daemon_protocol_version {
         Some(DAEMON_PROTOCOL_VERSION) => {}
-        None | Some(1..=3) => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
+        None | Some(1 | 2) => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
         Some(actual) => {
             return Err(DaemonError::ProtocolMismatch {
                 pid: record.pid,
@@ -1173,8 +1173,8 @@ mod tests {
         let mut record: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("valid test fixture"))
                 .expect("valid test fixture");
-        assert_eq!(record["daemonProtocolVersion"], 4);
-        for actual in [0, 5] {
+        assert_eq!(record["daemonProtocolVersion"], 3);
+        for actual in [0, 4] {
             record["daemonProtocolVersion"] = serde_json::json!(actual);
             std::fs::write(
                 &path,
@@ -1185,7 +1185,7 @@ mod tests {
                 .await
                 .expect_err("expected failure");
             assert!(
-                matches!(error, DaemonError::ProtocolMismatch { actual: found, expected: 4, .. } if found == actual)
+                matches!(error, DaemonError::ProtocolMismatch { actual: found, expected: 3, .. } if found == actual)
             );
             assert!(error.to_string().contains("compatible client"));
         }
