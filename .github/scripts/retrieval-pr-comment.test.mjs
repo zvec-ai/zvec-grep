@@ -246,6 +246,83 @@ test("a fork PR gets all File/Entity tables, commit links and a source run link"
   assert.doesNotMatch(input.body, /explicitly request `preview: "full"`/);
 });
 
+test("every suite keeps validated scores through reconstruction and rendering", async (t) => {
+  const x = await fixture(t);
+  const validated = validateComparison(report, request);
+  assert.equal(validated.rows.length, Object.keys(models).length * 3);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  for (const [suite, title] of [
+    ["sweqa", "SWE-QA20"],
+    ...Object.entries(PILOT_SUITES).map(([name, config]) => [
+      name,
+      config.report.comparison,
+    ]),
+  ]) {
+    assert.deepEqual(
+      validated.rows
+        .filter((row) => row.suite === suite)
+        .map((row) => row.mode),
+      ["hybrid", "fts", "vector"],
+      `${suite}: rows dropped during reconstruction`,
+    );
+    const start = body.indexOf(`### ${title}`);
+    const end = body.indexOf("\n### ", start + 1);
+    const section = body.slice(start, end === -1 ? undefined : end);
+    assert.ok(start !== -1 && section.length, `${suite}: section missing`);
+    assert.equal(
+      (section.match(/50\.00% → 60\.00%/g) ?? []).length,
+      5 * 3,
+      `${suite}: scores lost`,
+    );
+    assert.equal(
+      (
+        section.match(
+          /^\| (fts|vector|hybrid) \| File \| 50\.00% → 60\.00%/gm,
+        ) ?? []
+      ).length,
+      3,
+      `${suite}: File scores rendered as N/A`,
+    );
+  }
+  assert.equal(
+    x.messages().length,
+    1,
+    "the same comment is updated, not duplicated",
+  );
+});
+
+test("malformed rows in any suite are rejected instead of rendered as N/A", () => {
+  for (const suite of Object.keys(models))
+    for (const mutate of [
+      (r) => {
+        r.rows.splice(
+          r.rows.findIndex((row) => row.suite === suite),
+          1,
+        );
+      },
+      (r) => {
+        const index = r.rows.findIndex((row) => row.suite === suite);
+        r.rows[index] = { ...r.rows[index], mode: r.rows[index + 1].mode };
+      },
+      (r) => {
+        r.rows.find((row) => row.suite === suite).model = "remote/model";
+      },
+      (r) => {
+        r.rows.find((row) => row.suite === suite).metrics.ndcg_at_10.baseline =
+          NaN;
+      },
+    ]) {
+      const invalid = structuredClone(report);
+      mutate(invalid);
+      assert.throws(
+        () => validateComparison(invalid, request),
+        /coverage|suite\/mode|embedding model|quality metric/,
+        `${suite}: malformed row accepted`,
+      );
+    }
+});
+
 test("the publisher labels validated full preview without relabeling historical results", async (t) => {
   const x = await fixture(t);
   const full = { ...report, preview: "full" };

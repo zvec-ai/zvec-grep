@@ -10,11 +10,11 @@ resource use. Setup, frozen inputs and scoring details live with each suite.
 
 ## Contributors: run a benchmark
 
-| Benchmark           | Scope                                                                                                                       | Local instructions                                                                                                   |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Retrieval-only      | SWE-QA20, BEIR, DuRetrieval, Quarry and AACR traces (five semantic diagnostics; one lookup control); hybrid, fts and vector | [SWE-QA20 runner](zg-retrieval/README.md#run-sweqa20-locally), [expansion runners](zg-retrieval/expansion/README.md) |
-| SWE-QA e2e          | 20 software-engineering questions; baseline vs zvec-grep agent profiles                                                     | [Setup and smoke runs](swe-qa-bench/README.md#local-setup)                                                           |
-| BrowseComp-Plus e2e | 100 questions over a fixed document corpus                                                                                  | [Setup and execution](browse-comp-plus/README.md)                                                                    |
+| Benchmark           | Scope                                                                                                                       | Local instructions                                                                                                    |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Retrieval-only      | SWE-QA20, BEIR, DuRetrieval, Quarry and AACR traces (five semantic diagnostics; one lookup control); hybrid, fts and vector | [SWE-QA20 runner](zg-retrieval/README.md#run-swe-qa20-locally), [expansion runners](zg-retrieval/expansion/README.md) |
+| SWE-QA e2e          | 20 software-engineering questions; baseline vs zvec-grep agent profiles                                                     | [Setup and smoke runs](swe-qa-bench/README.md#local-setup)                                                            |
+| BrowseComp-Plus e2e | 100 questions over a fixed document corpus                                                                                  | [Setup and execution](browse-comp-plus/README.md)                                                                     |
 
 For development CI, use your own fork. In **Actions → Retrieval-only → Run
 workflow**, select the harness revision, set `candidate_ref` to the Rust source
@@ -27,7 +27,7 @@ For optional SWE-QA e2e, follow the [fork run guide](swe-qa-bench/docs/run-in-fo
 to configure model credentials and dispatch a small `repro-3` or `smoke` run
 before choosing `all-full`. Execution and judging both consume model quota.
 Remote embedding also requires its own key and endpoint; see
-[corpus size and embedding load](zg-retrieval/README.md#remote-embedding).
+[corpus size and embedding load](zg-retrieval/README.md#run-swe-qa20-locally).
 
 ## Maintainers: defaults and additional runs
 

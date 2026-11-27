@@ -293,7 +293,7 @@ export function validateComparison(report, request) {
       }
     }
   }
-  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+  for (const suite of ["sweqa", ...PILOT_NAMES]) {
     for (const mode of ["hybrid", "fts", "vector"]) {
       const matches = report.rows.filter(
         (row) => row?.suite === suite && row.mode === mode,

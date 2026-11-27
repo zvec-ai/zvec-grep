@@ -112,8 +112,9 @@ capture or scoring rules.
 | Quarry | Unique paths of original positive units | Original function ranges on the pinned preimage, with indentation and separators outside the function excluded |
 | AACR | Twelve semantic File targets; Q09 control separate | Seventeen semantic Entity targets; Q09 is one separate two-span control target |
 
-AACR requires explicit per-question review gates before either File or Entity
-scoring; operational completion still reports ranking stability and cost.
+AACR is scored with the same File and Entity rules as the other suites. Its
+five semantic queries feed the aggregate means; the Q09 exact-lookup control is
+excluded from them and reported separately.
 
 ZG's [Gold manifests](gold/) are assembled, annotated, and checked with LLM
 assistance against the pinned data above. Entity scores are diagnostic, not

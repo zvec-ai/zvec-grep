@@ -8,15 +8,15 @@ Retrieval-only 衡量不同产品版本的检索质量；e2e 衡量 Agent 接入
 
 ## 贡献者：自行运行评测
 
-| Benchmark           | 范围                                                                                                             | 本地运行说明                                                                                                       |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Retrieval-only      | SWE-QA20、BEIR、DuRetrieval、Quarry、AACR traces（五题语义诊断、一题精确查找对照）；hybrid、fts、vector 三种模式 | [SWE-QA20 runner](zg-retrieval/README.md#run-sweqa20-locally)、[扩展套件 runner](zg-retrieval/expansion/README.md) |
-| SWE-QA e2e          | 20 道软件工程问答；baseline 与 zvec-grep 两组 Agent                                                              | [配置与小规模运行](swe-qa-bench/README_CN.md#本地配置)                                                             |
-| BrowseComp-Plus e2e | 固定文档库上的 100 道问答                                                                                        | [配置与运行](browse-comp-plus/README_CN.md)                                                                        |
+| Benchmark           | 范围                                                                                                             | 本地运行说明                                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Retrieval-only      | SWE-QA20、BEIR、DuRetrieval、Quarry、AACR traces（五题语义诊断、一题精确查找对照）；hybrid、fts、vector 三种模式 | [SWE-QA20 runner](zg-retrieval/README.md#run-swe-qa20-locally)、[扩展套件 runner](zg-retrieval/expansion/README.md) |
+| SWE-QA e2e          | 20 道软件工程问答；baseline 与 zvec-grep 两组 Agent                                                              | [配置与小规模运行](swe-qa-bench/README_CN.md#本地配置)                                                              |
+| BrowseComp-Plus e2e | 固定文档库上的 100 道问答                                                                                        | [配置与运行](browse-comp-plus/README_CN.md)                                                                         |
 
 开发阶段 CI 使用自己的 fork。在 **Actions → Retrieval-only → Run workflow** 选择 harness 版本，将 `candidate_ref` 设为要编译的 Rust 源码分支、tag 或 commit；保持 `embedding=local` 即可不配置模型 API Key。单版本报告和 artifacts 见 [Retrieval 指南](zg-retrieval/README.md#run)。独立的 **Retrieval-only PR** 手动入口支持用同一份 harness 对比两个完整 commit SHA。
 
-可选的 SWE-QA e2e 参见 [fork 运行指南](swe-qa-bench/docs/run-in-fork_CN.md)：配置模型凭证后，先运行 `repro-3` 或 `smoke`，再按需选择 `all-full`。Agent 执行和评审都会消耗模型额度；远端 Embedding 还需要单独的 key 和 endpoint，参见[语料规模与 Embedding 负载](zg-retrieval/README.md#remote-embedding)。
+可选的 SWE-QA e2e 参见 [fork 运行指南](swe-qa-bench/docs/run-in-fork_CN.md)：配置模型凭证后，先运行 `repro-3` 或 `smoke`，再按需选择 `all-full`。Agent 执行和评审都会消耗模型额度；远端 Embedding 还需要单独的 key 和 endpoint，参见[语料规模与 Embedding 负载](zg-retrieval/README.md#run-swe-qa20-locally)。
 
 ## 维护者：默认评测与额外触发
 

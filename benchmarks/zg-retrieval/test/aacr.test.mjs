@@ -41,6 +41,8 @@ test("AACR reuses pilot contracts for six inputs and their reviewed targets", as
     ["Q02", "Q03", "Q04", "Q05", "Q07", "Q09"],
   );
   assert.equal(pilotCorpusIds(pilot).length, 3);
+  assert.deepEqual(pilot.modes, ["hybrid", "fts", "vector"]);
+  // Six queries, three modes and five calls per question and mode.
   assert.equal(pilot.modes.length * pilot.lock.tasks.length * 5, 90);
   assert.deepEqual(
     Object.values(pilot.gold.tasks).map((t) => t.targets.length),
@@ -81,6 +83,29 @@ test("AACR reuses pilot contracts for six inputs and their reviewed targets", as
   assert.throws(
     () => validatePilotGold(labels, pilot.lock, bytes),
     /source lock/,
+  );
+});
+
+test("AACR upstream license texts match their checksums and pinned commits", async () => {
+  const pilot = await loadPilot("aacr");
+  const { sources } = JSON.parse(
+    await readFile(
+      new URL("../expansion/gold/aacr-source-licenses.json", import.meta.url),
+    ),
+  );
+  const pinned = new Map(
+    pilot.lock.repositories.map((repo) => [repo.repository, repo.commit]),
+  );
+  assert.ok(sources.length > 0);
+  for (const source of sources) {
+    assert.equal(pinned.get(source.repository), source.commit);
+    assert.match(source.path ?? "", /^[\w./-]+$/);
+    assert.equal(sha256(source.text), source.sha256, source.path);
+  }
+  // Every indexed repository ships at least one recorded license or notice.
+  assert.deepEqual(
+    [...new Set(sources.map((source) => source.repository))].sort(),
+    [...pinned.keys()].sort(),
   );
 });
 

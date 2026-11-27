@@ -64,7 +64,7 @@ Frozen SWE-QA20 inputs are [the source lock](data/source.lock.json), [queries](d
 
 See [SWE-QA20 design](zg-retrieval-only-sweqa20-design.md), [pilot data and scoring](expansion/README.md), [QA labels](gold/qa-pairs.md) and [matching / nDCG reference](../docs/retrieval-only-qa-reference.md) for full definitions.
 
-AACR uses [six enabled code-review queries](expansion/AACR.md). Its source-review gates apply to both File and Entity metrics; pending labels are N/A while retrieval completion, ranking stability and cost remain available.
+AACR uses [six enabled code-review queries](expansion/AACR.md) with the shared File and Entity scorers unchanged: five semantic queries are scored and one exact-lookup control is reported separately. Its labels are AI-reviewed development evidence, not human-validated or exhaustive.
 
 ## Gold coverage by retrieval stage
 
