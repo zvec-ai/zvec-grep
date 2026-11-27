@@ -1001,13 +1001,13 @@ fn commit_file(
 }
 
 /// What preparing one candidate produced: the extraction to store, or the
-/// reason its bytes carry no indexable text.
+/// notice that its bytes are binary content, which no source index can carry.
 enum CandidateExtraction {
     Extracted {
         extracted: crate::extraction::ExtractionOutput,
         chunk_options: crate::extraction::ChunkOptions,
     },
-    Skipped(DecodeFailure),
+    Skipped,
 }
 
 async fn extract_candidate(
@@ -1032,11 +1032,13 @@ async fn extract_candidate(
         .await
     {
         Ok(source) => source,
-        // Content that names no text is not an index failure: skipping keeps
-        // the rest of the workspace published and ready.
-        Err(ExtractionError::NoText { failure, .. }) => {
-            return Ok(CandidateExtraction::Skipped(failure));
-        }
+        // Binary content is not something a source index can carry, so a path
+        // holding only bytes is skipped instead of failing the workspace. A
+        // BOM that does not decode is malformed text, which stays a failure.
+        Err(ExtractionError::NoText {
+            failure: DecodeFailure::Binary,
+            ..
+        }) => return Ok(CandidateExtraction::Skipped),
         Err(error) => return Err(error.into()),
     };
     // The model is read after preparation, so a path with no text leaves the
@@ -1103,8 +1105,8 @@ async fn prepare_candidate(
             extracted,
             chunk_options,
         } => (extracted, chunk_options),
-        CandidateExtraction::Skipped(failure) => {
-            return Ok(skipped_candidate(file, failure));
+        CandidateExtraction::Skipped => {
+            return Ok(skipped_candidate(file));
         }
     };
     let bound = bind_indexed_entities(&file, extracted.fragments)?;
@@ -1414,14 +1416,13 @@ fn record_file_failed(stats: &mut IndexWriteStats, file: &FileRecord, reason: &s
     stats.failed_reasons.push(reason.to_owned());
 }
 
-/// A path whose bytes carry no indexable text leaves the index instead of
-/// failing the workspace, keeping the reason the decoder reported.
-fn skipped_candidate(file: FileRecord, failure: DecodeFailure) -> PreparedCandidate {
-    let reason = match failure {
-        DecodeFailure::Binary => SkippedFileReason::Binary,
-        DecodeFailure::MalformedBom => SkippedFileReason::MalformedBom,
-    };
-    PreparedCandidate::Skipped { file, reason }
+/// A path whose bytes are binary content leaves the index instead of failing
+/// the workspace. Malformed text stays a failure, so it reaches `record_file_failed`.
+fn skipped_candidate(file: FileRecord) -> PreparedCandidate {
+    PreparedCandidate::Skipped {
+        file,
+        reason: SkippedFileReason::Binary,
+    }
 }
 
 /// Counts a path whose bytes carry no indexable text. Skipped paths never
@@ -2298,7 +2299,6 @@ fn count_skips(
         ("too_large".to_owned(), native.too_large),
         ("unsupported".to_owned(), native.unsupported),
         ("binary".to_owned(), native.binary),
-        ("malformed_bom".to_owned(), 0),
     ]);
     for file in classified {
         *counts
@@ -2314,7 +2314,6 @@ const fn skip_reason_key(reason: SkippedFileReason) -> &'static str {
         SkippedFileReason::TooLarge => "too_large",
         SkippedFileReason::Unsupported => "unsupported",
         SkippedFileReason::Binary => "binary",
-        SkippedFileReason::MalformedBom => "malformed_bom",
     }
 }
 

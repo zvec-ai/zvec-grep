@@ -800,8 +800,6 @@ pub mod result {
         Unsupported,
         /// The bytes hold binary content rather than text.
         Binary,
-        /// A BOM-marked sample does not decode as the encoding it declares.
-        MalformedBom,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

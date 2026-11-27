@@ -1,14 +1,16 @@
 //! R2 fixtures from `INDEX_FAILURES_DIAGNOSIS.md`.
 //!
 //! Content that carries no text used to fail the whole file: the workspace
-//! stayed `Failed` and the CLI exited non-zero on every run. It is now skipped,
-//! keeping the rest of the index published and ready. The two causes stay
-//! distinguishable so the counters say which one a path hit.
+//! stayed `Failed` and the CLI exited non-zero on every run. Binary content is
+//! now skipped, keeping the rest of the index published and ready. A BOM that
+//! does not decode stays malformed text, so it still fails its own path and is
+//! retried on the next pass.
 
 #[allow(dead_code)] // Shared harness; each test binary uses a different subset.
 mod support;
 
 use std::fs;
+use std::path::Path;
 
 use support::{EmbeddingServer, configure_remote_model, index_options, info_options};
 use zg_engine::{
@@ -25,7 +27,7 @@ const PNG_HEADER: [u8; 16] = [
 const MALFORMED_BOM: [u8; 3] = [0xff, 0xfe, 0xff];
 
 #[tokio::test]
-async fn binary_and_malformed_bom_content_are_skipped_not_failed()
+async fn binary_content_is_skipped_while_a_malformed_bom_still_fails()
 -> Result<(), Box<dyn std::error::Error>> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
@@ -46,11 +48,20 @@ async fn binary_and_malformed_bom_content_are_skipped_not_failed()
         .await?;
     engine.close();
 
-    assert_eq!(result.files_failed, 0, "no path may fail: {result:?}");
-    assert!(result.failed_files.is_empty(), "{:?}", result.failed_files);
+    assert_eq!(
+        result.files_failed, 1,
+        "only malformed text may fail a path: {result:?}"
+    );
+    assert_eq!(result.failed_files.len(), 1, "{:?}", result.failed_files);
+    assert_eq!(result.failed_files[0].path, Path::new("bom.js"));
+    assert!(!result.failed_files[0].reason.is_empty());
     assert!(result.entities_created > 0, "the text file stays indexed");
     assert_eq!(result.skipped_counts.get("binary"), Some(&1));
-    assert_eq!(result.skipped_counts.get("malformed_bom"), Some(&1));
+    assert!(
+        !result.skipped_counts.contains_key("malformed_bom"),
+        "{:?}",
+        result.skipped_counts
+    );
     let reasons = result
         .skipped
         .iter()
@@ -64,14 +75,12 @@ async fn binary_and_malformed_bom_content_are_skipped_not_failed()
         "{reasons:?}"
     );
     assert!(
-        reasons
-            .iter()
-            .any(|(path, reason)| path.ends_with("bom.js")
-                && *reason == SkippedFileReason::MalformedBom),
+        reasons.iter().all(|(path, _)| !path.ends_with("bom.js")),
         "{reasons:?}"
     );
 
-    // A second pass rediscovers the same skips instead of retrying a failure.
+    // A failed path stays pending, so the retry reports it again while the
+    // binary sample is rediscovered as a skip.
     let engine = ZvecGrep::new();
     let second = engine
         .index(IndexOptions {
@@ -79,7 +88,8 @@ async fn binary_and_malformed_bom_content_are_skipped_not_failed()
         })
         .await?;
     engine.close();
-    assert_eq!(second.files_failed, 0, "{second:?}");
+    assert_eq!(second.files_failed, 1, "{second:?}");
+    assert_eq!(second.failed_files[0].path, Path::new("bom.js"));
     assert_eq!(second.skipped_counts.get("binary"), Some(&1));
 
     Ok(())
