@@ -21,7 +21,7 @@ use zg_engine::{
     api::{
         context::{ContextOptions, ContextResult, options::RefreshPolicy},
         index::{
-            IndexOptions, IndexResult,
+            FtsConfigUpdate, IndexOptions, IndexResult,
             options::{ScanRulesUpdate, WorkspaceChange as IndexChange},
         },
         info::{InfoOptions, InfoResult, result::IndexStatusSnapshot},
@@ -1378,6 +1378,7 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.changes.clear();
     template.scan = ScanRulesUpdate::default();
     template.graph_indexing = None;
+    template.fts = FtsConfigUpdate::default();
     template.embedding = None;
     template.embedding_default = None;
     template
@@ -2479,6 +2480,10 @@ mod tests {
                         max_depth: Some(None),
                         ..ScanRulesUpdate::default()
                     },
+                    fts: zg_engine::api::index::FtsConfigUpdate {
+                        tokenizer: Some("standard".into()),
+                        ..Default::default()
+                    },
                     graph_indexing: Some(true),
                     ..IndexOptions::default()
                 },
@@ -2505,7 +2510,9 @@ mod tests {
         {
             let calls = executor.calls.lock().expect("calls");
             assert_eq!(calls[1].embedding_concurrency, Some(8));
+            assert_eq!(calls[1].fts.tokenizer.as_deref(), Some("standard"));
             let watched = &calls[2];
+            assert!(watched.fts.is_empty());
             assert_eq!(watched.embedding_concurrency, None);
             assert_eq!(watched.scan, ScanRulesUpdate::default());
             assert_eq!(

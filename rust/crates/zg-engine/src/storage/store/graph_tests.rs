@@ -36,6 +36,7 @@ fn options(path: &Path, read_only: bool, graph_enabled: bool) -> WorkspaceIndexS
         }
     } else {
         WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled,
             storage_path: path.to_owned(),
             embeddings: vec![

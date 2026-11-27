@@ -2,8 +2,8 @@ use super::*;
 use crate::{
     api::context::{options::RgOptions, result::ContentRange},
     domain::{
-        Content, ContentKind, Entity, EntityFragment, EntityId, FTS_CONFIG, FileIndexStatus,
-        FileRecord, FileSnapshot, FragmentId, IndexDescriptor, IndexState, PdfBlock, PdfSourceMap,
+        Content, ContentKind, Entity, EntityFragment, EntityId, FileIndexStatus, FileRecord,
+        FileSnapshot, FragmentId, FtsConfig, IndexDescriptor, IndexState, PdfBlock, PdfSourceMap,
         PdfSourcePart, Range, ScanRules, SourcePath, Workspace, WorkspaceLayout,
         model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
     },
@@ -48,10 +48,12 @@ fn write_fixture(root: &Path, texts: &[&[(u32, &str)]], names: &[&str], offsets:
     )
     .expect("schema");
     fs::create_dir_all(layout.index_dir()).expect("index directory");
+    let fts = FtsConfig::default();
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: layout.index_dir().into(),
         embeddings: vec![schema.clone()],
+        fts: fts.clone(),
     })
     .expect("store");
     fs::write(root.join("a.md"), "Recovery wait is 5 minutes.\n").expect("ordinary text");
@@ -148,7 +150,7 @@ fn write_fixture(root: &Path, texts: &[&[(u32, &str)]], names: &[&str], offsets:
         1,
         1,
         IndexState::Enabled(Box::new(
-            IndexDescriptor::new(schema, BTreeMap::new(), BTreeMap::new(), false, FTS_CONFIG)
+            IndexDescriptor::new(schema, BTreeMap::new(), BTreeMap::new(), false, fts)
                 .expect("descriptor"),
         )),
     )
@@ -648,19 +650,15 @@ async fn pdf_rg_borrows_published_writer_and_excludes_failed_files() {
     let workspace = read_workspace_manifest(dir.path(), &layout)
         .expect("manifest")
         .expect("workspace");
-    let schema = workspace
-        .index()
-        .descriptor()
-        .expect("descriptor")
-        .default_embedding_model()
-        .clone();
+    let descriptor = workspace.index().descriptor().expect("descriptor");
     let lock = Arc::new(
         acquire_workspace_lock(&layout, LockMode::Exclusive, "test writer").expect("lock"),
     );
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: layout.index_dir().into(),
-        embeddings: vec![schema],
+        embeddings: vec![descriptor.default_embedding_model().clone()],
+        fts: descriptor.fts(),
     })
     .expect("store");
     let writers = WriterContexts::default();

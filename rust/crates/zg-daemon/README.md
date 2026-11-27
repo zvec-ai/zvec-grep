@@ -44,6 +44,13 @@ gate optional request fields; unsupported capabilities require an upgrade or
 restart instead of silently changing the request's meaning. An incompatible
 live daemon must not cause `auto` mode to silently execute directly.
 
+Daemon protocol v3 supports page-aware PDF results, per-workspace FTS options,
+and the Standard default for new indexes. A v2 daemon uses Jieba by default.
+The CLI rejects a v2 daemon before submitting an index request, even when FTS
+options are omitted.
+Run `zg --server on` with the same home and any required token file to replace
+it. The stdio bootstrap performs the same upgrade.
+
 Supported daemon replacement serializes shutdown and startup, validates process
 identity and checks the destination before stopping the old service.
 Unreachable endpoints, rejected shutdowns and exit timeouts preserve the process.

@@ -112,7 +112,7 @@ pub enum CommandLine {
     Status(StatusArgs),
     /// Manage the resident MCP daemon.
     Server(ServerArgs),
-    /// Configure provider credentials and model defaults.
+    /// Configure provider credentials, model defaults, and full-text analysis.
     Config(ConfigArgs),
     /// Manage workspace Remote Embedding authorization.
     Auth(AuthArgs),
@@ -163,6 +163,11 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
+    /// Configure full-text analysis defaults for new workspace indexes.
+    Fts {
+        #[command(subcommand)]
+        action: FtsAction,
+    },
     Provider {
         #[command(subcommand)]
         action: ProviderAction,
@@ -193,6 +198,67 @@ pub enum ModelAction {
         #[arg(long = "default")]
         default_model: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FtsAction {
+    Set(FtsArgs),
+    /// List effective language presets and their sources.
+    Langs,
+}
+
+#[derive(Debug, Default, Args)]
+pub struct FtsArgs {
+    /// Expand a built-in or user-defined FTS language preset before explicit overrides.
+    #[arg(long = "fts-lang", value_name = "NAME")]
+    pub lang: Option<String>,
+    #[arg(long = "fts-tokenizer", value_name = "NAME")]
+    pub tokenizer: Option<String>,
+    /// Ordered comma-separated filters; an empty string disables all filters.
+    #[arg(long = "fts-filter", value_name = "FILTERS")]
+    pub filters: Option<String>,
+    /// JSON object replacing all extra analysis parameters; {} clears them.
+    #[arg(long = "fts-extra-params", value_name = "JSON", value_parser = parse_fts_extra_params)]
+    pub extra_params: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl FtsArgs {
+    fn is_empty(&self) -> bool {
+        self.lang.is_none()
+            && self.tokenizer.is_none()
+            && self.filters.is_none()
+            && self.extra_params.is_none()
+    }
+
+    /// Resolves presets on the CLI host before selecting an indexing transport.
+    /// # Errors
+    /// Returns preset loading or analysis validation errors.
+    pub fn into_update(
+        self,
+    ) -> Result<zg_engine::api::index::FtsConfigUpdate, zg_engine::EngineError> {
+        let update = zg_engine::api::index::FtsConfigUpdate {
+            tokenizer: self.tokenizer,
+            filters: self.filters.map(|filters| {
+                if filters.is_empty() {
+                    Vec::new()
+                } else {
+                    filters
+                        .split(',')
+                        .map(|value| value.trim().to_owned())
+                        .collect()
+                }
+            }),
+            extra_params: self.extra_params,
+        };
+        zg_engine::config::fts_languages::resolve(self.lang.as_deref(), update)
+    }
+}
+
+fn parse_fts_extra_params(
+    value: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("--fts-extra-params must be a JSON object: {error}"))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -625,6 +691,8 @@ pub use zg_engine::api::relationships::Direction;
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
+    #[command(flatten)]
+    pub fts: FtsArgs,
     /// Persist graph indexing; changing an existing index requires --rebuild.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub graph: Option<bool>,
@@ -1107,6 +1175,10 @@ fn management_option_with_value(text: &str) -> bool {
     matches!(
         text,
         "--embedding"
+            | "--fts-lang"
+            | "--fts-tokenizer"
+            | "--fts-filter"
+            | "--fts-extra-params"
             | "--endpoint"
             | "--embedding-concurrency"
             | "--listen"
@@ -1654,6 +1726,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             || args.graph.is_some()
             || args.reset_paths
             || args.embedding.is_some()
+            || !args.fts.is_empty()
             || args.model_cache.is_some()
             || args.device.is_some()
             || args.api_key.is_some()
@@ -1705,6 +1778,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             root: Some(root),
             rebuild: args.rebuild,
             graph_indexing: args.graph,
+            fts: args.fts.into_update()?,
             reset_paths: args.reset_paths,
             scan,
             embedding,
@@ -1877,7 +1951,8 @@ pub fn parse_modified_time(value: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliPlan, FileFormat, IndexOperation, QueryFilter, parse_byte_size, parse_modified_time,
+        Cli, CliError, CliPlan, CommandLine, ConfigAction, ConfigArgs, FileFormat, FtsAction,
+        IndexOperation, QueryFilter, parse_byte_size, parse_modified_time,
     };
     use std::{ffi::OsString, path::PathBuf};
 
@@ -3304,6 +3379,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fts_index_options_preserve_empty_overrides_in_all_modes() {
+        for mode in ["direct", "server", "auto"] {
+            let cli = Cli::try_parse_from([
+                "zg",
+                "--fts-tokenizer",
+                "native-tokenizer",
+                "--index",
+                "--mode",
+                mode,
+                "--fts-filter",
+                "",
+                "--fts-extra-params",
+                "{}",
+            ])
+            .expect("FTS arguments before and after index");
+            let CliPlan::Index {
+                operation: IndexOperation::Build(request),
+                ..
+            } = cli
+                .into_plan(std::env::current_dir().expect("working directory"))
+                .expect("plan")
+            else {
+                panic!("index");
+            };
+            assert_eq!(request.fts.tokenizer.as_deref(), Some("native-tokenizer"));
+            assert_eq!(request.fts.filters, Some(vec![]));
+            assert_eq!(request.fts.extra_params, Some(serde_json::Map::new()));
+        }
+        let cli = Cli::try_parse_from(["zg", "--index", "--drop", "--fts-filter", ""])
+            .expect("drop syntax");
+        assert!(
+            cli.into_plan(std::env::current_dir().expect("working directory"))
+                .is_err()
+        );
+        for query in [vec!["query"], vec!["--rg", "query"]] {
+            for (option, value) in [
+                ("--fts-lang", "ru"),
+                ("--fts-tokenizer", "standard"),
+                ("--fts-filter", ""),
+                ("--fts-extra-params", "{}"),
+            ] {
+                let error =
+                    Cli::try_parse_from([vec!["zg"], query.clone(), vec![option, value]].concat())
+                        .expect("query arguments")
+                        .into_plan(std::env::current_dir().expect("working directory"))
+                        .expect_err("index options cannot change query analysis");
+                assert!(error.to_string().contains(option), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn fts_language_arguments_keep_names_until_plan_resolution_and_reject_drop() {
+        let cli = Cli::try_parse_from([
+            "zg",
+            "--fts-lang",
+            "ru-docs",
+            "--index",
+            "--fts-filter",
+            "lowercase",
+        ])
+        .expect("preset before management action");
+        let Some(CommandLine::Index(args)) = cli.command else {
+            panic!("index");
+        };
+        assert_eq!(args.fts.lang.as_deref(), Some("ru-docs"));
+        assert_eq!(args.fts.filters.as_deref(), Some("lowercase"));
+        let cli = Cli::try_parse_from(["zg", "--index", "--drop", "--fts-lang", "unknown"])
+            .expect("drop syntax");
+        assert!(matches!(
+            cli.into_plan(std::env::current_dir().expect("working directory")),
+            Err(CliError::DropWithIndexOptions)
+        ));
+        let cli = Cli::try_parse_from(["zg", "--config", "fts", "langs"]).expect("list presets");
+        assert!(matches!(
+            cli.command,
+            Some(CommandLine::Config(ConfigArgs {
+                action: ConfigAction::Fts {
+                    action: FtsAction::Langs
+                }
+            }))
+        ));
     }
 
     #[test]

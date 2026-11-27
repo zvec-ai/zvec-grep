@@ -2,6 +2,7 @@
 
 mod content;
 mod entity;
+mod fts;
 mod glob;
 mod graph;
 mod index;
@@ -25,8 +26,7 @@ pub(crate) use entity::FragmentId;
 pub use glob::GlobRule;
 
 // Indexes.
-pub(crate) use index::FTS_CONFIG;
-pub(crate) use index::FtsConfig;
+pub use fts::{FtsConfig, FtsConfigUpdate};
 pub(crate) use index::IndexDescriptor;
 pub(crate) use index::IndexState;
 

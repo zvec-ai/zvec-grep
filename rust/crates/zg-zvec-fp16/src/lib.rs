@@ -13,6 +13,32 @@ use half::f16;
 use zvec_rust::sys::{self, zvec_error_code_t};
 use zvec_rust::{Doc, Error, ErrorCode, Result, SearchQuery};
 
+/// Asks zvec to validate index parameters on an in-memory string field.
+///
+/// # Errors
+/// Returns the native schema or analyzer error.
+pub fn validate_text_index(params: &zvec_rust::IndexParams) -> Result<()> {
+    // The safe binding exposes index parameters but not field schema validation.
+    // SAFETY: the field is owned here, and the borrowed parameters outlive both calls.
+    unsafe {
+        let field =
+            sys::zvec_field_schema_create(c"text".as_ptr(), sys::ZVEC_DATA_TYPE_STRING, false, 0);
+        if field.is_null() {
+            return Err(Error {
+                code: ErrorCode::InternalError,
+                message: "failed to create FTS field schema".into(),
+            });
+        }
+        let result = check_error(sys::zvec_field_schema_set_index_params(
+            field,
+            params.as_raw(),
+        ))
+        .and_then(|()| check_error(sys::zvec_field_schema_validate(field, std::ptr::null_mut())));
+        sys::zvec_field_schema_destroy(field);
+        result
+    }
+}
+
 /// Writes an embedding as IEEE binary16 values.
 ///
 /// # Errors

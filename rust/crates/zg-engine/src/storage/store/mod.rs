@@ -89,6 +89,8 @@ pub(crate) struct IndexedSourceEntity {
 struct SchemaRecord {
     path_encoding: PathEncoding,
     embeddings: Vec<EmbeddingModelInfo>,
+    #[serde(default = "crate::domain::FtsConfig::jieba_lowercase")]
+    fts: crate::domain::FtsConfig,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,20 +100,24 @@ enum PathEncoding {
 }
 
 impl SchemaRecord {
-    fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
+    fn new(embeddings: &[EmbeddingModelInfo], fts: crate::domain::FtsConfig) -> Self {
         Self {
             path_encoding: PathEncoding::Components,
             embeddings: embeddings.to_vec(),
+            fts,
         }
     }
 
-    fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
+    fn validate(self) -> EngineResult<Self> {
         validate_models(&self.embeddings).map_err(|error| {
             EngineError::storage_failure(format!(
                 "invalid stored embedding model information: {error}"
             ))
         })?;
-        Ok(self.embeddings)
+        self.fts.validate().map_err(|error| {
+            EngineError::storage_failure(format!("invalid stored FTS configuration: {error}"))
+        })?;
+        Ok(self)
     }
 }
 
@@ -144,6 +150,17 @@ fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
     Ok(())
 }
 
+fn validate_write_options(options: &WorkspaceIndexStorageOptions) -> EngineResult<()> {
+    if let WorkspaceIndexStorageOptions::ReadWrite {
+        embeddings, fts, ..
+    } = options
+    {
+        validate_models(embeddings)?;
+        fts.validate()?;
+    }
+    Ok(())
+}
+
 impl IndexStore {
     /// Whether indexing can persist extracted graphs in this store.
     pub(crate) fn graph_enabled(&self) -> bool {
@@ -152,9 +169,7 @@ impl IndexStore {
 
     pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
         let graph_enabled = options.graph_enabled();
-        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
-            validate_models(embeddings)?;
-        }
+        validate_write_options(&options)?;
         initialize()?;
         let home = options.storage_path();
         if !home.is_absolute() {
@@ -245,7 +260,7 @@ impl IndexStore {
                 needs_optimize,
                 closed: false,
             }),
-            schema,
+            schema: schema.embeddings,
             read_only,
             graph_enabled,
             _lock: lock,
@@ -593,14 +608,14 @@ impl IndexStore {
 
 fn open_tables(
     path: &Path,
-    schema: &[EmbeddingModelInfo],
+    schema: &SchemaRecord,
     read_only: bool,
 ) -> EngineResult<(Files, Directories, Entities, Fragments)> {
     Ok((
         Files::open(path, read_only)?,
         Directories::open(path, read_only)?,
         Entities::open(path, read_only)?,
-        Fragments::open(path, schema, read_only)?,
+        Fragments::open(path, &schema.embeddings, &schema.fts, read_only)?,
     ))
 }
 
@@ -608,13 +623,13 @@ fn recover_wal(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
     shared_lock: File,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
+) -> EngineResult<(File, SchemaRecord)> {
     // Keep the caller's workspace read lock to prevent publication, but release
     // shared storage access before taking the exclusive recovery lock.
     drop(shared_lock);
     let recovery_lock = acquire_storage_lock(path, false)?;
     let (schema, _) = load_schema(path, options.clone())?;
-    for name in collection_names(&schema) {
+    for name in collection_names(&schema.embeddings) {
         recover_collection(&path.join(name))?;
     }
     drop(recovery_lock);
@@ -882,11 +897,11 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
     Ok(())
 }
 
-/// Returns the model schema and whether this call initialized an empty store.
+/// Returns the model and analysis schema and whether this call initialized an empty store.
 fn load_schema(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(Vec<EmbeddingModelInfo>, bool)> {
+) -> EngineResult<(SchemaRecord, bool)> {
     let descriptor = path.join("schema.json");
     if file_exists(&descriptor)? {
         let schema = read_json::<SchemaRecord>(&descriptor)
@@ -895,14 +910,22 @@ fn load_schema(
                     "unsupported or invalid storage schema: {error}; rebuild the index"
                 ))
             })?
-            .embeddings()?;
-        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
-            if schema.len() != embeddings.len() {
+            .validate()?;
+        if let WorkspaceIndexStorageOptions::ReadWrite {
+            embeddings, fts, ..
+        } = &options
+        {
+            if &schema.fts != fts {
+                return Err(EngineError::invalid_argument(
+                    "FTS configuration changed; rebuild the index",
+                ));
+            }
+            if schema.embeddings.len() != embeddings.len() {
                 return Err(EngineError::invalid_argument(
                     "embedding model set changed; rebuild the index",
                 ));
             }
-            for stored in &schema {
+            for stored in &schema.embeddings {
                 let current =
                     model_schema(embeddings, &stored.model().reference()).map_err(|_| {
                         EngineError::invalid_argument(
@@ -914,7 +937,7 @@ fn load_schema(
                 })?;
             }
         }
-        for collection in collection_names(&schema) {
+        for collection in collection_names(&schema.embeddings) {
             let collection_path = path.join(&collection);
             if !directory_exists(&collection_path)? {
                 return Err(EngineError::storage_failure(format!(
@@ -939,17 +962,21 @@ fn load_schema(
             "existing workspace storage is missing its schema; rebuild the index",
         ));
     }
-    let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = options else {
+    let WorkspaceIndexStorageOptions::ReadWrite {
+        embeddings, fts, ..
+    } = options
+    else {
         return Err(EngineError::not_found(
             "workspace storage schema does not exist",
         ));
     };
     validate_models(&embeddings)?;
+    let schema = SchemaRecord::new(&embeddings, fts);
     write_record(
         &descriptor,
-        &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
+        &serde_json::to_vec(&schema).map_err(|error| json_error(&error))?,
     )?;
-    Ok((embeddings, true))
+    Ok((schema, true))
 }
 
 fn collection_names(schema: &[EmbeddingModelInfo]) -> impl Iterator<Item = String> + '_ {
@@ -981,7 +1008,7 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 fn prepare_storage(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>, bool)> {
+) -> EngineResult<(File, SchemaRecord, bool)> {
     let lock = acquire_storage_lock(path, options.is_read_only())?;
     let (schema, new_storage) = load_schema(path, options)?;
     Ok((lock, schema, new_storage))

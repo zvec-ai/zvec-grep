@@ -1,7 +1,10 @@
 //! Shared per-user global configuration for CLI and resident execution.
 
+pub mod fts_languages;
+
 use crate::{
     EngineError,
+    api::index::{FtsConfig, FtsConfigUpdate},
     domain::model::{Device, HttpEmbeddingConfig, ModelConfig},
     utils::{atomic_write, sync_directory},
 };
@@ -25,6 +28,53 @@ pub fn global_config_path() -> Result<PathBuf, EngineError> {
 
 pub(crate) fn read() -> Result<Value, EngineError> {
     read_at(&global_config_path()?)
+}
+
+/// Reads default full-text analysis for a newly created workspace index.
+/// # Errors
+/// Returns configuration I/O or validation errors.
+pub fn fts_defaults() -> Result<FtsConfig, EngineError> {
+    read_fts_at(&global_config_path()?.with_file_name("fts.json"))
+}
+
+fn read_fts_at(path: &Path) -> Result<FtsConfig, EngineError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FtsConfig::default());
+        }
+        Err(error) => {
+            return Err(EngineError::from_io(
+                format!("read '{}'", path.display()),
+                &error,
+            ));
+        }
+    };
+    let update: FtsConfigUpdate = serde_json::from_slice(&bytes).map_err(|error| {
+        EngineError::invalid_argument(format!(
+            "invalid FTS defaults in '{}': {error}",
+            path.display()
+        ))
+    })?;
+    update.apply(&FtsConfig::default())
+}
+
+/// Updates defaults for new indexes, retaining fields omitted by the caller.
+/// # Errors
+/// Returns configuration I/O or validation errors. Existing indexes are untouched.
+pub fn set_fts(update: &FtsConfigUpdate) -> Result<PathBuf, EngineError> {
+    if update.is_empty() {
+        return Err(EngineError::invalid_argument(
+            "at least one FTS option is required",
+        ));
+    }
+    let path = global_config_path()?.with_file_name("fts.json");
+    update_config_file(&path, || {
+        let config = update.apply(&read_fts_at(&path)?)?;
+        crate::storage::validate_fts(&config)?;
+        Ok(config)
+    })?;
+    Ok(path)
 }
 
 /// Reads the configured client mode after validating the global configuration.
@@ -597,6 +647,17 @@ fn update(changes: Value) -> Result<PathBuf, EngineError> {
 }
 
 fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
+    update_config_file(path, || {
+        let mut value = read_at(path)?;
+        merge(&mut value, changes);
+        parse_global_config(&value)
+    })
+}
+
+fn update_config_file<T: serde::Serialize>(
+    path: &Path,
+    update: impl FnOnce() -> Result<T, EngineError>,
+) -> Result<(), EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| EngineError::invalid_argument("Invalid config path"))?;
@@ -628,9 +689,8 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
         crate::workspace::lock::LockMode::Exclusive,
         "global-config.update",
     )?;
-    let mut value = read_at(path)?;
-    merge(&mut value, changes);
-    let value = parse_global_config(&value)?;
+    // Each file is read, updated, and atomically replaced under the configuration lock.
+    let value = update()?;
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| EngineError::internal(error.to_string()))?;
     atomic_write(path, &bytes)?;
@@ -657,6 +717,20 @@ fn merge(target: &mut Value, patch: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fts_defaults_file_inherits_omitted_fields_and_preserves_empty_filters() {
+        let home = tempfile::tempdir().expect("home");
+        let file = home.path().join("fts.json");
+        assert_eq!(
+            read_fts_at(&file).expect("missing defaults"),
+            FtsConfig::default()
+        );
+        fs::write(&file, r#"{"filters":[]}"#).expect("write defaults");
+        let fts = read_fts_at(&file).expect("partial defaults");
+        assert_eq!(fts.tokenizer, "standard");
+        assert!(fts.filters.is_empty());
+    }
 
     #[test]
     fn http_descriptor_is_accepted_without_a_catalog_entry() {

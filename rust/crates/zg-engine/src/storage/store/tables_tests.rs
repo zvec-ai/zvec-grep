@@ -34,6 +34,7 @@ fn model() -> EmbeddingModelInfo {
 
 fn metadata_store(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: path.to_owned(),
         embeddings: vec![model()],
@@ -336,6 +337,7 @@ fn counts_live_fragments_across_models_and_read_only_reopens() {
         serde_json::from_value(other).expect("second model"),
     ];
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: temporary.path().to_owned(),
         embeddings: embeddings.clone(),
@@ -380,6 +382,7 @@ fn counts_live_fragments_across_models_and_read_only_reopens() {
     reader.close().expect("close reader");
 
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: temporary.path().to_owned(),
         embeddings,
@@ -616,6 +619,7 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
         other = serde_json::from_value(metadata).expect("valid model metadata");
     }
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: vec![text, other],
@@ -700,6 +704,7 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
         second = serde_json::from_value(metadata).expect("valid model metadata");
     }
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: vec![first, second],

@@ -69,6 +69,13 @@ export function callPlan(tasks, protocol) {
   );
 }
 
+export async function benchmarkFtsArguments(cli, options) {
+  const { stdout } = await run(cli, ["--index", "--help"], options);
+  assert.match(stdout, /^\s*--embedding\s/m, "expected index help");
+  // Candidates predating language presets already use Jieba with lowercase.
+  return /^\s*--fts-lang\s/m.test(stdout) ? ["--fts-lang", "zh"] : [];
+}
+
 export function indexSelectionArguments(protocol) {
   const selection = protocol.index_selection;
   assert.equal(selection.content, "code");
@@ -366,6 +373,10 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     });
     phase = "index";
     console.log(`${repo.repository}: building a fresh index`);
+    const ftsArgs = await benchmarkFtsArguments(candidate.cli, {
+      env,
+      cwd: root,
+    });
     const started = performance.now();
     try {
       const indexed = await runCandidate(
@@ -381,6 +392,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
           options.modelCache,
           ...(!embedding.remote ? ["--device", protocol.device] : []),
           ...embedding.indexArguments,
+          ...ftsArgs,
           ...indexSelectionArguments(protocol),
           "--debug",
         ],
@@ -389,7 +401,10 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       manifest.index_seconds = (performance.now() - started) / 1000;
       manifest.index_timing_scope =
         "CLI process startup, model load/download if needed, complete index build";
-      await writeJson(join(output, "index.json"), indexed);
+      await writeJson(join(output, "index.json"), {
+        ...indexed,
+        fts_args: ftsArgs,
+      });
     } catch (error) {
       manifest.index_seconds = (performance.now() - started) / 1000;
       await writeJson(

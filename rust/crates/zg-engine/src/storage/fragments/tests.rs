@@ -45,7 +45,98 @@ fn model() -> EmbeddingModelInfo {
 
 fn metadata_store(path: &Path) -> Fragments {
     super::super::zvec::initialize().expect("initialize zvec");
-    Fragments::open(path, &[model()], false).expect("fragment storage")
+    Fragments::open(path, &[model()], &FtsConfig::default(), false).expect("fragment storage")
+}
+
+#[test]
+fn fts_language_presets_work_with_the_native_analyzer_and_stem_english_by_default() {
+    super::super::zvec::initialize().expect("initialize zvec");
+    for preset in crate::config::fts_languages::builtins().into_values() {
+        let root = tempfile::tempdir().expect("storage");
+        let store = Fragments::open(root.path(), &[model()], &preset.config, false)
+            .unwrap_or_else(|error| panic!("{}: {error}", preset.name));
+        let (file, entities, mut entries) = metadata_fragments(1, "fixture");
+        entries.truncate(1);
+        entries[0].fts_text = "running".into();
+        write_fixture(&store, &file, &entities, &entries);
+        store.flush().expect("flush");
+        drop(store);
+        let reopened = Fragments::open(root.path(), &[model()], &preset.config, true)
+            .unwrap_or_else(|error| panic!("reopen {}: {error}", preset.name));
+        let query = if preset.name == "en" {
+            "runs"
+        } else {
+            "running"
+        };
+        assert_eq!(
+            reopened.search_fts(query, 10, None).expect("query").len(),
+            1,
+            "{}",
+            preset.name
+        );
+    }
+}
+
+#[test]
+fn configured_fts_analysis_controls_real_queries_and_survives_reopening() {
+    super::super::zvec::initialize().expect("initialize zvec");
+    let cases = [
+        (
+            "standard",
+            vec!["lowercase"],
+            serde_json::json!({}),
+            vec!["De ideeën van het team", "De patiënt wacht", "Gewone tekst"],
+            vec![("ideeën", 1), ("patiënt", 1), ("xyzzy plugh", 0)],
+        ),
+        (
+            "standard",
+            vec!["lowercase", "stemmer"],
+            serde_json::json!({"stemmer_lang": "russian"}),
+            vec![
+                "архитектурное требование",
+                "архитектурных требований",
+                "unrelated text",
+            ],
+            vec![("требование", 2), ("требований", 2), ("xyzzy plugh", 0)],
+        ),
+        (
+            "whitespace",
+            vec![],
+            serde_json::json!({}),
+            vec!["UpperCase", "lowercase"],
+            vec![("UpperCase", 1), ("uppercase", 0)],
+        ),
+    ];
+    for (tokenizer, filters, parameters, texts, queries) in cases {
+        let root = tempfile::tempdir().expect("storage");
+        let config = FtsConfig {
+            tokenizer: tokenizer.into(),
+            filters: filters.into_iter().map(str::to_owned).collect(),
+            extra_params: parameters.as_object().expect("parameters").clone(),
+        };
+        let store =
+            Fragments::open(root.path(), &[model()], &config, false).expect("custom analyzer");
+        for (index, text) in texts.into_iter().enumerate() {
+            let (file, entities, mut entries) =
+                metadata_fragments(u32::try_from(index + 1).expect("file id"), "fixture");
+            entries.truncate(1);
+            entries[0].fts_text = text.into();
+            write_fixture(&store, &file, &entities, &entries);
+        }
+        store.flush().expect("flush");
+        drop(store);
+        let reopened = Fragments::open(root.path(), &[model()], &config, true).expect("reopen");
+        for (query, expected) in queries {
+            assert_eq!(
+                reopened
+                    .search_fts(query, 10, None)
+                    .expect("FTS query")
+                    .len(),
+                expected,
+                "{tokenizer}: {query}"
+            );
+        }
+    }
 }
 
 const DIRECTORY_LOOKUP: fn(&SourcePath) -> EngineResult<Option<DirectoryId>> =
@@ -505,7 +596,7 @@ fn assert_filter_file_ids(store: &Fragments, path: &StoragePathFilter, expected:
 }
 
 fn reopen_filter_store(path: &Path) -> Fragments {
-    Fragments::open(path, &[model()], true).expect("reopen fragments")
+    Fragments::open(path, &[model()], &FtsConfig::default(), true).expect("reopen fragments")
 }
 
 #[test]
@@ -644,7 +735,8 @@ fn fragment_ownership_is_checked_across_model_collections() {
         metadata["model"]["name"] = serde_json::json!("other");
         other = serde_json::from_value(metadata).expect("valid model metadata");
     }
-    let store = Fragments::open(home.path(), &[model(), other], false).expect("two models");
+    let store = Fragments::open(home.path(), &[model(), other], &FtsConfig::default(), false)
+        .expect("two models");
     let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
     write_fixture(&store, &source, &entities, &entries);
     store
@@ -761,8 +853,13 @@ fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets(
         first.max_image_bytes(),
     )
     .expect("second model");
-    let store = Fragments::open(root.path(), &[first.clone(), second.clone()], false)
-        .expect("model tables");
+    let store = Fragments::open(
+        root.path(),
+        &[first.clone(), second.clone()],
+        &FtsConfig::default(),
+        false,
+    )
+    .expect("model tables");
     let mut entities = Vec::new();
     let mut entries = Vec::new();
     for i in 0..125 {

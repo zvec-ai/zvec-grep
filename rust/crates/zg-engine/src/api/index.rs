@@ -1,5 +1,6 @@
 //! Types used by [`crate::ZvecGrep::index`].
 
+pub use crate::domain::{FtsConfig, FtsConfigUpdate};
 pub use options::IndexOptions;
 pub use result::IndexResult;
 
@@ -28,6 +29,9 @@ pub mod options {
         pub root: Option<PathBuf>,
         /// Build from empty storage and replace the active index only after success.
         pub rebuild: bool,
+        /// Explicit workspace analysis overrides. Changes require a rebuild.
+        #[serde(default, skip_serializing_if = "super::FtsConfigUpdate::is_empty")]
+        pub fts: super::FtsConfigUpdate,
         /// Turns walk-time code graph indexing on or off for this workspace.
         ///
         /// Omitted keeps the saved setting, and a workspace saved before this

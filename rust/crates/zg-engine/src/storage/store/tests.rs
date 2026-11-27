@@ -455,6 +455,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     )
     .expect("model");
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: home.to_owned(),
         embeddings: vec![original.clone()],
@@ -467,13 +468,14 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
     assert_eq!(
         record,
-        serde_json::json!({"path_encoding": "components", "embeddings": [original]})
+        serde_json::json!({"path_encoding": "components", "embeddings": [original], "fts": crate::domain::FtsConfig::default()})
     );
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
             .expect("read model info")
-            .embeddings()
-            .expect("valid model info"),
+            .validate()
+            .expect("valid model info")
+            .embeddings,
         vec![original.clone()]
     );
 
@@ -493,6 +495,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     .expect("embedding");
 
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: home.to_owned(),
         embeddings: vec![current.clone()],
@@ -515,6 +518,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
         }
         let changed = serde_json::from_value(data).expect("valid model metadata");
         let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: false,
             storage_path: home.to_owned(),
             embeddings: vec![changed],
@@ -540,8 +544,11 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let path = directory.path();
     for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
-        let mut record =
-            serde_json::to_value(SchemaRecord::new(&[schema()])).expect("descriptor JSON");
+        let mut record = serde_json::to_value(SchemaRecord::new(
+            &[schema()],
+            crate::domain::FtsConfig::default(),
+        ))
+        .expect("descriptor JSON");
         if field == "maxBatchSize" {
             record["embeddings"][0]["model"][field] = serde_json::json!(0);
         } else {
@@ -558,6 +565,7 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
                 storage_path: directory.path().to_owned(),
             },
             WorkspaceIndexStorageOptions::ReadWrite {
+                fts: crate::domain::FtsConfig::default(),
                 graph_enabled: false,
                 storage_path: directory.path().to_owned(),
                 embeddings: vec![schema()],
@@ -599,6 +607,7 @@ fn rejects_existing_collections_without_schema_before_opening_them() {
                 storage_path: directory.path().to_owned(),
             },
             WorkspaceIndexStorageOptions::ReadWrite {
+                fts: crate::domain::FtsConfig::default(),
                 graph_enabled: false,
                 storage_path: directory.path().to_owned(),
                 embeddings: vec![schema()],
@@ -627,6 +636,7 @@ fn open(path: &Path, read_only: bool) -> IndexStore {
         }
     } else {
         WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: false,
             storage_path: path.to_owned(),
             embeddings: vec![schema()],
@@ -635,10 +645,44 @@ fn open(path: &Path, read_only: bool) -> IndexStore {
     IndexStore::open(options).expect("open real zvec storage")
 }
 
+#[test]
+fn legacy_storage_uses_historical_fts_and_rejects_analyzer_changes() {
+    let root = tempfile::tempdir().expect("storage");
+    let open_writer = |fts| {
+        IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: root.path().to_owned(),
+            graph_enabled: false,
+            embeddings: vec![schema()],
+            fts,
+        })
+    };
+    let historical = crate::domain::FtsConfig::jieba_lowercase();
+    open_writer(historical.clone())
+        .expect("create Jieba index")
+        .close()
+        .expect("close");
+    let path = root.path().join("schema.json");
+    let mut record: serde_json::Value = read_json(&path).expect("schema");
+    record.as_object_mut().expect("object").remove("fts");
+    let legacy = serde_json::to_vec(&record).expect("legacy schema");
+    fs::write(&path, &legacy).expect("historical metadata");
+    open(root.path(), true).close().expect("legacy reader");
+    open_writer(historical)
+        .expect("legacy writer")
+        .close()
+        .expect("close");
+    let error = open_writer(crate::domain::FtsConfig::default())
+        .err()
+        .expect("incompatible writer");
+    assert!(error.message().contains("FTS configuration changed"));
+    assert_eq!(fs::read(path).expect("unchanged schema"), legacy);
+}
+
 /// Opens a writable store whose index stores the code graph, the shape the
 /// cross-file resolver sweeps.
 fn open_graph(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         storage_path: path.to_owned(),
         graph_enabled: true,
         embeddings: vec![schema()],
@@ -1028,6 +1072,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
     }
     assert!(
         IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: false,
             storage_path: home.to_owned(),
             embeddings: vec![incompatible],
@@ -1342,6 +1387,7 @@ fn multi_model_schema() -> Vec<EmbeddingModelInfo> {
 
 fn open_multi_model(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: path.to_owned(),
         embeddings: multi_model_schema(),
@@ -1667,6 +1713,7 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
         })
         .collect::<Vec<_>>();
     let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: embeddings.clone(),
@@ -1688,7 +1735,11 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
 
     fs::write(
         home.path().join("schema.json"),
-        serde_json::to_vec(&SchemaRecord::new(&embeddings)).expect("descriptor JSON"),
+        serde_json::to_vec(&SchemaRecord::new(
+            &embeddings,
+            crate::domain::FtsConfig::default(),
+        ))
+        .expect("descriptor JSON"),
     )
     .expect("write conflicting schema");
     let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
@@ -1715,6 +1766,7 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
     let mut reversed = multi_model_schema();
     reversed.reverse();
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: reversed,
@@ -1725,6 +1777,7 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
     for embeddings in [vec![schema()], vec![schema(), schema()]] {
         assert!(
             IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+                fts: crate::domain::FtsConfig::default(),
                 graph_enabled: false,
                 storage_path: home.path().to_owned(),
                 embeddings,
@@ -1865,6 +1918,7 @@ fn native_path_schema_requires_rebuild_without_mutating_collections() {
             storage_path: root.path().to_owned(),
         },
         WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: false,
             storage_path: root.path().to_owned(),
             embeddings: vec![schema()],
@@ -1895,6 +1949,7 @@ fn missing_or_malformed_collections_are_not_recreated() {
                 storage_path: root.path().to_owned(),
             },
             WorkspaceIndexStorageOptions::ReadWrite {
+                fts: crate::domain::FtsConfig::default(),
                 graph_enabled: false,
                 storage_path: root.path().to_owned(),
                 embeddings: vec![schema()],
@@ -1941,6 +1996,7 @@ fn critical_storage_symlinks_are_rejected_before_opening_the_target() {
         fs::write(&target, "preserve").expect("outside record");
         std::os::unix::fs::symlink(&target, index.join(name)).expect("alias");
         let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: false,
             storage_path: index,
             embeddings: vec![schema()],
@@ -2354,6 +2410,7 @@ fn resolver_still_binds_rust_use_through_the_name_index() {
 fn resolver_returns_an_empty_sweep_when_the_workspace_has_no_graph() {
     let home = tempfile::tempdir().expect("workspace");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         storage_path: home.path().to_owned(),
         graph_enabled: false,
         embeddings: vec![schema()],

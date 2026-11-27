@@ -591,7 +591,7 @@ fn retryable_replace_error(error: &std::io::Error) -> bool {
 }
 
 /// Starts the configured daemon process or returns the existing ready process.
-/// A legacy daemon without a protocol version is stopped before replacement.
+/// Daemons with a known older protocol (or no version) are stopped before replacement.
 ///
 /// # Errors
 ///
@@ -644,7 +644,7 @@ async fn start_server_with_lock(
 ) -> Result<DaemonStatus, DaemonError> {
     let token = crate::resolve_token(config.token_file.as_deref())?;
     if let Some(record) = read_running_instance(&config.home).await?
-        && matches!(record.daemon_protocol_version, None | Some(1))
+        && matches!(record.daemon_protocol_version, None | Some(1 | 2))
     {
         // A different target can be checked while the legacy service is still
         // available. Its own listening address must be released before binding.
@@ -798,7 +798,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
     };
     match record.daemon_protocol_version {
         Some(DAEMON_PROTOCOL_VERSION) => {}
-        None | Some(1) => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
+        None | Some(1 | 2) => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
         Some(actual) => {
             return Err(DaemonError::ProtocolMismatch {
                 pid: record.pid,
@@ -1174,7 +1174,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).expect("valid test fixture"))
                 .expect("valid test fixture");
         assert_eq!(record["daemonProtocolVersion"], 3);
-        for actual in [2, 4] {
+        for actual in [0, 4] {
             record["daemonProtocolVersion"] = serde_json::json!(actual);
             std::fs::write(
                 &path,

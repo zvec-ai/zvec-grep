@@ -127,7 +127,7 @@ struct SchedulerInner {
 struct SchedulerState {
     jobs: HashMap<Uuid, Arc<ScheduledJob>>,
     active_by_root: HashMap<PathBuf, Arc<ScheduledJob>>,
-    followup_by_root: HashMap<PathBuf, Arc<ScheduledJob>>,
+    followup_by_root: HashMap<PathBuf, VecDeque<Arc<ScheduledJob>>>,
     latest_by_root: HashMap<PathBuf, Arc<ScheduledJob>>,
     finished_job_ids: VecDeque<Uuid>,
 }
@@ -152,6 +152,7 @@ struct ScheduledJob {
     snapshot: Mutex<IndexJobSnapshot>,
     options: Mutex<Option<IndexOptions>>,
     cancellation: CancellationToken,
+    explicit_fts: bool,
     shared: AtomicBool,
     result: Mutex<Option<IndexResult>>,
     finished: AtomicBool,
@@ -194,63 +195,58 @@ impl IndexJobScheduler {
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(SchedulerError::Closed);
         }
-        if let Some(active) = state.active_by_root.get(&canonical_root).cloned() {
-            // Once another caller relies on a job, request cancellation must not stop it.
-            active.shared.store(true, Ordering::Release);
-            let active_snapshot = lock(&active.snapshot).clone();
-            // A graph switch is a saved configuration change: a job that already
-            // started under the other value cannot apply it, so the request needs
-            // its own job instead of being absorbed by the active one.
-            let graph_setting_request = {
-                let current = lock(&active.options);
-                changes_graph_setting(current.as_ref(), &options)
-            };
+        if let Some(active) = state.active_by_root.get(&canonical_root) {
+            let tail = state
+                .followup_by_root
+                .get(&canonical_root)
+                .and_then(VecDeque::back)
+                .unwrap_or(active);
+            let snapshot = lock(&tail.snapshot).clone();
+            // A graph switch cannot be absorbed by a job already running
+            // under the other value.
             let needs_followup = reason == JobReason::Watch
-                || active_snapshot.reason == JobReason::Watch
+                || snapshot.reason == JobReason::Watch
                 || options.rebuild
                 || has_selection_update(&options)
-                || graph_setting_request;
-            if needs_followup && active_snapshot.state == JobState::Queued {
-                let queued_full_manual = active_snapshot.reason == JobReason::Manual
-                    && reason == JobReason::Watch
-                    && lock(&active.options)
-                        .as_ref()
-                        .is_some_and(|options| options.changes.is_empty());
-                if !queued_full_manual {
-                    merge_options(&mut lock(&active.options), options);
-                }
-                if reason == JobReason::Manual {
-                    lock(&active.snapshot).reason = JobReason::Manual;
-                }
-                return Ok(SubmitIndexJobResult {
-                    job: lock(&active.snapshot).clone(),
-                    reused: true,
-                });
-            }
-            if needs_followup {
-                if let Some(followup) = state.followup_by_root.get(&canonical_root) {
-                    followup.shared.store(true, Ordering::Release);
-                    merge_options(&mut lock(&followup.options), options);
-                    if reason == JobReason::Manual {
-                        lock(&followup.snapshot).reason = JobReason::Manual;
+                || changes_graph_setting(lock(&tail.options).as_ref(), &options);
+            // An explicit FTS request must check the saved analysis with its own
+            // rebuild flag, after every preceding request has finished.
+            if !tail.explicit_fts
+                && options.fts.is_empty()
+                && (!needs_followup || snapshot.state == JobState::Queued)
+            {
+                // Once another caller relies on a job, request cancellation must not stop it.
+                tail.shared.store(true, Ordering::Release);
+                if needs_followup {
+                    let mut current = lock(&tail.options);
+                    let queued_full_manual = snapshot.reason == JobReason::Manual
+                        && reason == JobReason::Watch
+                        && current
+                            .as_ref()
+                            .is_some_and(|options| options.changes.is_empty());
+                    if !queued_full_manual {
+                        merge_options(&mut current, options);
                     }
-                    return Ok(SubmitIndexJobResult {
-                        job: lock(&followup.snapshot).clone(),
-                        reused: true,
-                    });
+                    if reason == JobReason::Manual {
+                        lock(&tail.snapshot).reason = JobReason::Manual;
+                    }
                 }
-                self.reserve_slot()?;
-                let followup = create_job(canonical_root.clone(), options, reason);
-                let snapshot = lock(&followup.snapshot).clone();
-                state.jobs.insert(followup.id, Arc::clone(&followup));
-                state.followup_by_root.insert(canonical_root, followup);
                 return Ok(SubmitIndexJobResult {
-                    job: snapshot,
+                    job: lock(&tail.snapshot).clone(),
                     reused: true,
                 });
             }
+            self.reserve_slot()?;
+            let followup = create_job(canonical_root.clone(), options, reason);
+            let snapshot = lock(&followup.snapshot).clone();
+            state.jobs.insert(followup.id, Arc::clone(&followup));
+            state
+                .followup_by_root
+                .entry(canonical_root)
+                .or_default()
+                .push_back(followup);
             return Ok(SubmitIndexJobResult {
-                job: active_snapshot,
+                job: snapshot,
                 reused: true,
             });
         }
@@ -322,7 +318,7 @@ impl IndexJobScheduler {
             let mut state = lock(&self.inner.state);
             let active = state.active_by_root.get(canonical_root).cloned();
             let followup = state.followup_by_root.remove(canonical_root);
-            if let Some(ref followup) = followup {
+            for followup in followup.iter().flatten() {
                 followup.cancellation.cancel();
                 finish_cancelled(followup, "indexing was cancelled");
                 mark_finished(&self.inner, &mut state, followup);
@@ -391,7 +387,7 @@ impl IndexJobScheduler {
                 let followups = state
                     .followup_by_root
                     .drain()
-                    .map(|(_, job)| job)
+                    .flat_map(|(_, jobs)| jobs)
                     .collect::<Vec<_>>();
                 for job in followups {
                     job.cancellation.cancel();
@@ -451,6 +447,7 @@ fn create_job(
             progress: None,
             error: None,
         }),
+        explicit_fts: !options.fts.is_empty(),
         options: Mutex::new(Some(options)),
         cancellation: CancellationToken::new(),
         shared: AtomicBool::new(reason == JobReason::Watch),
@@ -556,7 +553,17 @@ fn finish_job(inner: &Arc<SchedulerInner>, job: &Arc<ScheduledJob>) {
         {
             state.active_by_root.remove(&job.canonical_root);
         }
-        let followup = state.followup_by_root.remove(&job.canonical_root);
+        let followup = state
+            .followup_by_root
+            .get_mut(&job.canonical_root)
+            .and_then(VecDeque::pop_front);
+        if state
+            .followup_by_root
+            .get(&job.canonical_root)
+            .is_some_and(VecDeque::is_empty)
+        {
+            state.followup_by_root.remove(&job.canonical_root);
+        }
         if let Some(followup) = &followup {
             state
                 .active_by_root
@@ -570,12 +577,7 @@ fn finish_job(inner: &Arc<SchedulerInner>, job: &Arc<ScheduledJob>) {
         followup
     };
     if let Some(followup) = followup {
-        if inner.closed.load(Ordering::Acquire) {
-            finish_cancelled(&followup, "the daemon job scheduler closed");
-            finish_job(inner, &followup);
-        } else {
-            spawn_job(Arc::clone(inner), followup);
-        }
+        spawn_job(Arc::clone(inner), followup);
     }
 }
 
@@ -1833,6 +1835,131 @@ mod tests {
             }
             scheduler.shutdown().await;
         }
+    }
+
+    #[async_trait]
+    impl IndexExecutor for zg_engine::ZvecGrep {
+        async fn index(&self, options: IndexOptions) -> Result<IndexResult, EngineError> {
+            self.index(options).await
+        }
+    }
+
+    async fn create_fts_index(
+        engine: &zg_engine::ZvecGrep,
+        root: &std::path::Path,
+        fts: zg_engine::api::index::FtsConfigUpdate,
+    ) {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        engine
+            .index(IndexOptions {
+                root: Some(root.to_path_buf()),
+                fts,
+                embedding: Some(EmbeddingModelSpec {
+                    reference: "local/potion-code-16m-v2".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Cpu,
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("create standard index");
+    }
+
+    #[tokio::test]
+    async fn queued_fts_changes_require_their_own_rebuild_in_both_orders() {
+        use zg_engine::api::index::FtsConfigUpdate;
+
+        let executor = Arc::new(zg_engine::ZvecGrep::new());
+        let scheduler = IndexJobScheduler::new(executor.clone(), SchedulerConfig::default());
+        for rebuild_first in [true, false] {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let root = workspace.path().canonicalize().expect("root");
+            let standard = FtsConfigUpdate {
+                tokenizer: Some("standard".into()),
+                filters: Some(vec!["lowercase".into()]),
+                extra_params: Some(serde_json::Map::new()),
+            };
+            let jieba = FtsConfigUpdate {
+                tokenizer: Some("jieba".into()),
+                filters: Some(Vec::new()),
+                extra_params: Some(serde_json::Map::new()),
+            };
+            create_fts_index(&executor, &root, standard.clone()).await;
+            let submit = |fts, rebuild| {
+                scheduler
+                    .submit(
+                        root.clone(),
+                        IndexOptions {
+                            root: Some(root.clone()),
+                            fts,
+                            rebuild,
+                            ..Default::default()
+                        },
+                        JobReason::Manual,
+                    )
+                    .expect("submit job")
+                    .job
+                    .id
+            };
+            let permits = scheduler
+                .inner
+                .permits
+                .acquire_many(2)
+                .await
+                .expect("hold queued jobs");
+            let (rebuild, change) = if rebuild_first {
+                (
+                    submit(FtsConfigUpdate::default(), true),
+                    submit(jieba.clone(), false),
+                )
+            } else {
+                let change = submit(jieba.clone(), false);
+                (submit(FtsConfigUpdate::default(), true), change)
+            };
+            // A same-analysis request after both jobs checks the index left by them.
+            let unchanged = submit(standard, false);
+            assert_ne!(rebuild, change);
+            drop(permits);
+            let error = scheduler
+                .wait(change)
+                .await
+                .expect("FTS job")
+                .job
+                .error
+                .expect("configuration conflict");
+            assert_eq!(error.report.code, EngineError::INVALID_ARGUMENT);
+            assert!(error.report.message.contains("different FTS configuration"));
+            for id in [rebuild, unchanged] {
+                assert_eq!(
+                    scheduler.wait(id).await.expect("job").job.state,
+                    JobState::Succeeded
+                );
+            }
+            let authorized = submit(jieba, true);
+            assert_eq!(
+                scheduler
+                    .wait(authorized)
+                    .await
+                    .expect("explicit rebuild")
+                    .job
+                    .state,
+                JobState::Succeeded
+            );
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(root.join(".zvec-grep/manifest.json")).expect("manifest"),
+            )
+            .expect("JSON");
+            assert_eq!(
+                manifest["index"]["descriptor"]["fts"],
+                serde_json::json!({
+                    "tokenizer": "jieba", "filters": [], "extraParams": {}
+                })
+            );
+        }
+        scheduler.shutdown().await;
     }
 
     #[tokio::test]

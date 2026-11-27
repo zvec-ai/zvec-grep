@@ -26,7 +26,7 @@ use crate::{
         },
     },
     domain::{
-        IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
+        FtsConfig, IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
         model::{Device, EncryptedApiKey, HttpAuth, HttpEmbeddingConfig, ModelConfig},
     },
     models::{
@@ -116,7 +116,29 @@ impl WorkspaceIndexService {
                 .await?,
         );
         // Check the on-disk version before any recovery or storage mutation.
-        let existing = load_index_workspace(&requested_root, &layout, &options)?;
+        let manifest = inspect_workspace_manifest(&requested_root, &layout)?;
+        let new_workspace = matches!(manifest, ManifestState::Missing);
+        let existing = index_workspace_from_manifest(&requested_root, manifest, &options)?;
+        let previous_fts = existing
+            .as_ref()
+            .and_then(|workspace| workspace.index().descriptor())
+            .map(IndexDescriptor::fts);
+        let fts = match &previous_fts {
+            Some(config) => options.fts.apply(config)?,
+            None if new_workspace => options.fts.apply(&crate::config::fts_defaults()?)?,
+            None => options.fts.apply(&FtsConfig::jieba_lowercase())?,
+        };
+        if options.rebuild || previous_fts.is_none() || !options.fts.is_empty() {
+            crate::storage::validate_fts(&fts)?;
+        }
+        if !options.rebuild
+            && previous_fts
+                .as_ref()
+                .is_some_and(|previous| previous != &fts)
+        {
+            return Err(EngineError::invalid_argument("existing index uses a different FTS configuration")
+                .with_help("Repeat the FTS options with `zg --index --rebuild` to change the workspace analysis."));
+        }
         // Validate selection before recovery, storage, or model mutations.
         options.scan.normalize_ignore_paths(&requested_root)?;
         let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
@@ -183,7 +205,7 @@ impl WorkspaceIndexService {
         let IndexModels {
             runtimes: acquired,
             descriptor,
-        } = acquire_index_models(models, existing.as_ref(), &options, graph_indexing)?;
+        } = acquire_index_models(models, existing.as_ref(), &options, graph_indexing, fts)?;
         if !rebuilding
             && let Some(previous) = existing
                 .as_ref()
@@ -266,6 +288,11 @@ impl WorkspaceIndexService {
                 .is_some_and(IndexDescriptor::graph_indexing),
             storage_path: storage_path.to_path_buf(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
+            fts: workspace
+                .index()
+                .descriptor()
+                .expect("indexed workspace")
+                .fts(),
         })
         .map_err(|mut error| {
             if let Some(help) = error.help() {
@@ -557,19 +584,20 @@ pub(crate) async fn resolve_index_embedding(
 ) -> Result<crate::api::index::embedding::EmbeddingSelection, EngineError> {
     let root = resolve_directory(options.root.as_deref())?;
     let layout = WorkspaceLayout::new(root.join(".zvec-grep"))?;
-    let existing = load_index_workspace(&root, &layout, &options)?;
+    let manifest = inspect_workspace_manifest(&root, &layout)?;
+    let existing = index_workspace_from_manifest(&root, manifest, &options)?;
     options.scan.normalize_ignore_paths(&root)?;
     let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
     crate::file_selection::ScanPolicy::new(&root, &scan)?;
     embedding_policy::select(&root, &scan, existing.as_ref(), &options).await
 }
 
-fn load_index_workspace(
+fn index_workspace_from_manifest(
     root: &Path,
-    layout: &WorkspaceLayout,
+    manifest: ManifestState,
     options: &IndexOptions,
 ) -> Result<Option<Workspace>, EngineError> {
-    let existing = inspect_workspace_manifest(root, layout)?.into_workspace(options.rebuild)?;
+    let existing = manifest.into_workspace(options.rebuild)?;
     // Recheck after admission: a queued refresh must not become a first build.
     if options.require_existing_index && !existing.as_ref().is_some_and(Workspace::index_enabled) {
         return Err(missing_refresh_index(root));
@@ -736,6 +764,7 @@ fn acquire_index_models(
     existing: Option<&Workspace>,
     options: &IndexOptions,
     graph_indexing: bool,
+    fts: crate::domain::FtsConfig,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
     let configs = model
@@ -757,7 +786,7 @@ fn acquire_index_models(
         std::collections::BTreeMap::new(),
         configs,
         graph_indexing,
-        crate::domain::FTS_CONFIG,
+        fts,
     )?;
     if !descriptor
         .content_indexes()
@@ -1327,8 +1356,14 @@ mod tests {
             allow_remote: true,
             ..IndexOptions::default()
         };
-        let acquired =
-            super::acquire_index_models(&models, None, &options, false).expect("model metadata");
+        let acquired = super::acquire_index_models(
+            &models,
+            None,
+            &options,
+            false,
+            crate::domain::FtsConfig::default(),
+        )
+        .expect("model metadata");
         let workspace = super::index_workspace_state(
             directory.path(),
             &layout,
@@ -1478,7 +1513,7 @@ mod tests {
                     },
                 )]),
                 false,
-                crate::domain::FTS_CONFIG,
+                crate::domain::FtsConfig::default(),
             )
             .expect("index descriptor");
             let updated = super::index_workspace_state(
@@ -1533,7 +1568,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::from([("http/private".into(), saved_config.clone())]),
             false,
-            crate::domain::FTS_CONFIG,
+            crate::domain::FtsConfig::default(),
         )
         .expect("bearer HTTP index may store encrypted API key");
         let workspace = Workspace::new(
@@ -1605,7 +1640,7 @@ mod tests {
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::from([("http/private".into(), none_config)]),
                 false,
-                crate::domain::FTS_CONFIG,
+                crate::domain::FtsConfig::default(),
             )
             .is_err()
         );

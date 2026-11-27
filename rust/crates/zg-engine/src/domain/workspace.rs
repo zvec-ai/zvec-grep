@@ -544,7 +544,7 @@ mod tests {
 
     use super::{ScanRules, SourceRoot, Workspace, WorkspaceLayout};
     use crate::domain::{
-        ContentKind, FTS_CONFIG, FileFormat, IndexDescriptor, IndexState, SourcePath,
+        ContentKind, FileFormat, FtsConfig, IndexDescriptor, IndexState, SourcePath,
         model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
     };
 
@@ -571,7 +571,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             false,
-            FTS_CONFIG,
+            FtsConfig::default(),
         )
         .expect("index descriptor");
         Workspace::new(

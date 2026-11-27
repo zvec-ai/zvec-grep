@@ -175,6 +175,36 @@ fn legacy_checks_fail_without_requests_or_direct_fallback_and_off_still_works()
 }
 
 #[test]
+fn v2_daemon_rejects_default_and_explicit_fts_indexing_until_replaced() -> Result<(), Box<dyn Error>>
+{
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let root = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "agent", None, |_| {})?;
+    let mut v2 = instance_record(home.path())?;
+    v2["daemonProtocolVersion"] = json!(2);
+    write_record(home.path(), &v2)?;
+    for mode in ["auto", "server"] {
+        for fts in [vec![], vec!["--fts-lang", "zh"]] {
+            let output = cli(&guard, &["--index", "--mode", mode])
+                .arg(root.path())
+                .args(fts)
+                .output()?;
+            assert_failure(&output, "zg --server on");
+            assert_eq!(instance_record(home.path())?, v2);
+        }
+    }
+    assert_healthy(&guard.listen)?;
+    assert_command_success(&cli(&guard, &["--server", "on", "--listen", &guard.listen]).output()?);
+    let current = instance_record(home.path())?;
+    assert_eq!(current["daemonProtocolVersion"], 3);
+    assert_ne!(current["pid"], v2["pid"]);
+    assert_command_success(&guard.stop()?);
+    Ok(())
+}
+
+#[test]
 fn concurrent_starts_replace_one_legacy_daemon_and_reuse_the_new_protocol()
 -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
@@ -292,7 +322,7 @@ fn unsupported_protocol_is_rejected_without_replacing_the_daemon() -> Result<(),
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let (mut guard, _) = start_server(&binary, &home, "agent", None, |_| {})?;
-    for version in [0, 2, 4] {
+    for version in [0, 4] {
         let mut record = instance_record(home.path())?;
         record["daemonProtocolVersion"] = json!(version);
         write_record(home.path(), &record)?;

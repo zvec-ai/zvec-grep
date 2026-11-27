@@ -38,6 +38,7 @@ import {
 } from "../engines/zg/parse.mjs";
 import {
   assertFullPreviewSchema,
+  benchmarkFtsArguments,
   freePort,
   packageCandidate,
 } from "../engines/zg/run.mjs";
@@ -409,6 +410,10 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
         command.every((part) => typeof part === "string"),
     );
     await run(candidate.cli, ["--server", "off"], { cwd: root, env });
+    const ftsArgs = await benchmarkFtsArguments(candidate.cli, {
+      cwd: root,
+      env,
+    });
     const indexStart = performance.now();
     try {
       const indexed = await run(
@@ -424,6 +429,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
           options.modelCache,
           ...(!embedding.remote ? ["--device", "cpu"] : []),
           ...embedding.indexArguments,
+          ...ftsArgs,
           "--max-filesize",
           "1000000",
           "--iglob",
@@ -436,7 +442,10 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
           timeout: indexTimeoutMs,
         },
       );
-      await writeJson(join(evidence, "index.json"), indexed);
+      await writeJson(join(evidence, "index.json"), {
+        ...indexed,
+        fts_args: ftsArgs,
+      });
     } catch (error) {
       await writeJson(
         join(evidence, "index.json"),

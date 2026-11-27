@@ -60,6 +60,41 @@ Scanning respects ignore rules, excludes hidden files, does not follow symlinks,
 
 An index is created on the first indexing run and updated as files are added, changed, or removed. It can be rebuilt from scratch when needed, or deleted without removing source files or shared model caches. Indexing can complete with individual file failures, which are reported separately.
 
+### Full-text analysis
+
+New indexes use the defaults in `~/.zvec-grep/fts.json`. Omitted fields default
+to `{"tokenizer":"standard","filters":["lowercase"],"extraParams":{}}`.
+Providing only filters or extra parameters keeps the configured tokenizer.
+A language preset supplies all three fields, and explicit fields override the
+preset. A supplied filter list or parameter object replaces the whole field,
+including an empty list or object.
+
+For example, `zg --config fts set --fts-lang zh` saves Jieba with lowercase as
+the default for new workspaces. English and other built-in stemming presets
+use Standard with lowercase and a language-specific stemmer. To add a preset
+or replace a built-in one, give its complete configuration in
+`~/.zvec-grep/fts-languages.json`:
+
+```json
+{
+  "version": 1,
+  "languages": {
+    "en": {"tokenizer": "standard", "filters": ["lowercase"], "extraParams": {}}
+  }
+}
+```
+
+`zg --config fts langs` lists the effective presets. The CLI expands a preset
+on the caller before dispatch to Direct or Server mode. MCP expands `ftsLang`
+using the server user's mappings. zvec validates the resolved analyzer.
+
+Indexes persist the three resolved fields. Queries, watcher refreshes, and
+ordinary rebuilds use the saved analysis even after defaults or mappings
+change. Historical indexes without FTS metadata use Jieba with lowercase.
+To change an index, supply the new analysis on the rebuild request, for example
+`zg --index /path/to/docs --rebuild --fts-lang en`. Use `zg --status` to see
+the saved analysis.
+
 ### Search
 
 Indexed search combines full-text and vector retrieval to return relevant source snippets. Index refresh follows the caller's policy; resident execution can schedule background refresh. Query filters narrow results without changing the workspace's scanning rules. [Direct search](src/pipelines/direct_search/README.md) reads ordinary files without an index; for PDFs, it uses saved extraction when available and otherwise searches the raw file.

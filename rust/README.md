@@ -7,6 +7,7 @@ contains the legacy TypeScript implementation.
 ## Use zvec-grep
 
 - [User documentation](https://zvec.org/en/docs/zvec-grep/): installation and everyday use.
+- [Full-text analysis](crates/zg-engine/README.md#full-text-analysis): workspace defaults and language presets.
 - [Standalone installation](standalone/README.md): native bundles without Node/npm.
 - [npm installation](npm/meta/README.md): native packages distributed through npm.
 - [Agent integration](https://zvec.org/en/docs/zvec-grep/agents/): client configuration.
