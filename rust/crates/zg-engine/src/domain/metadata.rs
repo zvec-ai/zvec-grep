@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 // Keep variants in alphabetical order.
@@ -127,10 +129,42 @@ pub struct MemberAlias {
 impl CodeMetadata {
     pub(crate) const SYMBOL_NAME: IndexField = IndexField::String("symbol_name");
     pub(crate) const SYMBOL_TYPE: IndexField = IndexField::String("symbol_type");
+
+    pub(crate) fn declaring_scope(&self) -> Option<&str> {
+        // Older Go indexes stored the last generic argument as the method scope.
+        // Their signatures still contain the declared receiver, e.g. (q *Queue[Item]).
+        if self.language == Some(Language::Go)
+            && let Some(receiver) = self.signature.as_deref().and_then(go_generic_receiver)
+        {
+            return Some(receiver);
+        }
+        self.scope.as_deref()
+    }
+
+    pub(crate) fn qualified_scope(&self) -> Option<Cow<'_, str>> {
+        let scope = self.declaring_scope()?;
+        Some(match self.package.as_deref() {
+            None | Some("") => Cow::Borrowed(scope),
+            Some(package) => Cow::Owned(format!("{package}.{scope}")),
+        })
+    }
 }
 
 impl IndexedMetadata for CodeMetadata {
     const INDEX_FIELDS: &'static [IndexField] = &[Self::SYMBOL_NAME, Self::SYMBOL_TYPE];
+}
+
+fn go_generic_receiver(signature: &str) -> Option<&str> {
+    let declaration = signature
+        .strip_prefix("func")?
+        .trim_start()
+        .strip_prefix('(')?;
+    let (receiver, _) = declaration.split_once(')')?;
+    let (base, _) = receiver.split_once('[')?;
+    base.trim_end()
+        .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .filter(|name| !name.is_empty())
 }
 
 // Keep variants in alphabetical order.

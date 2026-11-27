@@ -36,10 +36,18 @@ Test/example/dependency intent and narrowly targeted include globs can waive a
 role penalty. A common dependency penalty is neutralized when all code candidates
 are dependency code. Neither `dist/` nor `.d.ts` alone implies generated code.
 
-Final selection is greedy: after each selected entity, remaining entities from
+Code selection is greedy. After each selected code hit, remaining code hits from
 the same file receive a soft factor of `1 / (1 + 0.5 * selected_count)`. There is
-no hard per-file cap. A code pool from a single file skips this selection
-penalty. Context group coverage is handled outside this module.
+no hard per-file cap. A named function keeps its static score if the query
+identifies its file, enclosing scope, or qualified method name. A path starting
+with `./` is relative to the workspace root. A bare filename or normalized
+file stem can match in any directory. Each fused route contributes its own
+explicit targets. To keep its static score, the function must also have a
+distinct scoped name and a disjoint source range
+from every previously selected code hit in that file. Unknown ranges cannot
+establish independence. Exempt functions still count toward subsequent file
+decay. A code pool from a single file skips this selection penalty. Context
+group coverage is handled outside this module.
 
 Before selection, a file's representative definition can gain up to 0.15 from
 at most two additional definitions. Support must have name or path evidence,

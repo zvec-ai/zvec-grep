@@ -326,16 +326,14 @@ impl LanguageAdapter {
                 let Some(receiver) = node.child_by_field_name("receiver") else {
                     return breadcrumb.to_vec();
                 };
-                let Some(receiver_type) = text(receiver, source)
-                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                    .rfind(|part| !part.is_empty())
+                let Some(receiver_type) = find_descendant_by_kind(receiver, "type_identifier")
                 else {
                     return breadcrumb.to_vec();
                 };
                 breadcrumb
                     .iter()
                     .cloned()
-                    .chain([receiver_type.to_owned()])
+                    .chain([text(receiver_type, source).to_owned()])
                     .collect()
             }
             Language::JavaScript | Language::TypeScript => {

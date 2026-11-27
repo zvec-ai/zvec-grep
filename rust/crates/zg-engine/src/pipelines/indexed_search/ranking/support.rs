@@ -42,7 +42,7 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
             let Some(EntityMetadata::Code(code)) = scored[index].hit.entity.metadata() else {
                 continue;
             };
-            let name = (code.scope.as_deref(), code.symbol_name.as_deref());
+            let name = (code.declaring_scope(), code.symbol_name.as_deref());
             if names.contains(&name)
                 || selected.iter().any(|&other| {
                     overlaps(
@@ -76,11 +76,11 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
     }
 }
 
-fn interval(range: &Range) -> Option<(u64, u64)> {
+pub(super) fn interval(range: &Range) -> Option<(u64, u64)> {
     range.byte_offsets().filter(|(start, end)| start < end)
 }
 
-fn overlaps(a: &Range, b: &Range) -> bool {
+pub(super) fn overlaps(a: &Range, b: &Range) -> bool {
     match (interval(a), interval(b)) {
         (Some((a0, a1)), Some((b0, b1))) => a0 < b1 && b0 < a1,
         _ => true,

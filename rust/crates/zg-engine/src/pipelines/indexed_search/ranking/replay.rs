@@ -17,10 +17,16 @@ struct Candidate {
     end: u64,
     symbol: Option<String>,
     scope: Option<String>,
+    package: Option<String>,
     kind: Option<String>,
     score: f64,
     rank: usize,
 }
+
+const BEFORE_FUNCTION_ANCHORS: Policy = Policy {
+    anchored_functions: false,
+    ..Policy::CURRENT
+};
 
 #[test]
 #[ignore = "requires local fixed candidate snapshots"]
@@ -61,6 +67,7 @@ fn replay_rule_ablation() {
             },
         ),
         ("all", Policy::CURRENT),
+        ("no_function_anchors", BEFORE_FUNCTION_ANCHORS),
         (
             "no_weak",
             Policy {
@@ -86,6 +93,7 @@ fn replay_rule_ablation() {
             "path_weak_intent",
             Policy {
                 support_weight: 0.0,
+                anchored_functions: false,
                 ..Policy::CURRENT
             },
         ),
@@ -151,7 +159,7 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 arity: None,
                 is_exported: false,
                 is_declaration: false,
-                package: None,
+                package: candidate.package.clone(),
                 has_internal_linkage: false,
                 declares_type: false,
                 alias_of: None,

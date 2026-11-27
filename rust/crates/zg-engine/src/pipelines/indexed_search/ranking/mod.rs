@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     api::context::{options::QueryFilter, result::SearchRankingTrace},
-    domain::{ContentKind, EntityMetadata, FileId},
+    domain::{ContentKind, EntityMetadata, FileId, SymbolType},
 };
 use paths::Roles;
 use query::QueryFeatures;
@@ -27,6 +27,7 @@ struct Policy {
     definition_intent: bool,
     support_weight: f64,
     bonus_cap: f64,
+    anchored_functions: bool,
 }
 
 impl Policy {
@@ -37,6 +38,7 @@ impl Policy {
         definition_intent: true,
         support_weight: 0.15,
         bonus_cap: 1.25,
+        anchored_functions: true,
     };
 
     #[cfg(test)]
@@ -47,6 +49,7 @@ impl Policy {
         definition_intent: false,
         support_weight: 0.0,
         bonus_cap: 0.50,
+        anchored_functions: false,
     };
 }
 
@@ -54,6 +57,7 @@ struct Scored {
     hit: SearchHit,
     base: f64,
     static_score: f64,
+    independent_anchor: bool,
     symbol_match: &'static str,
     symbol_bonus: f64,
     definition_bonus: f64,
@@ -151,7 +155,7 @@ fn score_code(
     let mut queries = routes.iter().map(|r| r.query.as_str()).collect::<Vec<_>>();
     queries.sort_unstable();
     queries.dedup();
-    let query = QueryFeatures::new(&queries.join("\n"));
+    let query = QueryFeatures::from_queries(&queries);
     let mut overrides = Roles::overrides(&query, filter);
     let roles = hits
         .iter()
@@ -163,13 +167,26 @@ fn score_code(
         .into_iter()
         .zip(roles)
         .map(|(hit, roles)| {
-            let (symbol_match, symbol_bonus, definition_bonus) = match hit.entity.metadata() {
-                Some(EntityMetadata::Code(code)) => query.symbol_bonus_with(code, policy),
-                _ => ("none", 0.0, 0.0),
-            };
+            let path = hit.file.relative_path().display().to_string();
+            let (symbol_match, symbol_bonus, definition_bonus, independent_anchor) =
+                match hit.entity.metadata() {
+                    Some(EntityMetadata::Code(code)) => {
+                        let (kind, symbol, definition) = query.symbol_bonus_with(code, policy);
+                        let anchored = policy.anchored_functions
+                            && code.symbol_type == Some(SymbolType::Function)
+                            && code.symbol_name.as_ref().is_some_and(|s| !s.is_empty())
+                            && support::interval(&hit.entity.source_range()).is_some()
+                            && query.names_function_file_or_scope(
+                                &path,
+                                code.qualified_scope().as_deref(),
+                                code.symbol_name.as_deref(),
+                            );
+                        (kind, symbol, definition, anchored)
+                    }
+                    _ => ("none", 0.0, 0.0, false),
+                };
             let base = hit.score / maximum_rrf;
-            let mut path_bonus = policy.path_weight
-                * query.path_affinity(&hit.file.relative_path().display().to_string());
+            let mut path_bonus = policy.path_weight * query.path_affinity(&path);
             // Weak lexical coverage is one signal even when repeated in the path.
             if symbol_match == "tokens" {
                 path_bonus = (path_bonus - symbol_bonus).max(0.0);
@@ -181,6 +198,7 @@ fn score_code(
                 hit,
                 base,
                 static_score,
+                independent_anchor,
                 symbol_match,
                 symbol_bonus,
                 definition_bonus,
@@ -216,26 +234,19 @@ fn select(
         .all(|s| s.hit.file.id() == scored[0].hit.file.id());
     let mut selected_per_file = HashMap::<FileId, u32>::new();
     let mut output = Vec::with_capacity(code_ranks.len());
+    for item in &mut scored {
+        item.hit.score = item.static_score;
+    }
     for &rank in code_ranks {
-        let effective = |item: &Scored| {
-            let count = if single_file {
-                0
-            } else {
-                selected_per_file
-                    .get(&item.hit.file.id())
-                    .copied()
-                    .unwrap_or(0)
-            };
-            item.static_score / (1.0 + FILE_DECAY * f64::from(count))
-        };
         let best = scored
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| compare(a, b, effective(a), effective(b)))
+            .min_by(|(_, a), (_, b)| compare(a, b, a.hit.score, b.hit.score))
             .map_or(0, |(index, _)| index);
         let mut item = scored.swap_remove(best);
-        let count = selected_per_file.entry(item.hit.file.id()).or_default();
-        let factor = if single_file {
+        let file = item.hit.file.id();
+        let count = selected_per_file.entry(file).or_default();
+        let factor = if single_file || item.independent_anchor {
             1.0
         } else {
             1.0 / (1.0 + FILE_DECAY * f64::from(*count))
@@ -264,6 +275,29 @@ fn select(
             });
         }
         *count = count.saturating_add(1);
+        if !single_file && output.len() + 1 < code_ranks.len() {
+            // Only this file's scores can change. Once a selected result covers a
+            // function or shares its scoped name, the waiver stays disabled.
+            let divisor = 1.0 + FILE_DECAY * f64::from(*count);
+            for other in scored
+                .iter_mut()
+                .filter(|other| other.hit.file.id() == file)
+            {
+                if other.independent_anchor {
+                    let same_symbol = matches!((other.hit.entity.metadata(), item.hit.entity.metadata()),
+                        (Some(EntityMetadata::Code(a)), Some(EntityMetadata::Code(b)))
+                        if a.symbol_name == b.symbol_name && a.declaring_scope() == b.declaring_scope());
+                    other.independent_anchor = !same_symbol
+                        && !support::overlaps(
+                            &other.hit.entity.source_range(),
+                            &item.hit.entity.source_range(),
+                        );
+                }
+                if !other.independent_anchor {
+                    other.hit.score = other.static_score / divisor;
+                }
+            }
+        }
         output.push(item.hit);
     }
     output

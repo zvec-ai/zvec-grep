@@ -580,6 +580,430 @@ fn path_affinity_respects_components_and_portable_separators() {
 }
 
 #[test]
+fn function_anchors_match_complete_paths_stems_and_scope_components() {
+    let query = QueryFeatures::new("How does sentPacketHistory use Router.Dial?");
+    assert!(query.names_function_file_or_scope(r"src\sent_packet_history.go", None, None));
+    assert!(query.names_function_file_or_scope(
+        "http.go",
+        Some("pkg::client.Router"),
+        Some("Dial")
+    ));
+    assert!(!query.names_function_file_or_scope(
+        "sent_packet_history_test.go",
+        Some("MyRouter"),
+        None
+    ));
+    assert!(!query.names_function_file_or_scope("src/how.go", Some("router"), None));
+    assert!(
+        !QueryFeatures::new("how does packet history work").names_function_file_or_scope(
+            "src/history.go",
+            Some("packet"),
+            None
+        )
+    );
+    assert!(
+        QueryFeatures::new("Semaphore").names_function_file_or_scope("semaphore.rs", None, None)
+    );
+    let path = QueryFeatures::new(r"Read the functions in src\dispatch.ts?");
+    assert!(path.names_function_file_or_scope("project/src/dispatch.ts", None, None));
+    assert!(!path.names_function_file_or_scope("project/other/dispatch.ts", None, None));
+    assert!(
+        QueryFeatures::new("methods of `worker`").names_function_file_or_scope(
+            "src/worker.c",
+            None,
+            None
+        )
+    );
+}
+
+#[test]
+fn explicit_paths_do_not_contribute_standalone_names() {
+    for literal in ["src/admin/user_service.py", r"src\admin\user_service.py"] {
+        let query = QueryFeatures::new(&format!("inspect `{literal}` with OtherService"));
+        assert!(query.names_function_file_or_scope(
+            "project/src/admin/user_service.py",
+            None,
+            None
+        ));
+        assert!(!query.names_function_file_or_scope("src/public/user_service.py", None, None));
+        assert!(!query.names_function_file_or_scope("other.py", Some("user_service"), None));
+        assert!(query.names_function_file_or_scope("src/other_service.rs", None, None));
+    }
+}
+
+#[test]
+fn workspace_relative_paths_match_only_at_the_root() {
+    for literal in ["./src/dispatch.py", r".\src\dispatch.py"] {
+        let query = QueryFeatures::new(&format!("lookup {literal}"));
+        assert!(query.names_function_file_or_scope("src/dispatch.py", None, None));
+        assert!(!query.names_function_file_or_scope("legacy/src/dispatch.py", None, None));
+        assert_eq!(query.path_affinity("src/dispatch.py"), 1.0);
+        assert!(query.path_affinity("legacy/src/dispatch.py") < 1.0);
+    }
+    assert!(
+        QueryFeatures::new("dispatch.py").names_function_file_or_scope(
+            "legacy/src/dispatch.py",
+            None,
+            None
+        )
+    );
+}
+
+#[test]
+fn fused_routes_keep_their_individual_function_targets() {
+    for routes in [["Router", "lookup"], ["lookup", "Router"]] {
+        let query = QueryFeatures::from_queries(&routes);
+        assert!(query.names_function_file_or_scope("dispatch.rs", Some("Router"), Some("send")));
+    }
+    let query = QueryFeatures::from_queries(&["inspect", "Compare two files"]);
+    assert!(!query.names_function_file_or_scope("compare.rs", None, None));
+}
+
+#[test]
+fn grouped_arguments_do_not_anchor_unrelated_files_or_scopes() {
+    let methods = QueryFeatures::new("Router::{send_packet,receive_packet}");
+    assert!(methods.names_function_file_or_scope(
+        "dispatch.rs",
+        Some("Router"),
+        Some("send_packet")
+    ));
+    assert!(!methods.names_function_file_or_scope(
+        "src/send_packet.py",
+        Some("receive_packet"),
+        None
+    ));
+    let generic = QueryFeatures::new("Repository[dict[KeyType, UserProfile]]");
+    assert!(generic.names_function_file_or_scope("backend.py", Some("Repository"), None));
+    assert!(!generic.names_function_file_or_scope("user_profile.py", Some("KeyType"), None));
+}
+
+#[test]
+fn nested_types_and_explicit_calls_anchor_the_correct_owner() {
+    let nested = QueryFeatures::new("methods of Outer.Inner");
+    assert!(nested.names_function_file_or_scope(
+        "Other.java",
+        Some("pkg.Outer.Inner"),
+        Some("run")
+    ));
+    assert!(!nested.names_function_file_or_scope("Other.java", Some("pkg.Outer"), Some("run")));
+    let call = QueryFeatures::new("Router::Connect()");
+    assert!(call.names_function_file_or_scope("dispatch.cpp", Some("net::Router"), Some("other")));
+    assert!(!call.names_function_file_or_scope("dispatch.cpp", Some("Other"), Some("Connect")));
+}
+
+#[test]
+fn old_go_scopes_use_the_generic_receiver_from_the_method_signature() {
+    let method = |name, signature: &str| {
+        let mut metadata = code(SymbolType::Function, name, Some("Item"));
+        metadata.language = Some(crate::domain::Language::Go);
+        metadata.signature = Some(signature.into());
+        Some(metadata)
+    };
+    for (target, expected) in [("Queue", 1.0), ("Item", 1.0 / 1.5)] {
+        let routes = [target, "lookup"].map(|query| ResolvedSearchRoute {
+            id: query.into(),
+            mode: ContextRouteMode::Fts,
+            query: query.into(),
+        });
+        let path = "collections.go";
+        let out = rank(
+            vec![
+                with_range(
+                    hit(
+                        "put",
+                        1,
+                        path,
+                        1.0,
+                        1,
+                        method("Put", "func (Queue[Item]) Put()"),
+                    ),
+                    0,
+                    10,
+                ),
+                with_range(
+                    hit(
+                        "take",
+                        1,
+                        path,
+                        0.9,
+                        2,
+                        method("Take", "func (q *Queue[Key, Item]) Take()"),
+                    ),
+                    10,
+                    20,
+                ),
+                hit("other", 2, "other.go", 0.1, 3, None),
+            ],
+            &routes,
+            &QueryFilter::default(),
+            1.0,
+            3,
+            None,
+        );
+        let trace = out
+            .iter()
+            .find(|hit| hit.entity.id().as_str() == "take")
+            .and_then(|hit| hit.trace.as_ref())
+            .and_then(|trace| trace.ranking.as_ref())
+            .expect("second method's ranking trace");
+        assert_eq!(
+            (trace.file_count_at_selection, trace.diversity_factor),
+            (1, expected)
+        );
+    }
+}
+
+#[test]
+fn comparisons_preserve_both_literal_paths() {
+    let query = QueryFeatures::new("Compare x<limit in src/lower.rs with x>limit in src/upper.rs");
+    for path in ["src/lower.rs", "src/upper.rs"] {
+        assert!(query.names_function_file_or_scope(path, None, None));
+        assert_eq!(query.path_affinity(path), 1.0);
+    }
+    assert!(!query.names_function_file_or_scope("other/lower.rs", None, None));
+}
+
+#[test]
+fn source_filenames_anchor_only_the_named_file() {
+    for name in ["Router.cpp", "Router.test.cpp", "User-Router.cpp"] {
+        let query = QueryFeatures::new(&format!("list methods in {name}"));
+        assert!(query.names_function_file_or_scope(&format!("src/{name}"), None, None));
+        assert!(!query.names_function_file_or_scope("include/Router.h", Some("net::Router"), None));
+        assert!(!query.names_function_file_or_scope("include/User.h", Some("User"), None));
+    }
+    assert!(
+        QueryFeatures::new("Router.Dial").names_function_file_or_scope(
+            "dispatch.go",
+            Some("net::Router"),
+            Some("Dial")
+        )
+    );
+    let call = QueryFeatures::new("Router.patch()");
+    assert!(call.names_function_file_or_scope("dispatch.rs", Some("net::Router"), None));
+    assert!(!call.names_function_file_or_scope("dispatch.rs", Some("OtherRouter"), None));
+    let file = QueryFeatures::new("Router.patch");
+    assert!(file.names_function_file_or_scope("changes/Router.patch", None, None));
+    assert!(!file.names_function_file_or_scope("dispatch.rs", Some("net::Router"), None));
+}
+
+#[test]
+fn generic_queries_anchor_the_container_only() {
+    for query in [
+        "Vec<String>",
+        "Vec::<String>",
+        "inspect `Vec<Result<String, Error>>` methods",
+    ] {
+        let query = QueryFeatures::new(query);
+        assert!(query.names_function_file_or_scope("collections.rs", Some("alloc::Vec<T>"), None));
+        assert!(query.names_function_file_or_scope("vec.rs", None, None));
+        assert!(!query.names_function_file_or_scope("string.rs", None, None));
+        assert!(!query.names_function_file_or_scope("other.rs", Some("String"), None));
+        assert!(!query.names_function_file_or_scope("result.rs", Some("Error"), None));
+    }
+    let query = QueryFeatures::new("alloc::Vec<String> and OtherType");
+    assert!(query.names_function_file_or_scope("collections.rs", Some("alloc::Vec<T>"), None));
+    assert!(!query.names_function_file_or_scope("vec.rs", Some("legacy::Vec<T>"), None));
+    assert!(query.names_function_file_or_scope("other_type.rs", None, None));
+}
+
+#[test]
+fn qualified_scopes_require_the_whole_component_suffix() {
+    let query = QueryFeatures::new("methods of admin::Router");
+    for scope in ["admin::Router", "pkg::admin.Router"] {
+        assert!(query.names_function_file_or_scope("dispatch.rs", Some(scope), None));
+    }
+    for scope in ["legacy::Router", "notadmin::Router", "Router"] {
+        assert!(!query.names_function_file_or_scope("router.rs", Some(scope), None));
+    }
+}
+
+#[test]
+fn rust_generic_scopes_match_the_type_identifier() {
+    let parser = QueryFeatures::new("list methods of Parser");
+    assert!(parser.names_function_file_or_scope("jsonc.rs", Some("Parser<'a>"), None));
+    assert!(!parser.names_function_file_or_scope("jsonc.rs", Some("OtherParser<'a>"), None));
+    assert!(!parser.names_function_file_or_scope("jsonc.rs", Some("Wrapper<ast::Parser>"), None));
+
+    let qualified = QueryFeatures::new("methods of jsonc::Parser");
+    let scope = "crate::jsonc::Parser<'a, Vec<ast::Node>>";
+    assert!(qualified.names_function_file_or_scope("dispatch.rs", Some(scope), None));
+    assert!(!qualified.names_function_file_or_scope(
+        "dispatch.rs",
+        Some("legacy::Parser<'a>"),
+        None
+    ));
+    let scope = "Registry<fn() -> ast::Node>::jsonc::Parser<'a>";
+    assert!(qualified.names_function_file_or_scope("dispatch.rs", Some(scope), None));
+}
+
+#[test]
+fn leading_qualified_types_anchor_their_methods() {
+    for query in [
+        "Router::{connect, disconnect}",
+        "Router.connect",
+        "Router::connect",
+    ] {
+        let query = QueryFeatures::new(query);
+        assert!(query.names_function_file_or_scope("dispatch.rs", Some("net::Router"), None));
+    }
+}
+
+fn with_range(mut hit: SearchHit, start: u64, end: u64) -> SearchHit {
+    hit.entity = Entity::new(
+        hit.entity.id().clone(),
+        hit.entity.file_id(),
+        Range::Byte(crate::domain::ByteRange::new(start, end).expect("byte range")),
+        hit.entity.content().clone(),
+        hit.entity.metadata().cloned(),
+        hit.entity.fragments().to_vec(),
+    )
+    .expect("entity with range");
+    hit
+}
+
+#[test]
+fn java_method_waivers_respect_the_declared_package() {
+    for (package, expected) in [
+        (Some("example.java.util"), 1.0),
+        (Some("other.java.util"), 1.0 / 1.5),
+        (Some(""), 1.0 / 1.5),
+        (None, 1.0 / 1.5),
+    ] {
+        let method = |name| {
+            let mut metadata = code(SymbolType::Function, name, Some("List"));
+            metadata.package = package.map(str::to_owned);
+            Some(metadata)
+        };
+        let out = run(
+            "methods of example.java.util.List",
+            vec![
+                with_range(hit("add", 1, "List.java", 1.0, 1, method("add")), 0, 10),
+                with_range(hit("get", 1, "List.java", 0.9, 2, method("get")), 10, 20),
+                hit("other", 2, "Other.java", 0.1, 3, None),
+            ],
+            &QueryFilter::default(),
+            3,
+        );
+        let trace = out
+            .iter()
+            .find(|hit| hit.entity.id().as_str() == "get")
+            .and_then(|hit| hit.trace.as_ref())
+            .and_then(|trace| trace.ranking.as_ref())
+            .expect("second method's ranking trace");
+        assert_eq!(trace.file_count_at_selection, 1);
+        assert_eq!(trace.diversity_factor, expected, "package {package:?}");
+    }
+}
+
+#[test]
+fn only_independent_anchored_functions_keep_their_scores() {
+    let scoped = |kind, name| Some(code(kind, name, Some("net::Router")));
+    let function = SymbolType::Function;
+    let path = "src/dispatch.rs";
+    let candidates = vec![
+        with_range(
+            hit("lead", 1, path, 1.0, 1, scoped(function, "first")),
+            0,
+            10,
+        ),
+        with_range(
+            hit("sibling", 1, path, 0.9, 2, scoped(function, "next")),
+            10,
+            20,
+        ),
+        with_range(
+            hit("overlap", 1, path, 0.85, 3, scoped(function, "nested")),
+            12,
+            18,
+        ),
+        with_range(
+            hit("duplicate", 1, path, 0.84, 4, scoped(function, "first")),
+            25,
+            30,
+        ),
+        with_range(
+            hit(
+                "field",
+                1,
+                path,
+                0.83,
+                5,
+                scoped(SymbolType::Value, "field"),
+            ),
+            31,
+            32,
+        ),
+        hit(
+            "unknown-range",
+            1,
+            path,
+            0.82,
+            6,
+            scoped(function, "unknown"),
+        ),
+        with_range(hit("other-file", 2, "lib.rs", 0.8, 7, None), 0, 7),
+    ];
+    let out = run(
+        "Router::{first, next}",
+        candidates,
+        &QueryFilter::default(),
+        7,
+    );
+    let ids: Vec<_> = out.iter().map(|hit| hit.entity.id().as_str()).collect();
+    assert_eq!(&ids[..3], ["lead", "sibling", "other-file"]);
+    let trace = |index: usize| {
+        out[index]
+            .trace
+            .as_ref()
+            .expect("search trace")
+            .ranking
+            .as_ref()
+            .expect("ranking trace")
+    };
+    assert_eq!(
+        (trace(1).file_count_at_selection, trace(1).diversity_factor),
+        (1, 1.0)
+    );
+    for (index, _) in out.iter().enumerate().skip(3) {
+        let r = trace(index);
+        assert!(r.file_count_at_selection >= 2);
+        assert_eq!(
+            r.diversity_factor,
+            1.0 / (1.0 + 0.5 * f64::from(r.file_count_at_selection))
+        );
+    }
+}
+
+#[test]
+fn unknown_selected_range_prevents_later_waivers() {
+    let named = Some(code(SymbolType::Function, "send", None));
+    let out = run(
+        "inspect `dispatch.rs`",
+        vec![
+            hit("whole", 1, "dispatch.rs", 1.0, 1, None),
+            with_range(hit("function", 1, "dispatch.rs", 0.8, 2, named), 2, 6),
+            hit("other", 2, "another.rs", 0.1, 3, None),
+        ],
+        &QueryFilter::default(),
+        3,
+    );
+    let r = out
+        .iter()
+        .find(|h| h.entity.id().as_str() == "function")
+        .expect("returned function")
+        .trace
+        .as_ref()
+        .expect("search trace")
+        .ranking
+        .as_ref()
+        .expect("ranking trace");
+    assert_eq!(
+        (r.file_count_at_selection, r.diversity_factor),
+        (1, 1.0 / 1.5)
+    );
+}
+
+#[test]
 fn file_support_requires_independent_definitions_and_is_bounded() {
     let mut candidates = vec![
         hit(

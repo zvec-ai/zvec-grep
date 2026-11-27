@@ -1,12 +1,16 @@
 //! Query-local structural signals; source text references are not name matches.
+use std::{borrow::Cow, collections::HashSet};
+
 use super::Policy;
-use crate::domain::{CodeMetadata, SymbolType};
+use crate::domain::{CodeMetadata, FileCategory, FileFormat, SymbolType};
 
 #[derive(Default)]
 // These independent features may all apply at once.
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct QueryFeatures {
-    query_tokens: std::collections::HashSet<String>,
+    query_tokens: HashSet<String>,
+    scope_names: HashSet<String>,
+    file_stems: HashSet<String>,
     pub(super) paths: Vec<String>,
     explicit_names: Vec<String>,
     pub(super) usages: bool,
@@ -20,7 +24,22 @@ pub(super) struct QueryFeatures {
 }
 
 impl QueryFeatures {
+    #[cfg(test)]
     pub(super) fn new(query: &str) -> Self {
+        Self::from_queries(&[query])
+    }
+
+    pub(super) fn from_queries(queries: &[&str]) -> Self {
+        let mut features = Self::from_text(&queries.join("\n"));
+        for query in queries {
+            let (scopes, stems) = function_anchor_names(query);
+            features.scope_names.extend(scopes);
+            features.file_stems.extend(stems);
+        }
+        features
+    }
+
+    fn from_text(query: &str) -> Self {
         let identifiers = identifiers(query);
         let lower = query.to_lowercase();
         let words = identifiers
@@ -79,6 +98,8 @@ impl QueryFeatures {
                 .filter(|s| s.contains(['/', '\\', '.']))
                 .map(str::to_owned)
                 .collect(),
+            scope_names: HashSet::new(),
+            file_stems: HashSet::new(),
             explicit_names,
             requested_kind,
             usages: ["usage", "usages", "callers", "references"]
@@ -157,7 +178,10 @@ impl QueryFeatures {
         let Some(name) = code.symbol_name.as_deref().filter(|s| !s.is_empty()) else {
             return ("none", 0.0, 0.0);
         };
-        let scope = code.scope.as_deref().unwrap_or_default().replace('.', "::");
+        let scope = code
+            .declaring_scope()
+            .unwrap_or_default()
+            .replace('.', "::");
         let name = name.replace('.', "::");
         let qualified = if scope.is_empty() {
             name.clone()
@@ -253,14 +277,49 @@ impl QueryFeatures {
         (best.0, best.1, definition)
     }
 
+    pub(super) fn names_function_file_or_scope(
+        &self,
+        path: &str,
+        scope: Option<&str>,
+        symbol: Option<&str>,
+    ) -> bool {
+        if scope.is_some_and(|scope| {
+            let scope = scope_type_name(scope);
+            let matches = |target: &str| {
+                scope
+                    .strip_suffix(target)
+                    .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with("::"))
+            };
+            self.scope_names.iter().any(|target| {
+                matches(target)
+                    || target
+                        .rsplit_once("::")
+                        .is_some_and(|(owner, member)| Some(member) == symbol && matches(owner))
+            })
+        }) {
+            return true;
+        }
+        let path = path.replace('\\', "/");
+        self.paths.iter().any(|query| {
+            let literal = query
+                .trim_start_matches(['(', '[', '{'])
+                .trim_end_matches([')', ']', '}', '.', '?', '!', ':', '`', '\'', '"']);
+            path_matches(&path, literal)
+        }) || (!self.file_stems.is_empty()
+            && std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| self.file_stems.contains(&normalized_stem(stem))))
+    }
+
     /// Match query terms against the file stem and nearby directories, once per term.
     pub(super) fn path_affinity(&self, path: &str) -> f64 {
         let normalized = path.replace('\\', "/");
-        if self.paths.iter().any(|query| {
-            let query = query.replace('\\', "/");
-            let query = query.strip_prefix("./").unwrap_or(&query);
-            normalized == query || normalized.ends_with(&format!("/{query}"))
-        }) {
+        if self
+            .paths
+            .iter()
+            .any(|query| path_matches(&normalized, query))
+        {
             return 1.0;
         }
         let parts = normalized.split('/').collect::<Vec<_>>();
@@ -300,6 +359,173 @@ impl QueryFeatures {
             .sum::<f64>();
         sum / count_as_f64(query_tokens.len()).max(1.0)
     }
+}
+
+fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
+    let mut generic_names = HashSet::new();
+    let query = without_anchor_arguments(query, Some(&mut generic_names));
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut scope_names = HashSet::new();
+    let mut standalone_names: HashSet<&str> = query
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|word| !word.is_empty() && word.chars().all(is_word))
+        .collect();
+    let delimiter = |c: char| c.is_whitespace() || "`'\"(),;[]{}".contains(c);
+    let terms = query.split_inclusive(delimiter).filter_map(|part| {
+        let term = part.trim_end_matches(delimiter);
+        (!term.is_empty()).then_some((term, part.ends_with('(')))
+    });
+    for (i, (term, is_call)) in terms.enumerate() {
+        // Paths and recognized source filenames are matched literally, as a whole.
+        let literal = term.trim_end_matches(['.', '?', '!', ':']);
+        if term.contains(['/', '\\'])
+            || (!is_call
+                && literal.contains('.')
+                && FileFormat::from_file_name(literal.as_ref())
+                    .iter()
+                    .any(|format| format.categories().contains(&FileCategory::Code)))
+        {
+            continue;
+        }
+        let words = term.split(|c| !is_word(c) && !matches!(c, ':' | '.'));
+        for (j, raw) in words.filter(|word| word.chars().any(is_word)).enumerate() {
+            let word = raw.trim_matches([':', '.']);
+            if raw.contains("::") || word.contains('.') {
+                let qualified = word.replace('.', "::");
+                // An explicit call identifies its owner regardless of method capitalization.
+                // An uncalled qualified type (Outer.Inner) retains its full scope.
+                if let Some((owner, member)) = qualified.rsplit_once("::")
+                    && !raw.ends_with("::")
+                    && (is_call
+                        || (member.starts_with(char::is_lowercase)
+                            && owner
+                                .rsplit("::")
+                                .next()
+                                .is_some_and(|name| name.starts_with(char::is_uppercase))))
+                {
+                    scope_names.insert(owner.to_owned());
+                }
+                scope_names.insert(qualified);
+            } else if generic_names.contains(word)
+                || word.contains('_')
+                || word.chars().skip(1).any(char::is_uppercase)
+                // A capitalized first word in a sentence is often just prose.
+                || ((i > 0 || j > 0 || query.trim() == word) && word.starts_with(char::is_uppercase))
+            {
+                standalone_names.insert(word);
+            }
+        }
+    }
+    let file_stems = standalone_names
+        .iter()
+        .filter(|word| word.chars().count() >= 3)
+        .map(|word| normalized_stem(word))
+        .filter(|stem| !stem.is_empty())
+        .collect();
+    scope_names.extend(standalone_names.into_iter().map(str::to_owned));
+    (scope_names, file_stems)
+}
+
+/// Keep the qualified type name from extracted scopes such as `jsonc::Parser<'a>`.
+fn scope_type_name(scope: &str) -> Cow<'_, str> {
+    let name = without_anchor_arguments(scope, None);
+    if name.contains('.') {
+        Cow::Owned(name.replace('.', "::"))
+    } else {
+        name
+    }
+}
+
+/// Keep the owner of type arguments and grouped selectors (e.g. `Router::{send, recv}`).
+/// Record explicit types so the sentence-initial filter accepts `Vec<T>` and `Repo[T]`.
+fn without_anchor_arguments<'a>(
+    text: &'a str,
+    mut query_names: Option<&mut HashSet<&'a str>>,
+) -> Cow<'a, str> {
+    if !text.contains(['<', '[', '{']) {
+        return Cow::Borrowed(text);
+    }
+    let mut result = String::new();
+    let mut copied = 0;
+    let mut prefix = "";
+    let mut name = "";
+    let mut closers = Vec::new();
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '<' | '[' | '{' => {
+                let closer = match ch {
+                    '<' => '>',
+                    '[' => ']',
+                    _ => '}',
+                };
+                if !closers.is_empty() {
+                    closers.push(closer);
+                    continue;
+                }
+                let before = &text[copied..i];
+                if ch == '{' && !before.ends_with("::") {
+                    continue;
+                }
+                prefix = if ch == '{' {
+                    before
+                } else {
+                    before.trim_end().trim_end_matches("::")
+                };
+                name = prefix
+                    .trim_end_matches("::")
+                    .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or_default();
+                // A spaced comparison in prose should leave the following terms visible.
+                if query_names.is_none()
+                    || (!name.is_empty()
+                        && (!before.ends_with(char::is_whitespace)
+                            || name.starts_with(char::is_uppercase)))
+                {
+                    closers.push(closer);
+                }
+            }
+            '>' | ']' | '}'
+                if closers.last() == Some(&ch) && !(ch == '>' && text[..i].ends_with('-')) =>
+            {
+                closers.pop();
+                if closers.is_empty() {
+                    if let Some(names) = query_names.as_deref_mut() {
+                        names.insert(name);
+                    }
+                    result.push_str(prefix);
+                    copied = i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if copied == 0 {
+        Cow::Borrowed(text)
+    } else {
+        result.push_str(&text[copied..]);
+        Cow::Owned(result)
+    }
+}
+
+fn normalized_stem(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn path_matches(normalized: &str, query: &str) -> bool {
+    let query = query.replace('\\', "/");
+    if let Some(relative) = query.strip_prefix("./") {
+        return normalized.strip_prefix("./").unwrap_or(normalized) == relative;
+    }
+    normalized == query
+        || normalized
+            .strip_suffix(&query)
+            .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
 fn count_as_f64(count: usize) -> f64 {
