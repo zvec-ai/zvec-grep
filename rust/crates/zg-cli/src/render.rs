@@ -163,6 +163,10 @@ fn write_rg_context_result(
             )?;
             previous_path = Some(item.relative_path.as_path());
         }
+        if matches!(item.range, ContentRange::Pdf { .. }) {
+            write_pdf_rg_preview(&mut writer, item, color)?;
+            continue;
+        }
         let content = item.content.trim_end();
         let content = if color {
             highlight_ranges(content, lexical_content_ranges(item))
@@ -178,26 +182,62 @@ fn write_rg_context_result(
     Ok(())
 }
 
+/// Writes one PDF lexical entity's fields and selected context windows.
+///
+/// # Errors
+/// Returns the underlying writer error.
+pub(crate) fn write_pdf_rg_preview(
+    writer: &mut impl Write,
+    item: &ContextItem,
+    color: bool,
+) -> io::Result<()> {
+    let ContentRange::Pdf { pages, .. } = item.excerpt_range.as_ref().unwrap_or(&item.range) else {
+        return Ok(());
+    };
+    writeln!(
+        writer,
+        "  pages: {}",
+        pages
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )?;
+    if item.status == zg_engine::api::context::result::ContextItemStatus::PossiblyStale {
+        writeln!(writer, "  status: possibly_stale")?;
+    }
+    for (index, (window, content)) in item.visible_content().enumerate() {
+        let start = window.start;
+        let end = window.end;
+        if index > 0 {
+            writeln!(writer, "    …")?;
+        }
+        let content = content.trim_end();
+        let content = if color {
+            highlight_ranges(
+                content,
+                lexical_content_ranges(item).filter_map(|(a, b)| {
+                    let a = a.max(start);
+                    let b = b.min(end);
+                    (a < b).then_some((a.saturating_sub(start), b.saturating_sub(start)))
+                }),
+            )
+        } else {
+            content.into()
+        };
+        for line in content.lines() {
+            writeln!(writer, "    {line}")?;
+        }
+    }
+    Ok(())
+}
+
 fn lexical_content_ranges(item: &ContextItem) -> impl Iterator<Item = (usize, usize)> + '_ {
     item.match_ranges.iter().filter_map(|range| {
-        let ContentRange::Text {
-            start_byte_offset: content_start,
-            ..
-        } = item.content_range
-        else {
-            return None;
-        };
-        let ContentRange::Text {
-            start_byte_offset,
-            end_byte_offset,
-            ..
-        } = range
-        else {
-            return None;
-        };
+        let content_start = item.content_range.start_byte_offset()?;
         Some((
-            start_byte_offset.checked_sub(content_start)?,
-            end_byte_offset.checked_sub(content_start)?,
+            range.start_byte_offset()?.checked_sub(content_start)?,
+            range.end_byte_offset()?.checked_sub(content_start)?,
         ))
     })
 }
@@ -208,7 +248,7 @@ fn lexical_content_ranges(item: &ContextItem) -> impl Iterator<Item = (usize, us
 pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> io::Result<()> {
     use zg_engine::api::context::result::ContextSource;
     if result.source != ContextSource::Index {
-        return Ok(());
+        return write_unindexed_warning(&mut writer, result);
     }
     let has_drift =
         result.freshness.as_deref() == Some("possibly_stale") || result.has_stale_items();
@@ -241,6 +281,27 @@ pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> i
     Ok(())
 }
 
+pub(crate) fn write_unindexed_warning(
+    writer: &mut impl Write,
+    result: &ContextResult,
+) -> io::Result<()> {
+    for warning in rg_warnings(result) {
+        writeln!(writer, "Warning: {warning}")?;
+    }
+    Ok(())
+}
+
+/// Search fallback diagnostics shared by terminal and MCP presentation.
+pub fn rg_warnings(result: &ContextResult) -> impl Iterator<Item = String> + '_ {
+    result.diagnostics.rg.iter().flat_map(|rg| {
+        let unavailable = (!rg.unindexed_files.is_empty()).then(|| format!(
+            "searching {} files as raw content because no usable extraction index is available; run `zg --index` in their workspace to search extracted text.",
+            rg.unindexed_files.len()
+        ));
+        unavailable.into_iter().chain(rg.index_warnings.iter().cloned())
+    })
+}
+
 /// Writes concise terminal freshness diagnostics, preserving redirected output.
 ///
 /// # Errors
@@ -256,7 +317,7 @@ pub fn write_context_status_with_options(
         return write_context_status(writer, result);
     }
     if result.source != ContextSource::Index {
-        return Ok(());
+        return write_unindexed_warning(&mut writer, result);
     }
     let has_drift =
         result.freshness.as_deref() == Some("possibly_stale") || result.has_stale_items();
@@ -563,7 +624,15 @@ Index embedding concurrency:
   Applies only to index construction and updates, including automatic indexing
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
-  llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
+  llama.cpp: C is concurrent contexts on CPU/Metal/CUDA, default 1.
+    Direct pools use the operation's C. Server execution across all llama.cpp
+    models/devices is capped by ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM (default 1).
+    Client C limits its own operation and cannot enlarge Server capacity.
+    ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT fixes CPU threads per context in both
+    Direct and Server mode. Default:
+    max(1, floor(available logical CPUs / 2 / pool capacity)). GPU contexts
+    use one CPU helper thread. Server capacity and thread settings require
+    restart; client C changes neither. Batch packing is managed internally.
   Transformers/ORT: C controls CPU/CUDA session count in direct mode (default 1),
     capped by available hardware concurrency. Server pools use the startup
     ZVEC_GREP_EMBEDDING_CONCURRENCY value; client C only limits execution within
@@ -607,17 +676,23 @@ Workspaces are identified by their root paths; different roots may share a direc
 
 This version indexes text only with one embedding model per workspace.
 For a new index, zg --index uses --embedding, then ZVEC_GREP_EMBEDDING, then
-the configured default, falling back to local/potion-code-16m-v2.
+the configured default, then a workspace recommendation: local/potion-code-16m-v2
+for code or local/bekko-256-int8 for text. Analysis uses index scan rules and
+file sizes capped at 64 KiB per file. Data/configuration and ambiguous formats
+do not affect the code/text ratio. Ties or insufficient evidence use Potion Code.
+When --embedding is omitted, stderr explains the analysis and selected model.
 Interactive searches prompt to select an embedding model before creating a
-missing index. Local and remote models have separate tabs; downloaded local
-models and configured remote models appear first. Use arrows or Tab to switch,
+missing index and display the same workspace analysis. Local and remote models
+have separate tabs; the configured preference and recommendation appear before
+other downloaded local or configured remote models. Use arrows or Tab to switch,
 Enter to confirm, and Esc to exit. Remote models require data authorization.
 CLI searches wait for the complete index, including in --mode server.
 Non-interactive searches never create an index; run zg --index first.
 Model changes require --rebuild. Failed files are recorded; successful files
-remain searchable after a rebuild. Compatible indexes reuse their stored model.
-Rebuilding an incompatible index uses --embedding or the configured default;
-provide desired scan rules again.
+remain searchable after a rebuild. Rebuilds reuse readable stored settings,
+including v2 embedding, scan and graph configuration; explicit options override
+them. If settings cannot be read, supply them again; model selection otherwise
+uses environment, configured default, or the workspace recommendation.
 
 Environment:
   ZVEC_GREP_MODE         Default client mode: direct, server, or auto
@@ -743,6 +818,7 @@ Options:
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
   --upgrade-installed              Migrate existing integrations without installing new ones
+  --launcher PATH                  Use a stable absolute executable with --upgrade-installed
   --dry-run                        Preview migration without writing files
 
 Upgrade scans existing entries in known user configuration files.
@@ -828,6 +904,7 @@ Supported text embedding models (one per workspace):
   local/qwen3-embedding-0.6b          local    text        1024    8192  llama-cpp
   qwen/qwen3-vl-embedding             remote   text        2560   32000  qwen
   qwen/qwen3.7-text-embedding         remote   text        1024  128000  qwen
+  qwen/qwen3.7-text-embedding-flash   remote   text        1024  128000  qwen
   qwen/text-embedding-v4              remote   text        1024    8192  qwen
 
 Local models are downloaded to the model cache on first use. Remote models
@@ -884,12 +961,14 @@ Documents and data:
   html      .html, .htm
   json      .json, .jsonc
   markdown  .md, .mdx
+  pdf       .pdf (native text + layout; no OCR)
   rst       .rst
   text      .txt
   toml      .toml
   xml       .xml
   yaml      .yaml, .yml
-  Markdown preserves heading structure; other formats use text chunks.
+  Markdown and PDF preserve heading structure; other formats use text chunks.
+  PDF results include physical page numbers. Scanned pages require a text layer.
 
 Images and other non-text content are not indexed in this version.
 
@@ -901,7 +980,7 @@ Skipped binary types:
   ---------  ----------------------------------------------------------
   Archives   .zip, .tar, .gz, .bz2, .xz, .7z, .rar
   Compiled   .exe, .dll, .dylib, .so, .a, .o, .obj, .wasm, .class, .jar
-  Documents  .pdf, .doc, .docx, .ppt, .pptx, .xls, .xlsx
+  Documents  .doc, .docx, .ppt, .pptx, .xls, .xlsx
   Media      .mp3, .mp4, .mov, .avi, .mkv
   Databases  .db, .sqlite
   Files detected as binary by content are also skipped.
@@ -946,7 +1025,7 @@ Embedding concurrency:
     CPU/CUDA default to 1. Client index overrides only limit pool execution;
     they cannot expand Server capacity. Queries share the same model pool.
     Other backends retain their index-only defaults and override precedence.
-  CLI/API index setting, this variable, legacy llama.cpp index setting, then defaults.
+  CLI/API index setting, this variable, llama.cpp context setting, then defaults.
   Invalid values warn and use defaults. Restart the Server after environment changes.
   These settings are not persisted in workspace configuration.
 
@@ -959,7 +1038,10 @@ State:
 
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
-  ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Legacy index-only llama.cpp fallback after the index concurrency variable
+  ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  llama.cpp context capacity (default 1)
+    Direct index fallback after ZVEC_GREP_EMBEDDING_CONCURRENCY;
+    fixed Server execution limit across llama.cpp models/devices.
+  ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT  CPU threads per context in Direct and Server mode
   NO_COLOR                             Disable automatic terminal colors; --color overrides it
 
 Agent integration paths:
@@ -1056,6 +1138,8 @@ mod output_tests {
                 .map(|n| format!("line{n}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            content_windows: Vec::new(),
+            pdf_boxes: Vec::new(),
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(0.75),
@@ -1081,8 +1165,194 @@ mod output_tests {
             coverage: ContextCoverage::RankedSample,
             workspace_index: None,
             group_results: vec![],
+            stage_traces: vec![],
             diagnostics: ContextDiagnostics::default(),
             items: vec![indexed_item()],
+        }
+    }
+
+    #[test]
+    fn pdf_preview_uses_physical_pages_and_keeps_full_entity_available() {
+        let mut result = indexed_result();
+        let item = &mut result.items[0];
+        item.relative_path = "manual.pdf".into();
+        item.absolute_path = std::env::temp_dir().join("manual.pdf");
+        item.range = ContentRange::Pdf {
+            pages: vec![2, 4],
+            start_byte_offset: 100,
+            end_byte_offset: 100 + item.content.len(),
+        };
+        item.content_range = item.range.clone();
+        item.pdf_boxes = [
+            (2, 1, 612.0, 792.0, [-0.125, 20.25, 640.875, 15.125]),
+            (4, 1, 595.0, 842.0, [10.0, 20.0, 500.0, 40.0]),
+            (2, 2, 612.0, 792.0, [320.0, 30.0, 220.0, 12.0]),
+        ]
+        .into_iter()
+        .map(
+            |(page, block, page_width, page_height, [x, y, width, height])| {
+                zg_engine::api::context::result::PdfBox {
+                    page,
+                    block,
+                    page_width,
+                    page_height,
+                    bbox: zg_engine::api::context::result::PdfRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                }
+            },
+        )
+        .collect();
+        item.excerpt_range = Some(ContentRange::Pdf {
+            pages: vec![4],
+            start_byte_offset: 100 + item.content.find("line15").expect("anchor"),
+            end_byte_offset: 100 + item.content.len(),
+        });
+        item.metadata = Some(EntityMetadata::Markdown(MarkdownMetadata {
+            heading: Some("Generated title".into()),
+            level: Some(1),
+            scope: None,
+        }));
+        for preview in [
+            PreviewMode::None,
+            PreviewMode::Short,
+            PreviewMode::Full,
+            PreviewMode::Detail,
+        ] {
+            let mut output = Vec::new();
+            write_context_with_options(
+                &mut output,
+                &result,
+                OutputOptions {
+                    preview,
+                    color: crate::ColorMode::Never,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("render");
+            let output = String::from_utf8(output).expect("UTF-8");
+            assert!(output.contains("manual.pdf"));
+            assert!(!output.contains("manual.pdf:pages:"));
+            if preview == PreviewMode::Detail {
+                assert!(output.contains(concat!(
+                    "  Boxes:\n",
+                    "    Page 2: width: 612  height: 792\n",
+                    "      x: -0.125  y: 20.25  width: 640.875  height: 15.125\n",
+                    "      x: 320  y: 30  width: 220  height: 12\n",
+                    "    Page 4: width: 595  height: 842\n",
+                    "      x: 10  y: 20  width: 500  height: 40\n",
+                )));
+                assert_eq!(output.matches("    Page 2:").count(), 1);
+                assert!(!output.contains("block:"));
+                assert!(!output.contains("top-left"));
+                assert!(output.contains("Pages: 2,4\n"));
+                assert!(output.contains("Kind: text/native\n"));
+                assert!(output.contains("  Source:\n"));
+                assert!(!output.contains("Source: pdf_text"));
+                assert!(!output.contains("Content:"));
+                assert!(!output.contains("Range:"));
+            } else {
+                assert!(!output.contains("Boxes:"));
+                assert!(!output.contains("box:"));
+                assert!(output.contains("pages: 2,4"));
+                assert!(!output.contains("kind: text/native\n"));
+                assert!(!output.contains("source:"));
+            }
+            assert!(output.contains("line15"));
+            assert!(!output.contains("heading:"));
+            assert!(!output.contains("15: line15"));
+            if matches!(preview, PreviewMode::Full | PreviewMode::Detail) {
+                assert!(output.lines().any(|line| line.trim() == "line1"));
+                assert!(output.contains("line20"));
+            } else {
+                assert!(!output.lines().any(|line| line.trim() == "line1"));
+            }
+        }
+    }
+
+    #[test]
+    fn pdf_short_matches_markdown_context_around_evidence() {
+        for newline in ["\n", "\r\n"] {
+            let prefix = format!("# Heading{newline}outside before{newline}{newline}");
+            let evidence_line = format!("{}needle{}", "前文😀 ".repeat(30), " text".repeat(45));
+            let body = format!(
+                "{evidence_line}{newline}{newline}caption{newline}{newline}last selected line{newline}"
+            );
+            let source = format!("{prefix}{body}outside after");
+            let start = source.find("needle").expect("evidence start");
+            let boundary = prefix.len() + body.len();
+            // A partial last line and an exclusive line boundary include the same text.
+            for end in [source.find("selected").expect("last line") + 3, boundary] {
+                let mut pdf = indexed_item();
+                pdf.content.clone_from(&source);
+                pdf.range = ContentRange::Pdf {
+                    pages: vec![2, 3],
+                    start_byte_offset: 100,
+                    end_byte_offset: 100 + source.len(),
+                };
+                pdf.content_range = pdf.range.clone();
+                pdf.excerpt_range = Some(ContentRange::Pdf {
+                    pages: vec![2, 3],
+                    start_byte_offset: 100 + start,
+                    end_byte_offset: 100 + end,
+                });
+                let mut markdown = indexed_item();
+                markdown.content.clone_from(&source);
+                markdown.content_range = ContentRange::Text {
+                    start_line: 1,
+                    end_line: 9,
+                    start_byte_offset: 100,
+                    end_byte_offset: 100 + source.len(),
+                    start_byte_column: 0,
+                    end_byte_column: "outside after".len(),
+                };
+                markdown.excerpt_range = Some(ContentRange::Text {
+                    start_line: 4,
+                    end_line: if end == boundary { 9 } else { 8 },
+                    start_byte_offset: 100 + start,
+                    end_byte_offset: 100 + end,
+                    start_byte_column: start - prefix.len(),
+                    end_byte_column: if end == boundary { 0 } else { 8 },
+                });
+                let render = |item: &ContextItem| {
+                    let mut output = Vec::new();
+                    write_item_preview(
+                        &mut output,
+                        item,
+                        OutputOptions {
+                            preview: PreviewMode::Short,
+                            ..OutputOptions::default()
+                        },
+                        &QueryHighlighter::default(),
+                        crate::theme::StatusTheme::new(crate::ColorMode::Never, false),
+                    )
+                    .expect("render short preview");
+                    String::from_utf8(output)
+                        .expect("UTF-8")
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("  "))
+                        .map(|line| {
+                            if matches!(item.content_range, ContentRange::Text { .. }) {
+                                line.split_once(": ").map_or(line, |(_, text)| text)
+                            } else {
+                                line
+                            }
+                            .to_owned()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let actual = render(&pdf);
+                assert_eq!(actual, render(&markdown), "{newline:?}, end={end}");
+                assert_eq!(actual.len(), 9);
+                assert_eq!(actual[0], "# Heading");
+                assert!(actual[3].contains("needle"));
+                assert_eq!(actual[7], "last selected line");
+                assert_eq!(actual[8], "outside after");
+            }
         }
     }
 
@@ -1104,6 +1374,7 @@ mod output_tests {
             is_exported: false,
             is_declaration: false,
             package: None,
+            ..CodeMetadata::default()
         }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
@@ -1465,6 +1736,7 @@ mod output_tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                ..CodeMetadata::default()
             }));
             let mut buffer = Vec::new();
             write_item_preview(

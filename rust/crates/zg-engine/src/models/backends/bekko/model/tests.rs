@@ -104,7 +104,13 @@ fn bekko_catalog_preserves_pinned_assets_and_public_limits() {
         entry.download.hugging_face.revision,
         "c18167b8f244c1bc6de21ce9b710bac8a29c4615"
     );
-    assert!(entry.download.model_scope.is_none());
+    assert_eq!(
+        entry.download.model_scope,
+        Some(ArtifactSourceConfig {
+            repo: "egolearner/bekko-static-embedding-v1",
+            revision: "cf6eaf4c1e7483e73cf331cd42593e6a698fb3f5",
+        })
+    );
     let model =
         BekkoEmbeddingModel::new(entry, ModelConfig::default(), ModelComputeRuntime::shared());
     assert_eq!(model.concurrency_defaults().initial, 1);

@@ -19,13 +19,13 @@ fn make_entity(
     metadata: Option<EntityMetadata>,
     ranges: &[Range],
 ) -> Entity {
-    let id = EntityId::new(file_id, &content, source_range).expect("entity id");
+    let id = EntityId::new(file_id, &content, &source_range).expect("entity id");
     let fragments = ranges
         .iter()
         .enumerate()
-        .map(|(ordinal, &range)| EntityFragment {
+        .map(|(ordinal, range)| EntityFragment {
             id: FragmentId::new(&id, u32::try_from(ordinal).expect("fragment ordinal")),
-            range,
+            range: range.clone(),
         })
         .collect();
     Entity::new(id, file_id, source_range, content, metadata, fragments).expect("entity")
@@ -37,6 +37,129 @@ fn round_trip(entity: &Entity) {
         decode_entity(&encoded, entity.metadata()).expect("decode entity"),
         *entity
     );
+}
+
+#[test]
+fn pdf_provenance_round_trips_and_rejects_corrupt_page_or_text_ranges() {
+    use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+    let text = "中文 on page two\ncontinued on page four";
+    let split = text.find("continued").expect("split");
+    let map = std::sync::Arc::new(PdfSourceMap {
+        markdown_start: 12,
+        text_len: text.len(),
+        parts: vec![
+            PdfSourcePart {
+                range: 0..split,
+                block: PdfBlock {
+                    page: 2,
+                    id: 1,
+                    page_width: 612.0,
+                    page_height: 792.0,
+                    bbox: Some(crate::domain::PdfRect {
+                        x: -0.125,
+                        y: 20.25,
+                        width: 640.875,
+                        height: 15.125,
+                    }),
+                },
+            },
+            PdfSourcePart {
+                range: split..text.len(),
+                block: PdfBlock {
+                    page: 4,
+                    id: 2,
+                    page_width: 595.0,
+                    page_height: 842.0,
+                    bbox: None,
+                },
+            },
+        ],
+    });
+    let source = Range::Pdf(map.locate(0..text.len()).expect("location").into());
+    let entity = make_entity(
+        FileId::new(3),
+        Content::Text(text.into()),
+        source,
+        None,
+        &[Range::Full],
+    )
+    .with_source_map(Some(map))
+    .expect("source map");
+    round_trip(&entity);
+    let record: Value =
+        serde_json::from_str(&encode_entity(&entity).expect("encode")).expect("JSON");
+    assert!(record["source_range"].get("source").is_none());
+    assert!(record["source_range"]["location"].get("parts").is_none());
+    assert!(record["fragments"][0].get("source_map").is_none());
+    assert_eq!(record["source_range"]["location"]["pages"][0]["page"], 2);
+    assert_eq!(
+        record["source_map"]["parts"][0]["block"]["bbox"],
+        json!({"x": -0.125, "y": 20.25, "width": 640.875, "height": 15.125})
+    );
+    assert_eq!(
+        record["source_map"]["parts"][1]["block"]["page_height"],
+        json!(842.0)
+    );
+    let mut bad_dimensions = record.clone();
+    bad_dimensions["source_map"]["parts"][0]["block"]["page_width"] = json!(0.0);
+    assert_corrupt_entity(&bad_dimensions);
+    let mut old_geometry = record.clone();
+    let block = old_geometry["source_map"]["parts"][0]["block"]
+        .as_object_mut()
+        .expect("block");
+    block.remove("page_width");
+    block.remove("page_height");
+    block.remove("bbox");
+    block.insert("bounds".into(), json!([0, 0, 500_000, 500_000]));
+    assert_corrupt_entity(&old_geometry);
+    let mut bad_page = record.clone();
+    bad_page["source_map"]["parts"][0]["block"]["page"] = json!(0);
+    assert_corrupt_entity(&bad_page);
+    let mut wrong_location = record.clone();
+    wrong_location["source_range"]["location"]["pages"][0]["page"] = json!(3);
+    assert_corrupt_entity(&wrong_location);
+    let mut missing_map = record.clone();
+    missing_map
+        .as_object_mut()
+        .expect("object")
+        .remove("source_map");
+    assert_corrupt_entity(&missing_map);
+    let mut bad_utf8 = record;
+    bad_utf8["source_map"]["parts"][0]["range"]["start"] = json!(1);
+    assert_corrupt_entity(&bad_utf8);
+}
+
+#[test]
+fn pdf_image_location_needs_no_text_source_map() {
+    use crate::domain::{PdfPageLocation, PdfRange, PdfRect};
+    let location = Range::Pdf(
+        PdfRange {
+            pages: vec![PdfPageLocation {
+                page: 4,
+                page_width: 612.0,
+                page_height: 792.0,
+                rects: vec![PdfRect {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 30.0,
+                    height: 40.0,
+                }],
+            }],
+        }
+        .into(),
+    );
+    let entity = make_entity(
+        FileId::new(1),
+        Content::Image(ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image")),
+        location,
+        None,
+        &[Range::Full],
+    );
+    assert!(entity.source_map().is_none());
+    round_trip(&entity);
+    let record: Value =
+        serde_json::from_str(&encode_entity(&entity).expect("encode")).expect("JSON");
+    assert!(record.get("source_map").is_none());
 }
 
 #[test]
@@ -121,6 +244,12 @@ fn entity_records_preserve_image_content_ranges_and_external_metadata() {
             is_exported: false,
             is_declaration: false,
             package: None,
+            has_internal_linkage: false,
+            declares_type: false,
+            alias_of: None,
+            object_members: Vec::new(),
+            overwritten_by: None,
+            exported_as: Vec::new(),
         }));
         let entity = make_entity(
             FileId::new(1),
@@ -229,7 +358,7 @@ fn code_records_preserve_kind_without_metadata_and_validate_text_ranges() {
         &EntityId::new(
             entity.file_id(),
             &Content::Text("a中文b".into()),
-            Range::Full
+            &Range::Full
         )
         .expect("text entity id"),
     );

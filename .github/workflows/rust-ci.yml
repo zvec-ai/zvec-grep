@@ -138,18 +138,19 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          prefix-key: rust-ci-v3-quality
+          prefix-key: rust-ci-v4-quality
           workspaces: rust -> target
           cache-directories: |
             ~/.cargo/llama-cpp-sources/
             ~/.cargo/llama-cpp-runtimes/
+            ~/.cache/pdfium-rs/
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check packages independently
         shell: bash
         run: |
-          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
+          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-ort-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
             cargo check --locked --package "${package}" --all-targets
           done
       - name: Run Clippy
@@ -160,8 +161,10 @@ jobs:
         run: |
           python3 scripts/test-prepare-onnxruntime.py
           python3 scripts/test-check-glibc.py
+      - name: Test LiteParse PDFium staging
+        run: python3 scripts/test-prepare-pdfium.py
       - name: Test npm packaging
-        run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
+        run: node --test scripts/npm-*.test.mjs scripts/standalone-*.test.mjs npm/meta/install.test.cjs
 
   test:
     name: rust test (${{ matrix.os }}${{ matrix.cuda && ', CUDA build on CPU' || '' }})
@@ -190,7 +193,7 @@ jobs:
           node-version: 24
       - uses: ./.github/actions/restore-zvec
       - name: Test installed npm command lifecycle on this OS
-        run: node --test scripts/npm-installed-cli.test.mjs
+        run: node --test scripts/npm-installed-cli.test.mjs scripts/standalone-installer.test.mjs
       - name: Use a short Windows Cargo home
         if: runner.os == 'Windows'
         shell: python
@@ -231,11 +234,12 @@ jobs:
         if: ${{ !matrix.cuda }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          prefix-key: rust-ci-v3-test
+          prefix-key: rust-ci-v4-test
           workspaces: rust -> target
           cache-directories: |
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-sources/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-runtimes/
+            ${{ runner.os == 'macOS' && '~/Library/Caches' || runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
@@ -256,20 +260,23 @@ jobs:
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/
             ${{ env.LLAMA_CPP_RUNTIME_CACHE }}/
+            ${{ runner.os == 'Windows' && '~/AppData/Local' || '~/.cache' }}/pdfium-rs/
             rust/target/
             !rust/target/cuda-tests.tgz
             !rust/target/cuda-tests/
             !rust/target/cargo-cli.tgz
             !rust/target/cargo-cli/
-          key: rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-${{ needs.source.outputs.sha }}
+          key: rust-ci-v4-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-${{ needs.source.outputs.sha }}
           restore-keys: |
-            rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-
-      - name: Restore the three real models
+            rust-ci-v4-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-
+      - name: Restore real embedding and layout models
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
-          key: rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          key: rust-real-models-v3-${{ matrix.cuda && 'cuda' || 'default' }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          # Seed the expanded cache from existing embedding downloads.
           restore-keys: |
+            rust-real-models-v3-${{ matrix.cuda && 'cuda' || 'default' }}-${{ runner.os }}-${{ runner.arch }}-
             rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and run Linux CUDA workspace tests
         if: matrix.cuda && runner.os == 'Linux'
@@ -278,7 +285,7 @@ jobs:
         run: |
           # Keep the shared log parent runner-owned: the container writes a
           # subdirectory, then later host-side tee writes sibling CPU logs.
-          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$ZVEC_GREP_MODEL_CACHE"
+          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs" "$ZVEC_GREP_MODEL_CACHE"
           docker build --platform linux/amd64 --file rust/scripts/cuda/cuda-builder.Dockerfile \
             --build-arg CUDA_IMAGE=ubuntu:24.04 \
             --build-arg RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust/rust-toolchain.toml)" \
@@ -287,6 +294,7 @@ jobs:
             --volume "${GITHUB_WORKSPACE}:/work" \
             --volume "$HOME/.cargo/registry:/root/.cargo/registry" \
             --volume "$HOME/.cargo/git:/root/.cargo/git" \
+            --volume "$HOME/.cache/pdfium-rs:/root/.cache/pdfium-rs" \
             --volume "$ZVEC_GREP_MODEL_CACHE:/model-cache" \
             --volume "$(command -v cargo-nextest):/usr/local/bin/cargo-nextest:ro" \
             --env CARGO_INCREMENTAL --env CARGO_PROFILE_DEV_DEBUG --env CARGO_PROFILE_TEST_DEBUG \
@@ -294,6 +302,9 @@ jobs:
             --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work/rust/target/llama-runtimes \
             --env RUST_BACKTRACE --env CARGO_TERM_COLOR --env SOURCE_SHA \
             zvec-grep-cuda-ci bash -euo pipefail -c '
+              # Docker does not populate USER. Workspace preferences and
+              # persistent authorization require the actual container username.
+              export USER="$(id -un)"
               cargo nextest --version
               python3 scripts/cuda/runtime.py --reset-cargo-cli target/debug
               cargo build --locked --features cuda --message-format=json > target/cargo-cli.json
@@ -343,6 +354,25 @@ jobs:
           # Direct file output also avoids PowerShell 5's UTF-16 redirection.
           with pathlib.Path("target/ci-tests.json").open("w", encoding="utf-8") as output:
               subprocess.run(command, stdout=output, check=True)
+      - name: Verify real PDF and PP-S with the compiled CLI
+        if: ${{ !matrix.cuda }}
+        timeout-minutes: 10
+        shell: python
+        run: |
+          import os, pathlib, shutil, subprocess, sys, tempfile
+          # Reuse the CLI and runtimes emitted by the workspace test build.
+          # Run before the test harness adds build-tree library search paths.
+          with tempfile.TemporaryDirectory(prefix="zg-pdf-ci-") as temporary:
+              bundle = pathlib.Path(temporary)
+              (bundle / "bin").mkdir()
+              binary = "zg.exe" if os.name == "nt" else "zg"
+              shutil.copy2(pathlib.Path("target/debug") / binary, bundle / "bin" / binary)
+              subprocess.run(["node", "--input-type=module", "-e",
+                  "import { stageZvecRuntime } from './scripts/npm-package-core.mjs'; await stageZvecRuntime('target/debug', process.argv[1], process.platform);",
+                  str(bundle / "lib")], check=True)
+              subprocess.run([sys.executable, "scripts/pdf-package-smoke.py", "--bundle", str(bundle),
+                  "--model-cache", os.environ["ZVEC_GREP_MODEL_CACHE"],
+                  "--logs", "model-logs/pdf"], check=True)
       - name: Prepare native library lookup for the compiled executables
         if: ${{ !matrix.cuda || runner.os != 'Linux' }}
         shell: python
@@ -627,8 +657,8 @@ jobs:
         if: ${{ always() && matrix.cuda && runner.os == 'Linux' }}
         shell: bash
         run: |
-          mkdir -p target "$HOME/.cargo/registry" "$HOME/.cargo/git"
-          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          mkdir -p target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"
+          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$HOME/.cache/pdfium-rs"
           if [ -n "${ZVEC_GREP_MODEL_CACHE:-}" ]; then
             mkdir -p "$ZVEC_GREP_MODEL_CACHE"
             sudo chown -R "$(id -u):$(id -g)" "$ZVEC_GREP_MODEL_CACHE"
@@ -739,8 +769,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
-          key: rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          key: rust-real-models-v3-cuda-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
           restore-keys: |
+            rust-real-models-v3-cuda-${{ runner.os }}-${{ runner.arch }}-
             rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Download the original Cargo CLI output
         uses: actions/download-artifact@v8
@@ -813,7 +844,13 @@ jobs:
           smoke = "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds"
           cases = [
               ("cuda-onnx", "zg_engine", smoke, "local/all-minilm-l6-v2", "onnx"),
+              ("cuda-onnx-shutdown", "zg_engine",
+               "models::backends::transformers::model::cuda_shutdown_tests::cached_minilm_cuda_sessions_exit_cleanly",
+               None, "onnx"),
               ("cuda-gguf", "zg_engine", smoke, "local/embeddinggemma-300m", "gguf"),
+              ("cuda-gguf-shutdown", "zg_engine",
+               "models::backends::llama_cpp::model::tests::cuda_shutdown::cached_embeddinggemma_cuda_workers_exit_cleanly",
+               None, "gguf"),
               # The preceding smoke prepares the cache. Run the regression in a
               # fresh process, with CUDA/offload evidence and no extra download.
               ("cuda-gguf-long-input", "zg_engine",
@@ -845,7 +882,7 @@ jobs:
                          test, "--ignored", "--exact", "--nocapture"]
               if not windows:
                   image = ("nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc"
-                           if name == "cuda-onnx" else
+                           if backend == "onnx" else
                            "nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34")
                   command = [
                       "docker", "run", "--rm", "--gpus", "all", "--platform", "linux/amd64",
@@ -857,11 +894,15 @@ jobs:
                       'export LD_LIBRARY_PATH="/gpu-tests/lib:${LD_LIBRARY_PATH:-}"; '
                       # The pinned image supplies CUDA. Restrict apt to Ubuntu
                       # sources so NVIDIA mirror syncs cannot block certificates.
-                      'if [ "$1" = model ]; then '
+                      'if [ "$1" = model ] || [ "$1" = shutdown ]; then '
                       'apt_options=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3); '
                       'apt-get "${apt_options[@]}" update -qq; '
-                      'apt-get "${apt_options[@]}" install --yes --no-install-recommends ca-certificates >/dev/null; fi; '
-                      'shift; exec timeout 900 "$@"', "gpu-test", "model" if model else "c5", *command,
+                      'packages=(ca-certificates); if [ "$1" = shutdown ]; then packages+=(valgrind); fi; '
+                      'apt-get "${apt_options[@]}" install --yes --no-install-recommends "${packages[@]}" >/dev/null; fi; '
+                      'mode="$1"; shift; if [ "$mode" = shutdown ]; then '
+                      'exec timeout 900 valgrind --trace-children=yes --leak-check=no --undef-value-errors=no '
+                      '--error-exitcode=77 "$@"; fi; exec timeout 900 "$@"',
+                      "gpu-test", "shutdown" if name == "cuda-onnx-shutdown" else "model" if model else "c5", *command,
                   ]
               log_path = logs / f"{name}.log"
               try:

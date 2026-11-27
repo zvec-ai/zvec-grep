@@ -5,16 +5,18 @@
 //! owning entity without a second full parse. Mirrors the TypeScript
 //! `src/engine/extraction/graph/edge-collector.ts` implementation.
 
+use std::collections::HashMap;
+
 use tree_sitter::Node;
 
 use crate::domain::{FileFormat, GraphEdgeKind};
 use crate::utils::collapse_whitespace;
 
-use super::WalkContext;
 use super::vocabulary::{
     CALLEE_FIELDS, COMMON_CALL_TYPES, HeritageVocabulary, heritage_vocabulary_for,
     import_vocabulary_for,
 };
+use super::{Constructs, FILE_SCOPE_INDEX, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, WalkContext};
 
 const MAX_CALLEE_TEXT_CHARS: usize = 180;
 
@@ -25,7 +27,7 @@ fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     node.named_children(&mut cursor).collect()
 }
 
-fn node_text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {
+pub(crate) fn node_text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {
     node.utf8_text(source).unwrap_or_default()
 }
 
@@ -99,6 +101,66 @@ fn callee_text_of(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
     node.named_child(0)
         .map(|first| node_text(first, source).to_owned())
+}
+
+/// The member name, receiver and raw text a call site names.
+///
+/// C/C++ arrow member access joins the identifier gate and the split under the
+/// dot spelling: `ptr->bar()` names the same member shape as `ref.bar()`. The
+/// raw text keeps the original spelling. A receiver the gate rejects because it
+/// reads through something other than a name (`statuses[0].ok()`,
+/// `(*it).second.Flush()`) is answered by the path the expression spells, which
+/// the resolver evaluates the same way it evaluates a loop variable.
+fn callee_of(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>, String)> {
+    let callee = callee_text_of(node, source)?;
+    let normalized = callee.replace("->", ".");
+    let normalized = normalize_super_call(&normalized);
+    // `<button />` is one of the language's own elements, not a call to a
+    // project symbol named `button`: a lowercase tag without a member path
+    // names no value this index can place. A capitalized or dotted tag does.
+    if matches!(
+        node.kind(),
+        "jsx_opening_element" | "jsx_self_closing_element"
+    ) && !normalized.contains('.')
+        && normalized.chars().next().is_some_and(char::is_lowercase)
+    {
+        return None;
+    }
+    if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
+        let (ref_name, receiver_name) = split_callee_name(&normalized);
+        return Some((ref_name, receiver_name, callee));
+    }
+    // A receiver written as a chain or a call (`factory().run`, `a.b.c`) is
+    // read structurally: the grammar's own fields say which part is the
+    // receiver, and a call-shaped one answers through the type it builds.
+    if let Some(structured) = structured_callee(node, source) {
+        let structured = normalize_super_call(&structured);
+        if structured.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&structured) {
+            let (ref_name, receiver_name) = split_callee_name(&structured);
+            return Some((ref_name, receiver_name, callee));
+        }
+    }
+    let (ref_name, receiver_name) = cpp_member_callee(node, source)?;
+    Some((ref_name, Some(receiver_name), callee))
+}
+
+/// Reads a C++ member call written through an expression the identifier gate
+/// rejects: `statuses[0].ok()` and `(*it).second.Flush()` name a member of
+/// something the receiver path reaches.
+///
+/// Only a `field_expression` function qualifies. A callee the grammar spells as
+/// one identifier (`helper()`, `Namespace::helper()`) never reaches here — its
+/// text passes the gate — and a call-shaped receiver (`factory().run()`) has no
+/// name whose type the resolver could read.
+fn cpp_member_callee(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
+    let function = node.child_by_field_name("function")?;
+    if function.kind() != "field_expression" {
+        return None;
+    }
+    let field = function.child_by_field_name("field")?;
+    let argument = function.child_by_field_name("argument")?;
+    let receiver = cpp_receiver_path(argument, source)?;
+    Some((node_text(field, source).to_owned(), receiver))
 }
 
 /// Joins a Java `method_invocation`'s `object` and `name` fields back into
@@ -177,12 +239,18 @@ fn normalize_member_access(callee: &str) -> String {
 fn call_arity_of(node: Node<'_>) -> Option<usize> {
     let arguments = node
         .child_by_field_name("arguments")
-        .or_else(|| node.child_by_field_name("argument_list"))?;
+        .or_else(|| node.child_by_field_name("argument_list"))
+        .or_else(|| {
+            node.child_by_field_name("value")
+                .filter(|_| node.kind() == "compound_literal_expression")
+        })?;
     let mut cursor = arguments.walk();
     Some(
         arguments
             .named_children(&mut cursor)
-            .filter(|child| child.kind() != "," && !child.kind().ends_with("_comment"))
+            .filter(|child| {
+                !matches!(child.kind(), "," | "comment") && !child.kind().ends_with("_comment")
+            })
             .count(),
     )
 }
@@ -240,7 +308,8 @@ fn is_identifier_like(value: &str) -> bool {
         return false;
     };
     let first_ok = first.is_ascii_alphabetic() || matches!(first, '_' | '$');
-    first_ok && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.' | ':'))
+    first_ok
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.' | ':' | '#'))
 }
 
 /// Scans an entity body for call sites and buffers one `calls` reference per
@@ -273,7 +342,29 @@ fn visit_for_calls(
     // A call node still descends below: `outer(inner())` and `factory().run()`
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
-    if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+    if let Some((target, ty)) = java_constructor_target(node, source) {
+        let name = ty.rsplit('.').next().unwrap_or(&ty);
+        let raw = if node.kind() == "object_creation_expression" {
+            format!("new {}", node_text(target, source))
+        } else {
+            node_text(target, source).to_owned()
+        };
+        // Keep a receiver so partition cannot bind `new X()` to the class
+        // before the resolver has considered X's explicit constructors.
+        let position = target.start_position();
+        context.add_call_edge(
+            owner_index,
+            name,
+            Some(&ty),
+            Some(&raw),
+            call_arity_of(node),
+            position.row + 1,
+            position.column,
+        );
+    } else if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+        // PHP spells a member call as a receiver, a separator and a name. The
+        // receiver stays on the edge even when the resolver cannot read it: a
+        // bare name would bind to a same-named function of the file instead.
         if let Some(call) = php_member_call(node, source) {
             context.add_call_edge(
                 owner_index,
@@ -287,32 +378,172 @@ fn visit_for_calls(
         }
     } else if is_call_node(node)
         && !is_unreported_call(node, source)
-        && let Some(callee) = callee_text_of(node, source)
+        && let Some((ref_name, receiver_name, callee)) = callee_of(node, source)
     {
-        // C/C++ and PHP arrow member access joins the identifier gate and
-        // the split under the dot spelling: `ptr->bar()` names the same
-        // member shape as `ref.bar()`. The buffered raw text keeps the
-        // original spelling.
-        let normalized = normalize_member_access(&callee);
-        let normalized = normalize_super_call(&normalized);
-        if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
-            let (ref_name, receiver_name) = split_callee_name(&normalized);
+        let line = node.start_position().row + 1;
+        let column = node.start_position().column;
+        let constructs = construction_site(node);
+        if constructs.is_some() {
+            // A construction names its type, and that spelling — `X` after the
+            // `new` keyword — is where the call stands.
+            let position = node
+                .child_by_field_name("type")
+                .map_or_else(|| node.start_position(), |spelled| spelled.start_position());
+            context.add_construction_edge(
+                owner_index,
+                &ref_name,
+                receiver_name.as_deref(),
+                Some(callee.as_str()),
+                call_arity_of(node),
+                position.row + 1,
+                position.column,
+                constructs,
+            );
+        } else {
             context.add_call_edge(
                 owner_index,
                 &ref_name,
                 receiver_name.as_deref(),
                 Some(callee.as_str()),
                 call_arity_of(node),
-                node.start_position().row + 1,
-                node.start_position().column,
+                line,
+                column,
             );
         }
+    } else if node.kind() == "compound_literal_expression"
+        && let Some((name, position)) = constructed_type_name(node, source)
+    {
+        // `X{}` builds a value through the same constructor `X(…)` reaches, but
+        // the grammar spells it as a literal rather than a call, so the type
+        // field is the whole call site.
+        context.add_construction_edge(
+            owner_index,
+            &name,
+            None,
+            Some(&name),
+            call_arity_of(node),
+            position.row + 1,
+            position.column,
+            Constructs::New,
+        );
     }
     for child in named_children(node) {
         if is_call_scan_barrier(child) || boundary.is_some_and(|owns| owns(child)) {
             continue;
         }
         visit_for_calls(child, owner_index, source, context, boundary);
+    }
+}
+
+/// The plain type a brace construction builds and where it is written:
+/// `X{}` names `X` at that spelling. A template or qualified spelling names a
+/// type the bare-name resolution cannot place, so it stays unreported.
+fn constructed_type_name(node: Node<'_>, source: &[u8]) -> Option<(String, tree_sitter::Point)> {
+    let spelled = node.child_by_field_name("type")?;
+    if spelled.kind() != "type_identifier" {
+        return None;
+    }
+    Some((
+        node_text(spelled, source).to_owned(),
+        spelled.start_position(),
+    ))
+}
+
+/// Where a call node stands relative to building a value: a `new X()` site, a
+/// call filling a variable's initializer or an assignment's right-hand side
+/// (`auto w = Widget(1)`), or an ordinary call.
+///
+/// The distinction decides whether a type name can answer the call. A type is
+/// not callable in general, so a call whose result is itself invoked
+/// (`PREFIX(scan)(x)`), passed as an argument (`f(helper(x))`), returned
+/// (`return helper(x);`) or left alone as a statement (`WithConstructor();`,
+/// the most vexing parse of a declaration) is not a construction: another
+/// entity of that name — a function — is the target whenever one exists.
+fn construction_site(node: Node<'_>) -> Constructs {
+    if matches!(node.kind(), "new_expression" | "object_creation_expression") {
+        return Constructs::New;
+    }
+    let Some(parent) = node.parent() else {
+        return Constructs::None;
+    };
+    match parent.kind() {
+        "init_declarator" | "variable_declarator" => {
+            if parent
+                .child_by_field_name("value")
+                .is_some_and(|value| value == node)
+            {
+                Constructs::Value
+            } else {
+                Constructs::None
+            }
+        }
+        "assignment_expression" => {
+            if parent
+                .child_by_field_name("right")
+                .is_some_and(|right| right == node)
+            {
+                Constructs::Value
+            } else {
+                Constructs::None
+            }
+        }
+        // `Widget(1)` wrapped in parentheses is still the same construction
+        // site once the wrapper is peeled off.
+        "parenthesized_expression" => construction_site(parent),
+        _ => Constructs::None,
+    }
+}
+
+/// Java construction names a type, while this/super name the enclosing or
+/// direct base constructor. Other grammars' creation nodes keep their rules.
+fn java_constructor_target<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+) -> Option<(Node<'tree>, String)> {
+    match node.kind() {
+        "object_creation_expression" => {
+            let ty = node.child_by_field_name("type")?;
+            if !matches!(
+                ty.kind(),
+                "type_identifier" | "scoped_type_identifier" | "generic_type"
+            ) {
+                return None;
+            }
+            Some((ty, java_type_name(ty, source)?))
+        }
+        "explicit_constructor_invocation" => {
+            let target = node.child_by_field_name("constructor")?;
+            Some((target, node_text(target, source).to_owned()))
+        }
+        _ => None,
+    }
+}
+
+fn structured_callee(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let target = node.child_by_field_name("function")?;
+    member_expression(target, source)
+}
+
+fn member_expression(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "selector_expression" => {
+            let receiver = member_expression(node.child_by_field_name("operand")?, source)?;
+            Some(format!(
+                "{receiver}.{}",
+                node_text(node.child_by_field_name("field")?, source)
+            ))
+        }
+        "member_expression" => {
+            let receiver = member_expression(node.child_by_field_name("object")?, source)?;
+            let property = node.child_by_field_name("property")?;
+            Some(format!("{receiver}.{}", node_text(property, source)))
+        }
+        "non_null_expression" | "parenthesized_expression" => {
+            member_expression(node.named_child(0)?, source)
+        }
+        "identifier" | "this" | "super" => Some(node_text(node, source).to_owned()),
+        "call_expression" | "new_expression" => creation_or_factory_type(node, source),
+        _ => None,
     }
 }
 
@@ -334,7 +565,42 @@ pub(crate) fn scan_binding_declarations(
     if !context.is_collecting() {
         return;
     }
+    if matches!(
+        format,
+        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Go | FileFormat::Cpp
+    ) && let Some((_, ty)) = function_return_of(entity_node, source, format)
+    {
+        context.add_declare_binding(
+            owner_index,
+            "return",
+            &ty,
+            entity_node.start_position().row + 1,
+            entity_node.start_position().column,
+            None,
+        );
+    }
     visit_for_bindings(entity_node, owner_index, source, format, context, boundary);
+    // A decorated class reaches this scan as its wrapper, whose body is the
+    // class's: a decorator that returns the class unchanged must not hide the
+    // instance members its methods state.
+    if format == FileFormat::Python
+        && let Some(class) =
+            python_inner_definition(entity_node).filter(|inner| inner.kind() == "class_definition")
+    {
+        collect_python_self_members(class, owner_index, source, context);
+    }
+}
+
+/// The definition a Python declaration states. A decorator wraps the class or
+/// function it decorates, and the wrapper's own body is that definition's.
+fn python_inner_definition(node: Node<'_>) -> Option<Node<'_>> {
+    match node.kind() {
+        "class_definition" | "function_definition" => Some(node),
+        "decorated_definition" => named_children(node)
+            .into_iter()
+            .find(|child| matches!(child.kind(), "class_definition" | "function_definition")),
+        _ => None,
+    }
 }
 
 fn visit_for_bindings(
@@ -345,14 +611,96 @@ fn visit_for_bindings(
     context: &mut WalkContext,
     boundary: Option<&dyn Fn(Node<'_>) -> bool>,
 ) {
-    if let Some((name, bound_type)) = declaration_binding_of(node, source, format, context) {
-        context.add_declare_binding(
-            owner_index,
-            &name,
-            &bound_type,
-            node.start_position().row + 1,
-            node.start_position().column,
-        );
+    let binding = declaration_binding_of(node, source, format, context);
+    let alias = alias_target_of(node, source, format);
+    let mut shadowed = Vec::new();
+    shadowing_names_of(node, source, format, &mut shadowed);
+    for name in shadowed {
+        // The name is taken by this owner's body even when nothing binds it to
+        // an index: a parameter typed `() => void` still hides the imported
+        // function the body calls by that name.
+        context.register_shadowed_name(owner_index, &name);
+    }
+    if format == FileFormat::Rust && node.kind() == "use_declaration" {
+        // `use crate::other::save;` binds `save` in this body alone, so the
+        // body's `save()` reaches that import rather than the module's own
+        // function of the name. Where the import points is the resolver's
+        // question, so the call stays pending here.
+        for name in rust_use_bindings(node, source) {
+            context.register_import_binding(owner_index, &name);
+        }
+        // A glob binds no spelling the walk can list, but it does put the
+        // source module's names in view, which partition needs in order not to
+        // rule the file's own namesakes out.
+        if rust_use_is_glob(node) {
+            context.register_import_glob(owner_index);
+        }
+    }
+    let line = node.start_position().row + 1;
+    let column = node.start_position().column;
+    if let Some((name, target)) = alias {
+        // A top-level declaration belongs to the file, not to the entity the
+        // declarator itself became: every body of the file can see the alias.
+        let alias_owner = if at_file_level(node) {
+            FILE_SCOPE_INDEX
+        } else {
+            owner_index
+        };
+        context.register_value_alias(alias_owner, &name, &target);
+    }
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript) {
+        collect_ts_js_statement_bindings(node, owner_index, source, context);
+    }
+    if format == FileFormat::Cpp {
+        collect_cpp_statement_bindings(node, owner_index, source, context);
+    }
+    if format == FileFormat::Go {
+        collect_go_scoped_binding(node, owner_index, source, context);
+    }
+    if let Some((name, bound_type)) = binding {
+        // A scoped binding carries the range it lives in, for the languages
+        // whose declarations state a scope narrower than the owner's body:
+        // a JavaScript block, a Java loop, a Go case, a C++ block.
+        if matches!(
+            format,
+            FileFormat::TypeScript
+                | FileFormat::JavaScript
+                | FileFormat::Java
+                | FileFormat::Go
+                | FileFormat::Cpp
+        ) {
+            if format == FileFormat::TypeScript
+                && node.kind() == "required_parameter"
+                && node_text(node, source)
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|word| {
+                        matches!(word, "public" | "private" | "protected" | "readonly")
+                    })
+            {
+                context.add_declare_binding(
+                    owner_index,
+                    &format!("this.{name}"),
+                    &bound_type,
+                    node.start_position().row + 1,
+                    node.start_position().column,
+                    None,
+                );
+            }
+            collect_binding(node, owner_index, &name, &bound_type, format, context);
+            if format == FileFormat::Java
+                && node.kind() == "enhanced_for_statement"
+                && let Some(body) = node.child_by_field_name("body")
+            {
+                visit_for_bindings(body, owner_index, source, format, context, boundary);
+            }
+        } else {
+            let until = binding_scope_end(node);
+            context.add_declare_binding(owner_index, &name, &bound_type, line, column, until);
+        }
+        return;
+    }
+    if collect_python_assignment(node, owner_index, source, format, context, line, column) {
         return;
     }
     for child in named_children(node) {
@@ -360,6 +708,1031 @@ fn visit_for_bindings(
             continue;
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
+    }
+}
+
+/// Records what a Python assignment states about the name it writes, if the
+/// node is one.
+fn collect_python_assignment(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    format: FileFormat,
+    context: &mut WalkContext,
+    line: usize,
+    column: usize,
+) -> bool {
+    if format != FileFormat::Python || node.kind() != "assignment" {
+        return false;
+    }
+    let Some(left) = node
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "identifier")
+    else {
+        return false;
+    };
+    let name = node_text(left, source);
+    // `client: Left = …` states the type beside the name, whatever value
+    // the body stores in it.
+    if let Some(bound) = node
+        .child_by_field_name("type")
+        .and_then(|ty| python_annotation_name(ty, source))
+    {
+        context.add_declare_binding(owner_index, name, &bound, line, column, None);
+        return true;
+    }
+    // `client = clients[0]` states that the name no longer holds what the
+    // parameter declared. The index cannot place the value, so the name
+    // holds no type from this line on rather than keeping the annotation
+    // the parameter stated for the whole body.
+    //
+    // `client = other` is a copy of a name the body already types, and the
+    // copy holds that type: a receiver reads `other`'s type from this line
+    // on. A copy of a name the body states no type for leaves the name as
+    // undecided as any other value the index cannot place — the annotation
+    // described what the name held before the assignment, not after it.
+    let copied = node
+        .child_by_field_name("right")
+        .filter(|right| right.kind() == "identifier")
+        .and_then(|right| {
+            context
+                .declared_type_at(owner_index, node_text(right, source), line, column)
+                .map(str::to_owned)
+        })
+        .filter(|bound| !matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE));
+    let bound = copied.as_deref().unwrap_or(PYTHON_UNBOUND_TYPE);
+    context.add_declare_binding(owner_index, name, bound, line, column, None);
+    true
+}
+
+/// Records what a Python class's `self.<member> = <value>` assignments state
+/// about the member.
+///
+/// A Python class body states its attributes by assigning them on `self` from
+/// inside a method, so the member a call reads through `self` — the
+/// `self.fontset.render_glyph(…)` of a sibling method — is only known by
+/// walking the methods. The binding belongs to the class: every method of the
+/// class and of a subclass that inherits it reads the same member. The value
+/// is read where it is written, so `self.fontset = fontset` takes the
+/// parameter's annotation and `self.fontset = state.fontset` steps through the
+/// member the parameter's own type states.
+fn collect_python_self_members(
+    class_node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    let class_name = class_node
+        .child_by_field_name("name")
+        .map(|name| node_text(name, source).to_owned());
+    // The methods sit in the class body beside the statements the class writes
+    // outside them, so the body is the level that holds both.
+    let Some(class_body) = class_node.child_by_field_name("body") else {
+        return;
+    };
+    let scope = class_name.as_deref();
+    for child in named_children(class_body) {
+        let Some(inner) = python_inner_definition(child) else {
+            // A name a class body binds is not a lexical binding of the
+            // methods: `client = Left()` beside a method that writes
+            // `self.actual = client` states nothing about `actual`, because
+            // the method reads a module-level `client`, not this one.
+            visit_python_self_members(
+                child,
+                owner_index,
+                scope,
+                source,
+                context,
+                &mut HashMap::new(),
+            );
+            continue;
+        };
+        // A nested class states `self` for its own members.
+        if inner.kind() != "function_definition" {
+            continue;
+        }
+        // The method binds the names it declares itself, and reads every other
+        // name from the module, never from the class body beside it.
+        let mut method = python_annotated_parameters(inner, source, &HashMap::new());
+        // `self` and `cls` name the instance the method is written on, so a
+        // value read through them states a member of this class
+        // (`self.state.fontset`). A parameter that annotates the name keeps
+        // its own type, and a nested function that declares it again states
+        // its own receiver instead of this one.
+        if let Some(class_name) = &class_name {
+            for name in ["self", "cls"] {
+                if python_declares_parameter(inner, name, source) && !method.contains_key(name) {
+                    method.insert(name.to_owned(), class_name.clone());
+                }
+            }
+        }
+        for body in named_children(inner) {
+            visit_python_self_members(body, owner_index, scope, source, context, &mut method);
+        }
+    }
+}
+
+fn visit_python_self_members(
+    node: Node<'_>,
+    owner_index: usize,
+    class_name: Option<&str>,
+    source: &[u8],
+    context: &mut WalkContext,
+    annotated: &mut HashMap<String, String>,
+) {
+    if let Some(inner) = python_inner_definition(node) {
+        // A nested class states `self` for its own members, not for this
+        // class's.
+        if inner.kind() == "class_definition" {
+            return;
+        }
+        // A nested function's parameters shadow the bindings around it and
+        // stay in effect for everything it writes, closures included.
+        let mut scoped = python_annotated_parameters(inner, source, annotated);
+        for child in named_children(inner) {
+            visit_python_self_members(child, owner_index, class_name, source, context, &mut scoped);
+        }
+        return;
+    }
+    if node.kind() == "assignment" {
+        match python_self_member_binding(node, source, context, annotated, class_name) {
+            Some((name, bound_type)) => context.add_declare_binding(
+                owner_index,
+                &name,
+                &bound_type,
+                node.start_position().row + 1,
+                node.start_position().column,
+                None,
+            ),
+            // `self.client = client` stores a value the index cannot place, so
+            // the member no longer holds what an earlier write stated. The
+            // write is kept without a type rather than dropped: dropping it
+            // would leave the earlier type in effect, and a base class's
+            // member is not the answer for a name the class writes itself.
+            //
+            // `self.client = None` is the same write with a different meaning:
+            // the class still chooses what the member holds, so a base's
+            // member is not the answer, but the value states no type at all.
+            // That keeps an optional member — `None` here, the real value in
+            // another method — typed by the write that states one.
+            None => {
+                if let Some(member) = python_self_member_target(node, source, annotated, class_name)
+                {
+                    let bound = if python_states_none(node.child_by_field_name("right"), source) {
+                        PYTHON_NONE_TYPE
+                    } else {
+                        PYTHON_UNBOUND_TYPE
+                    };
+                    context.add_declare_binding(
+                        owner_index,
+                        member,
+                        bound,
+                        node.start_position().row + 1,
+                        node.start_position().column,
+                        None,
+                    );
+                }
+            }
+        }
+        // The member above reads the name where it is written, and anything
+        // after this line reads what the assignment left in it.
+        rebind_python_value(node, source, context, annotated);
+    }
+    for child in named_children(node) {
+        // A branch states its names for its own body only: `if flag: client =
+        // Right()` leaves `client` holding either value afterwards, so the
+        // name no longer states one type. Walking the branch on a copy and
+        // keeping only the names both states agree on keeps the parameter's
+        // annotation when no branch rebinds it and drops it when one does.
+        if python_states_branches(child) {
+            let before = annotated.clone();
+            let mut branch = before.clone();
+            visit_python_self_members(child, owner_index, class_name, source, context, &mut branch);
+            for name in before.keys().chain(branch.keys()) {
+                if before.get(name) != branch.get(name) {
+                    annotated.remove(name);
+                }
+            }
+            continue;
+        }
+        visit_python_self_members(child, owner_index, class_name, source, context, annotated);
+    }
+}
+
+/// Whether a node states names for a body that may or may not run: a branch,
+/// a loop or a handler leaves the names it rebinds holding either value.
+fn python_states_branches(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "if_statement" | "for_statement" | "while_statement" | "try_statement" | "match_statement"
+    )
+}
+
+/// The annotated parameters of one function, on top of the annotations the
+/// enclosing scopes already state.
+///
+/// Every parameter the function declares takes its name back from the enclosing
+/// body, whether or not it states a type: `def configure(client): …` nested in
+/// `def __init__(self, client: Client)` shadows the outer annotation, and
+/// `*args`/`**kwargs` bind a name the body holds no receiver in.
+fn python_annotated_parameters(
+    function: Node<'_>,
+    source: &[u8],
+    outer: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut names = outer.clone();
+    let Some(parameters) = function.child_by_field_name("parameters") else {
+        return names;
+    };
+    for parameter in named_children(parameters) {
+        let Some(name) = python_parameter_name(parameter, source) else {
+            continue;
+        };
+        names.remove(name);
+        if let Some((name, bound_type)) = python_parameter_binding_of(parameter, source) {
+            names.insert(name, bound_type);
+        }
+    }
+    names
+}
+
+/// The name a parameter binds, in every form Python spells one: `name`,
+/// `name: Type`, `name=default`, `*args` and `**kwargs`.
+fn python_parameter_name<'a>(parameter: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+    // A bare parameter is its own name; an annotated or defaulted one wraps it.
+    let name = match parameter.kind() {
+        "identifier" => parameter,
+        _ => parameter
+            .child_by_field_name("name")
+            .or_else(|| parameter.named_child(0))?,
+    };
+    let name = match name.kind() {
+        // `*args` and `**kwargs` wrap the name they bind.
+        "list_splat_pattern" | "dictionary_splat_pattern" => name.named_child(0)?,
+        _ => name,
+    };
+    (name.kind() == "identifier").then(|| node_text(name, source))
+}
+
+/// Whether `function` declares a parameter spelled `name`, in any form.
+fn python_declares_parameter(function: Node<'_>, name: &str, source: &[u8]) -> bool {
+    function
+        .child_by_field_name("parameters")
+        .is_some_and(|parameters| {
+            named_children(parameters)
+                .into_iter()
+                .any(|parameter| python_parameter_name(parameter, source) == Some(name))
+        })
+}
+
+/// A Python body that writes a plain name states what the name holds from that
+/// point on. An annotation describes the parameter only until the body rebinds
+/// it (`client = AlternateClient()`), and a value the index cannot place leaves
+/// the name unbound rather than keeping the type the parameter declared.
+fn rebind_python_value(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    annotated: &mut HashMap<String, String>,
+) {
+    let Some(left) = node
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "identifier")
+    else {
+        return;
+    };
+    let name = node_text(left, source).to_owned();
+    let bound = node
+        .child_by_field_name("right")
+        .and_then(|right| python_value_type(right, source, context, annotated));
+    match bound {
+        Some(bound) => annotated.insert(name, bound),
+        None => annotated.remove(&name),
+    };
+}
+
+/// The `(member, type)` pair a Python `self.<member> = <value>` assignment
+/// states, when the member and the value name something the resolver can read.
+fn python_self_member_binding(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    annotated: &HashMap<String, String>,
+    class_name: Option<&str>,
+) -> Option<(String, String)> {
+    let member = python_self_member_target(node, source, annotated, class_name)?;
+    // `self.fontset: Fonts = …` states the type beside the name.
+    let bound_type = node
+        .child_by_field_name("type")
+        .and_then(|ty| python_annotation_name(ty, source))
+        .or_else(|| {
+            python_value_type(
+                node.child_by_field_name("right")?,
+                source,
+                context,
+                annotated,
+            )
+        })?;
+    Some((member.to_owned(), bound_type))
+}
+
+/// The member a `self.<member> = <value>` assignment writes, when the receiver
+/// still names the instance of the class being walked.
+///
+/// A nested function that declares `self` again (`def unrelated(self)`) binds a
+/// receiver of its own: its writes state nothing about the enclosing class, and
+/// recording them would let one shadowing closure retype a member every sibling
+/// method reads.
+fn python_self_member_target<'tree>(
+    node: Node<'tree>,
+    source: &'tree [u8],
+    annotated: &HashMap<String, String>,
+    class_name: Option<&str>,
+) -> Option<&'tree str> {
+    let left = node.child_by_field_name("left")?;
+    if left.kind() != "attribute" {
+        return None;
+    }
+    let object = left.child_by_field_name("object")?;
+    if object.kind() != "identifier" {
+        return None;
+    }
+    let receiver = node_text(object, source);
+    if !matches!(receiver, "self" | "cls") {
+        return None;
+    }
+    if annotated.get(receiver).map(String::as_str) != class_name {
+        return None;
+    }
+    left.child_by_field_name("attribute")
+        .filter(|member| member.kind() == "identifier")
+        .map(|member| node_text(member, source))
+}
+
+/// Whether a value expression states the absence of a value (`None`). An
+/// initializer holding no value states no type to invalidate, so the write
+/// leaves the member as it was instead of making it undecided.
+fn python_states_none(node: Option<Node<'_>>, source: &[u8]) -> bool {
+    node.is_some_and(|node| python_none_annotation(node, source))
+}
+
+/// The type name a Python value expression states: what a bare call builds,
+/// what an annotated name of this body holds, and — for a member read — the
+/// member of the type that base names.
+fn python_value_type(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    annotated: &HashMap<String, String>,
+) -> Option<String> {
+    match node.kind() {
+        "call" => {
+            let function = node.child_by_field_name("function")?;
+            if function.kind() != "identifier" {
+                return None;
+            }
+            let callee = node_text(function, source);
+            Some(
+                context
+                    .factory_return_of(callee)
+                    .unwrap_or(callee)
+                    .to_owned(),
+            )
+        }
+        "identifier" => annotated.get(node_text(node, source)).cloned(),
+        "attribute" => {
+            let object = node.child_by_field_name("object")?;
+            let member = node
+                .child_by_field_name("attribute")
+                .filter(|member| member.kind() == "identifier")?;
+            let base = python_value_type(object, source, context, annotated)?;
+            Some(python_member_step(&base, node_text(member, source)))
+        }
+        _ => None,
+    }
+}
+
+/// The step a member read spells for the resolver: the member's type is what
+/// the base type states for that name. A value read at extraction time cannot
+/// be looked up across declarations, so the step is stated and the resolver
+/// reads it (`member_of:(ParserState,fontset)`).
+fn python_member_step(base: &str, member: &str) -> String {
+    format!("member_of:({base},{member})")
+}
+
+/// Records the bindings a TypeScript or JavaScript statement states without
+/// declaring a name of the body: an export's own key, a `require` module, an
+/// object literal's properties, and a re-export's alias.
+fn collect_ts_js_statement_bindings(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    if node.kind() == "export_statement"
+        && node.child_by_field_name("source").is_none()
+        && (node_text(node, source).starts_with("export default")
+            || node_text(node, source).starts_with("export ="))
+        && let Some(value) = node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("declaration"))
+            .or_else(|| node.named_child(0))
+        && let Some(name) = (value.kind() == "identifier")
+            .then_some(value)
+            .or_else(|| value.child_by_field_name("name"))
+    {
+        context.add_declare_binding(
+            owner_index,
+            "[[export:default]]",
+            &format!("typeof {}", node_text(name, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+            None,
+        );
+    }
+    if owner_index == super::FILE_SCOPE_INDEX
+        && node.kind() == "variable_declarator"
+        && let Some(value) = node.child_by_field_name("value")
+        && value.kind() == "call_expression"
+        && value
+            .child_by_field_name("function")
+            .is_some_and(|name| node_text(name, source) == "require")
+        && let Some(path) = value
+            .child_by_field_name("arguments")
+            .and_then(|args| args.named_child(0))
+        && path.kind() == "string"
+    {
+        context.add_import_edge(
+            &normalize_module_path(node_text(path, source)),
+            Some(node_text(node, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+        );
+    }
+    if matches!(node.kind(), "variable_declarator" | "assignment_expression") {
+        collect_object_bindings(node, owner_index, source, context);
+    }
+    if node.kind() == "export_specifier"
+        && node
+            .parent()
+            .and_then(|clause| clause.parent())
+            .is_none_or(|export| export.child_by_field_name("source").is_none())
+        && let (Some(name), Some(alias)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("alias"),
+        )
+    {
+        context.add_declare_binding(
+            owner_index,
+            // Export names are not local bindings; named exports remain live.
+            &format!("[[export:{}]]", node_text(alias, source)),
+            &format!("export typeof {}", node_text(name, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+            None,
+        );
+    }
+}
+
+/// Records what a C++ using-declaration states: a directive at the file's top
+/// level opens its namespace to the whole unit, and a declaration inside a
+/// class body borrows the named base member into that class's lookup.
+fn collect_cpp_statement_bindings(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    if node.kind() != "using_declaration" {
+        return;
+    }
+    if owner_index == super::FILE_SCOPE_INDEX
+        && let Some(space) = node.named_child(0)
+        && space.kind() == "identifier"
+    {
+        // `using namespace rocksdb;` is a directive of the unit, not of one
+        // body: the names it opens are read wherever the file is compiled. The
+        // grammar reads it as a using declaration whose single name is the
+        // namespace, so a bare name here is the directive.
+        context.add_declare_binding(
+            super::FILE_SCOPE_INDEX,
+            "[[cpp_using_namespace]]",
+            node_text(space, source),
+            node.start_position().row + 1,
+            node.start_position().column,
+            None,
+        );
+    }
+    if let Some((borrowed, _)) = cpp_binding_of(node, source, context) {
+        // `using First<T>::Run;` puts that base member into the class's own
+        // lookup: a bare `Run()` written in the class's bodies reaches the
+        // base's member rather than a namespace-scope function of the name.
+        context.register_borrowed_name(owner_index, &borrowed);
+    }
+}
+
+/// Last line a binding the statement itself scopes stays in effect, when that
+/// is not simply the rest of the body.
+///
+/// A loop states its variable for its own body only (`for (Engine* e : es)`),
+/// so a call after the loop through the same name reads the name's other
+/// declaration, not the loop's. Everything else — a local, a parameter, a
+/// member — holds until the body ends, which the owner's range already
+/// expresses.
+fn binding_scope_end(node: Node<'_>) -> Option<usize> {
+    // A declaration written in the loop's own header (`for (auto it = v.begin(); …)`)
+    // belongs to the loop even though the declaration node is matched first.
+    let mut statement = node;
+    while matches!(statement.kind(), "declaration" | "init_declarator") {
+        statement = statement.parent()?;
+    }
+    if !matches!(
+        statement.kind(),
+        "for_range_loop" | "for_in_statement" | "for_statement" | "for_expression"
+    ) {
+        return None;
+    }
+    let body = statement.child_by_field_name("body")?;
+    Some(body.end_position().row + 1)
+}
+
+/// Whether a declaration sits at the file's top level: nothing that owns a
+/// body stands between it and the root, so the name it introduces is visible
+/// to every entity of the file rather than to one body.
+fn at_file_level(node: Node<'_>) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "compilation_unit" | "module" | "program" | "source_file" | "translation_unit" => {
+                return true;
+            }
+            // Any body or container between the declaration and the root
+            // makes the name local to it: a function body, a class body, an
+            // object literal, a loop body.
+            "block"
+            | "class_body"
+            | "compound_statement"
+            | "declaration_list"
+            | "enum_body"
+            | "field_declaration_list"
+            | "interface_body"
+            | "object"
+            | "object_pattern"
+            | "statement_block" => return false,
+            _ => current = parent,
+        }
+    }
+    false
+}
+
+/// Extracts `(bound name, aliased name)` from a declaration whose initializer
+/// is a bare name: `const dispatch = send` makes `dispatch` another spelling of
+/// `send`, so a call written through either reaches the same function.
+///
+/// Only a single name on each side qualifies. Destructuring (`const [a, b] =
+/// pair`) and calls (`const x = makeX()`) bind something other than one named
+/// value, and an initializer that names a variable aliases that variable —
+/// the resolver follows the chain one link at a time, so a wrong guess here
+/// would bend a later call.
+pub(crate) fn alias_target_of(
+    node: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+) -> Option<(String, String)> {
+    let (name, value) = match format {
+        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Java => {
+            if node.kind() != "variable_declarator" {
+                return None;
+            }
+            (
+                node.child_by_field_name("name")?,
+                node.child_by_field_name("value")?,
+            )
+        }
+        FileFormat::Python => {
+            if node.kind() != "assignment" {
+                return None;
+            }
+            (
+                node.child_by_field_name("left")?,
+                node.child_by_field_name("right")?,
+            )
+        }
+        FileFormat::Go => {
+            if node.kind() != "short_var_declaration" {
+                return None;
+            }
+            // `a, b := f()` binds several names to one call; only a
+            // single-to-single assignment says "this name is that name".
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            if left.named_child_count() != 1 || right.named_child_count() != 1 {
+                return None;
+            }
+            (left.named_child(0)?, right.named_child(0)?)
+        }
+        FileFormat::Rust => {
+            if node.kind() != "let_declaration" {
+                return None;
+            }
+            (
+                node.child_by_field_name("pattern")?,
+                node.child_by_field_name("value")?,
+            )
+        }
+        // C/C++ function-pointer aliases already travel as the bound type
+        // (`c_binding_of`), which partition has consulted since they were
+        // the only alias form; a second table would split that evidence.
+        _ => return None,
+    };
+    if name.kind() != "identifier" || value.kind() != "identifier" {
+        return None;
+    }
+    let name = node_text(name, source);
+    let target = node_text(value, source);
+    (name != target).then(|| (name.to_owned(), target.to_owned()))
+}
+
+fn collect_binding(
+    node: Node<'_>,
+    owner_index: usize,
+    name: &str,
+    ty: &str,
+    format: FileFormat,
+    context: &mut WalkContext,
+) {
+    if format == FileFormat::Cpp {
+        // A C++ name lives to the end of the block that declares it, so an
+        // inner block's declaration shadows an outer one for its own range
+        // only. A range-for states its variable for the loop body alone. The
+        // owner's own body states nothing new: the owner's range already ends
+        // there.
+        let mut scope = node;
+        while !matches!(
+            scope.kind(),
+            "compound_statement" | "function_definition" | "for_range_loop" | "for_statement"
+        ) {
+            let Some(parent) = scope.parent() else { break };
+            scope = parent;
+        }
+        if node.kind() == "for_range_loop" {
+            if let Some(body) = node.child_by_field_name("body") {
+                add_binding_in_scope(body, Some(body), owner_index, name, ty, context);
+            }
+        } else if scope.kind() == "function_definition"
+            || scope
+                .parent()
+                .is_some_and(|parent| parent.kind() == "function_definition")
+        {
+            add_binding_in_scope(node, None, owner_index, name, ty, context);
+        } else {
+            add_binding_in_scope(node, Some(scope), owner_index, name, ty, context);
+        }
+        return;
+    }
+    if format == FileFormat::Java {
+        if node.kind() == "enhanced_for_statement" {
+            // The loop variable is not in scope in the iterable expression.
+            if let Some(body) = node.child_by_field_name("body") {
+                add_binding_in_scope(body, Some(body), owner_index, name, ty, context);
+            }
+        } else {
+            let scope = node
+                .parent()
+                .filter(|parent| parent.kind() == "local_variable_declaration")
+                .and_then(|parent| parent.parent());
+            add_binding_in_scope(node, scope, owner_index, name, ty, context);
+        }
+        return;
+    }
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "variable_declarator"
+    {
+        // The local name already shadows outer bindings before its
+        // initializer, but has no callable value yet (TDZ or undefined).
+        let scope = javascript_variable_scope(node);
+        context.add_scoped_binding(
+            owner_index,
+            name,
+            "?",
+            (
+                scope.start_position().row + 1,
+                scope.start_position().column,
+            ),
+            (node.start_position().row + 1, node.start_position().column),
+        );
+        add_binding_in_scope(node, Some(scope), owner_index, name, ty, context);
+    } else if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "assignment_expression"
+    {
+        let end = context.assignment_scope_end(name, node.start_byte());
+        add_binding_until(node, end, owner_index, name, ty, context);
+    } else {
+        add_binding_in_scope(node, None, owner_index, name, ty, context);
+    }
+}
+
+fn javascript_variable_scope(mut node: Node<'_>) -> Node<'_> {
+    // `var` belongs to the function; `let`/`const` belong to the nearest
+    // block or loop, including declarations in a loop initializer.
+    let function_scoped = node
+        .parent()
+        .is_some_and(|parent| parent.kind() == "variable_declaration");
+    while let Some(parent) = node.parent() {
+        node = parent;
+        if node.kind() == "program" {
+            break;
+        }
+        if matches!(
+            node.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "generator_function"
+                | "generator_function_declaration"
+        ) {
+            return node.child_by_field_name("body").unwrap_or(node);
+        }
+        if !function_scoped
+            && matches!(
+                node.kind(),
+                "statement_block" | "for_statement" | "for_in_statement" | "switch_body"
+            )
+        {
+            break;
+        }
+    }
+    node
+}
+
+// Register declarations before collecting values, including declarations that
+// appear after an assignment. Scope lookup must not inherit a TDZ marker's end
+// or use the assignment's own block when it updates an outer binding.
+fn collect_javascript_binding_scopes(node: Node<'_>, source: &[u8], context: &mut WalkContext) {
+    let binding = match node.kind() {
+        "variable_declarator" => node
+            .child_by_field_name("name")
+            .map(|name| (name, javascript_variable_scope(node))),
+        "formal_parameters" => node.parent().map(|function| (node, function)),
+        "arrow_function" => node
+            .child_by_field_name("parameter")
+            .map(|name| (name, node)),
+        "catch_clause" => node
+            .child_by_field_name("parameter")
+            .zip(node.child_by_field_name("body")),
+        "for_in_statement" => {
+            let mut cursor = node.walk();
+            let lexical = node
+                .children_by_field_name("kind", &mut cursor)
+                .any(|kind| matches!(node_text(kind, source), "let" | "const"));
+            lexical
+                .then(|| node.child_by_field_name("left").map(|name| (name, node)))
+                .flatten()
+        }
+        _ => None,
+    };
+    if let Some((pattern, scope)) = binding {
+        register_javascript_pattern_scope(pattern, scope, source, context);
+    }
+    for child in named_children(node) {
+        collect_javascript_binding_scopes(child, source, context);
+    }
+}
+
+fn register_javascript_pattern_scope(
+    pattern: Node<'_>,
+    scope: Node<'_>,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            context.register_binding_scope(
+                node_text(pattern, source),
+                scope.start_byte()..scope.end_byte(),
+                (scope.kind() != "program")
+                    .then(|| (scope.end_position().row + 1, scope.end_position().column)),
+            );
+        }
+        "pair_pattern" => {
+            if let Some(value) = pattern.child_by_field_name("value") {
+                register_javascript_pattern_scope(value, scope, source, context);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = pattern.child_by_field_name("left") {
+                register_javascript_pattern_scope(left, scope, source, context);
+            }
+        }
+        "required_parameter" | "optional_parameter" => {
+            if let Some(name) = pattern.child_by_field_name("pattern") {
+                register_javascript_pattern_scope(name, scope, source, context);
+            }
+        }
+        "rest_pattern" | "array_pattern" | "object_pattern" | "formal_parameters" => {
+            for child in named_children(pattern) {
+                register_javascript_pattern_scope(child, scope, source, context);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn add_binding_in_scope(
+    node: Node<'_>,
+    scope: Option<Node<'_>>,
+    owner: usize,
+    name: &str,
+    ty: &str,
+    context: &mut WalkContext,
+) {
+    let end = scope
+        .filter(|scope| scope.kind() != "program")
+        .map(|scope| (scope.end_position().row + 1, scope.end_position().column));
+    add_binding_until(node, end, owner, name, ty, context);
+}
+
+fn add_binding_until(
+    node: Node<'_>,
+    end: Option<(usize, usize)>,
+    owner: usize,
+    name: &str,
+    ty: &str,
+    context: &mut WalkContext,
+) {
+    let start = (node.start_position().row + 1, node.start_position().column);
+    if let Some(end) = end {
+        context.add_scoped_binding(owner, name, ty, start, end);
+    } else {
+        context.add_declare_binding(owner, name, ty, start.0, start.1, None);
+    }
+}
+
+fn collect_go_scoped_binding(
+    node: Node<'_>,
+    owner: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    let bound = match node.kind() {
+        "type_case" => {
+            let Some(switch) = node
+                .parent()
+                .filter(|parent| parent.kind() == "type_switch_statement")
+            else {
+                return;
+            };
+            let Some(alias) = switch
+                .child_by_field_name("alias")
+                .and_then(|alias| alias.named_child(0))
+            else {
+                return;
+            };
+            let mut cursor = node.walk();
+            let types: Vec<_> = node
+                .children_by_field_name("type", &mut cursor)
+                .filter(Node::is_named)
+                .collect();
+            let [ty] = types.as_slice() else { return };
+            type_name_of(*ty, source).map(|ty| (node_text(alias, source).to_owned(), ty, node))
+        }
+        "range_clause" => {
+            let Some(value) = node.child_by_field_name("right") else {
+                return;
+            };
+            let Some(name) = node
+                .child_by_field_name("left")
+                .and_then(|left| left.named_child(1))
+            else {
+                return;
+            };
+            let Some(parent) = node.parent() else { return };
+            context
+                .name_edges
+                .iter()
+                .rev()
+                .find(|edge| {
+                    edge.owner_index == owner
+                        && edge.ref_kind == GraphEdgeKind::Declares
+                        && edge.ref_name == node_text(value, source)
+                })
+                .and_then(|edge| edge.bound_type.as_deref())
+                .and_then(|ty| ty.strip_prefix("[]"))
+                .map(|ty| (node_text(name, source).to_owned(), ty.to_owned(), parent))
+        }
+        _ => None,
+    };
+    if let Some((name, ty, scope)) = bound {
+        context.add_scoped_binding(
+            owner,
+            &name,
+            &ty,
+            (node.start_position().row + 1, node.start_position().column),
+            (scope.end_position().row + 1, scope.end_position().column),
+        );
+    }
+}
+
+fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context: &mut WalkContext) {
+    let Some(name) = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("left"))
+    else {
+        return;
+    };
+    let Some(mut value) = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("right"))
+    else {
+        return;
+    };
+    while value.kind() == "parenthesized_expression" {
+        let Some(inner) = value.named_child(0) else {
+            return;
+        };
+        value = inner;
+    }
+    if value.kind() == "call_expression"
+        && value
+            .child_by_field_name("function")
+            .is_some_and(|function| node_text(function, source) == "Object.freeze")
+        && let Some(argument) = value
+            .child_by_field_name("arguments")
+            .and_then(|arguments| arguments.named_child(0))
+    {
+        value = argument;
+    }
+    if value.kind() != "object" {
+        return;
+    }
+    let Some(object) = member_expression(name, source) else {
+        return;
+    };
+    let end = if node.kind() == "variable_declarator" {
+        let scope = javascript_variable_scope(node);
+        (scope.kind() != "program")
+            .then(|| (scope.end_position().row + 1, scope.end_position().column))
+    } else {
+        context.assignment_scope_end(&object, node.start_byte())
+    };
+    let mut keys = std::collections::BTreeSet::new();
+    for property in named_children(value) {
+        let key = property
+            .child_by_field_name("key")
+            .or_else(|| property.child_by_field_name("name"))
+            .or_else(|| (property.kind() == "shorthand_property_identifier").then_some(property));
+        let key = key
+            .and_then(|key| {
+                if key.kind() == "computed_property_name" {
+                    key.named_child(0).filter(|key| key.kind() == "string")
+                } else {
+                    Some(key)
+                }
+            })
+            .map(|key| node_text(key, source).trim_matches(['\'', '"']))
+            .filter(|key| is_identifier_like(key));
+        let Some(key) = key else {
+            // An unknown spread/computed key can overwrite every preceding property.
+            for key in &keys {
+                add_binding_until(
+                    property,
+                    end,
+                    owner,
+                    &format!("{object}.{key}"),
+                    "?",
+                    context,
+                );
+            }
+            continue;
+        };
+        keys.insert(key.to_owned());
+        let value = property
+            .child_by_field_name("value")
+            .or_else(|| (property.kind() == "shorthand_property_identifier").then_some(property));
+        let ty = match value.map(|value| value.kind()) {
+            Some("identifier" | "shorthand_property_identifier") => format!(
+                "typeof {}",
+                node_text(value.expect("property value"), source)
+            ),
+            Some("arrow_function" | "function_expression")
+                if node.kind() == "variable_declarator" =>
+            {
+                format!("typeof {object}::{key}")
+            }
+            _ if property.kind() == "method_definition" && node.kind() == "variable_declarator" => {
+                format!("typeof {object}::{key}")
+            }
+            _ => "?".to_owned(),
+        };
+        add_binding_until(
+            property,
+            end,
+            owner,
+            &format!("{object}.{key}"),
+            &ty,
+            context,
+        );
     }
 }
 
@@ -378,9 +1751,178 @@ fn declaration_binding_of(
         FileFormat::Go => go_binding_of(node, source, context),
         FileFormat::Cpp => cpp_binding_of(node, source, context),
         FileFormat::C => c_binding_of(node, source),
-        FileFormat::TypeScript => ts_binding_of(node, source, context),
-        FileFormat::JavaScript => js_binding_of(node, source, context),
+        FileFormat::TypeScript => ts_binding_of(node, source),
+        FileFormat::JavaScript => js_binding_of(node, source),
         _ => None,
+    }
+}
+
+/// Appends the names a declaration node takes for its own scope, whether or
+/// not the index can spell the type they hold.
+///
+/// [`declaration_binding_of`] answers only bindings that name a type, because
+/// a binding is evidence for later receiver calls. A name is occupied even
+/// when its type is not spellable — `function invoke(dispatch: () => void)`
+/// hides an imported `dispatch` from every call the body writes — and a bare
+/// call through an occupied name reaches the local value rather than the
+/// file-level symbol. Keeping occupancy separate from typing lets partition
+/// ask the two questions apart: "which type does this name hold" and "is this
+/// name the file's".
+fn shadowing_names_of(node: Node<'_>, source: &[u8], format: FileFormat, names: &mut Vec<String>) {
+    match format {
+        FileFormat::TypeScript => shadowing_names_in_typescript(node, source, names),
+        FileFormat::JavaScript => shadowing_names_in_javascript(node, source, names),
+        FileFormat::Python => shadowing_names_in_python(node, source, names),
+        FileFormat::Go => shadowing_names_in_go(node, source, names),
+        FileFormat::Rust => shadowing_names_in_rust(node, source, names),
+        FileFormat::Java => shadowing_names_in_java(node, source, names),
+        FileFormat::C | FileFormat::Cpp => shadowing_names_in_c_family(node, source, names),
+        _ => {}
+    }
+}
+
+/// Appends `candidate`'s text when it is a plain identifier. Destructuring
+/// patterns carry several names in one node, so they are read by their
+/// callers instead.
+fn push_shadowing_name(candidate: Option<Node<'_>>, source: &[u8], names: &mut Vec<String>) {
+    if let Some(node) = candidate.filter(|node| node.kind() == "identifier") {
+        names.push(node_text(node, source).to_owned());
+    }
+}
+
+fn shadowing_names_in_typescript(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "required_parameter" | "optional_parameter" => {
+            push_shadowing_name(node.child_by_field_name("pattern"), source, names);
+        }
+        "variable_declarator" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_javascript(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "formal_parameters" => {
+            for child in named_children(node) {
+                match child.kind() {
+                    "identifier" => names.push(node_text(child, source).to_owned()),
+                    "assignment_pattern" => {
+                        push_shadowing_name(child.child_by_field_name("left"), source, names);
+                    }
+                    "rest_pattern" => {
+                        push_shadowing_name(child.named_child(0), source, names);
+                    }
+                    // Destructuring patterns bind several names; the
+                    // callers below read a name per node.
+                    _ => {}
+                }
+            }
+        }
+        "variable_declarator" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_python(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "parameters" => {
+            for child in named_children(node) {
+                let candidate = match child.kind() {
+                    "identifier" => Some(child),
+                    // `a: Left` carries the name as its first child.
+                    "typed_parameter" => child.named_child(0),
+                    "default_parameter" | "typed_default_parameter" => {
+                        child.child_by_field_name("name")
+                    }
+                    _ => None,
+                };
+                push_shadowing_name(candidate, source, names);
+            }
+        }
+        "assignment" => {
+            push_shadowing_name(node.child_by_field_name("left"), source, names);
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_go(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "parameter_declaration" | "variadic_parameter_declaration" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        "short_var_declaration" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                push_shadowing_name(left.named_child(0), source, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_rust(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        // `fn m(a: Left)`; `mut a` wraps the name in `mut_pattern`.
+        "parameter" => {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                let candidate = if pattern.kind() == "identifier" {
+                    Some(pattern)
+                } else {
+                    pattern.named_child(0)
+                };
+                push_shadowing_name(candidate, source, names);
+            }
+        }
+        "let_declaration" => {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                push_shadowing_name(Some(pattern), source, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_java(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "formal_parameter" | "catch_formal_parameter" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        "local_variable_declaration" => {
+            for child in named_children(node) {
+                if child.kind() == "variable_declarator" {
+                    push_shadowing_name(child.child_by_field_name("name"), source, names);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_c_family(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "parameter_declaration" => {
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                let name = peel_declarator_name(declarator, source);
+                names.extend(name);
+            }
+        }
+        "declaration" => {
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                // `int x = 1` wraps the name in an `init_declarator`.
+                let declarator = if declarator.kind() == "init_declarator" {
+                    declarator.child_by_field_name("declarator")
+                } else {
+                    Some(declarator)
+                };
+                let name = declarator.and_then(|node| peel_declarator_name(node, source));
+                names.extend(name);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -399,7 +1941,102 @@ pub(crate) fn scan_return_types(
     if !context.is_collecting() {
         return;
     }
+    if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript) {
+        collect_javascript_binding_scopes(root, source, context);
+    }
     visit_for_return_types(root, source, format, context);
+    let script_scope = match format {
+        FileFormat::JavaScript => Some(if has_javascript_module_syntax(root, source) {
+            "module"
+        } else {
+            "script"
+        }),
+        FileFormat::TypeScript if !has_javascript_module_syntax(root, source) => Some("script"),
+        _ => None,
+    };
+    if let Some(scope) = script_scope {
+        // Only explicit script evidence authorizes cross-file global types.
+        // A missing marker (including an older index) is not global evidence.
+        context.add_declare_binding(
+            super::FILE_SCOPE_INDEX,
+            if format == FileFormat::TypeScript {
+                "[[typescript_scope]]"
+            } else {
+                "[[javascript_scope]]"
+            },
+            scope,
+            1,
+            0,
+            None,
+        );
+    }
+    if matches!(
+        format,
+        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Go
+    ) {
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_declaration"
+                    | "generator_function_declaration"
+                    | "generator_function"
+                    | "func_literal"
+                    | "class"
+                    | "method_definition"
+                    | "method_declaration"
+                    | "class_declaration"
+                    | "abstract_class_declaration"
+                    | "type_spec"
+                    | "function_expression"
+                    | "arrow_function"
+            )
+        };
+        visit_for_bindings(
+            root,
+            super::FILE_SCOPE_INDEX,
+            source,
+            format,
+            context,
+            Some(&boundary),
+        );
+    }
+    if matches!(format, FileFormat::C | FileFormat::Cpp) {
+        // A translation-unit declaration states the type of the name it
+        // introduces (`extern MemTableRep::Iterator* iter;`), and every body of
+        // the file may read that name. A class body states its members for the
+        // class entity itself, so those are left to its own scan.
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_definition"
+                    | "lambda_expression"
+                    | "class_specifier"
+                    | "struct_specifier"
+                    | "union_specifier"
+                    | "enum_specifier"
+                    | "template_declaration"
+            )
+        };
+        visit_for_bindings(
+            root,
+            super::FILE_SCOPE_INDEX,
+            source,
+            format,
+            context,
+            Some(&boundary),
+        );
+    }
+}
+
+fn has_javascript_module_syntax(node: Node<'_>, source: &[u8]) -> bool {
+    matches!(node.kind(), "import_statement" | "export_statement")
+        // Treat CommonJS evidence conservatively, even when the identifier
+        // could be shadowed. It must not enable project-global class lookup.
+        || (node.kind() == "identifier"
+            && matches!(node_text(node, source), "require" | "module" | "exports"))
+        || named_children(node)
+            .into_iter()
+            .any(|child| has_javascript_module_syntax(child, source))
 }
 
 fn visit_for_return_types(
@@ -556,36 +2193,64 @@ fn go_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
 }
 
 fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    if node.kind() != "function_definition" {
-        return None;
-    }
+    // A definition states the result beside its body, a prototype beside its
+    // parameter list. A call's result type reads the same either way, and the
+    // readers that need it — a `decltype(f(...))` base, an `auto x = f()`
+    // caller — often see only the prototype, the definition living elsewhere.
+    let declarator = match node.kind() {
+        "function_definition" => node.child_by_field_name("declarator")?,
+        "declaration" => {
+            let declarator = node.child_by_field_name("declarator")?;
+            // A variable declaration (`Widget w;`) states no result type; only
+            // a prototype's declarator ends in a parameter list.
+            let mut inner = declarator;
+            while matches!(
+                inner.kind(),
+                "pointer_declarator" | "reference_declarator" | "array_declarator"
+            ) {
+                inner = inner.child_by_field_name("declarator")?;
+            }
+            if inner.kind() != "function_declarator" {
+                return None;
+            }
+            declarator
+        }
+        _ => return None,
+    };
     let type_node = node.child_by_field_name("type")?;
-    let type_name = type_name_of(type_node, source)?;
+    let mut type_name = cpp_type_name_of(type_node, source)?;
     if type_name == "void" {
         return None;
     }
     // The function name sits under the declarator chain: the function
     // declarator itself, optionally wrapped in pointer/reference/array
-    // declarators.
-    let mut declarator = node.child_by_field_name("declarator")?;
+    // declarators. The wrappers are the result type's own decoration, so they
+    // stay on the spelling the binding carries.
+    let mut declarator = declarator;
     while matches!(
         declarator.kind(),
         "function_declarator" | "pointer_declarator" | "reference_declarator" | "array_declarator"
     ) {
+        if declarator.kind() == "pointer_declarator" {
+            type_name.push('*');
+        }
+        if declarator.kind() == "reference_declarator" {
+            type_name.push('&');
+        }
         declarator = declarator.child_by_field_name("declarator")?;
     }
-    if declarator.kind() != "identifier" {
+    if !matches!(declarator.kind(), "identifier" | "field_identifier") {
         return None;
     }
     Some((node_text(declarator, source).to_owned(), type_name))
 }
 
 fn ts_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    if node.kind() != "function_declaration" {
+    if !matches!(node.kind(), "function_declaration" | "method_definition") {
         return None;
     }
     let name = node.child_by_field_name("name")?;
-    if name.kind() != "identifier" {
+    if !matches!(name.kind(), "identifier" | "property_identifier") {
         return None;
     }
     let annotation = node.child_by_field_name("return_type")?;
@@ -593,7 +2258,7 @@ fn ts_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
         return None;
     }
     let inner = annotation.named_child(0)?;
-    if inner.kind() != "type_identifier" {
+    if !matches!(inner.kind(), "type_identifier" | "generic_type") {
         return None;
     }
     Some((
@@ -625,15 +2290,66 @@ fn type_name_of(node: Node<'_>, source: &[u8]) -> Option<String> {
     is_identifier_like(text).then(|| text.to_owned())
 }
 
-/// Follows pointer/reference declarator wrappers down to the spelled name.
+/// Follows pointer/reference/attribute declarator wrappers down to the
+/// spelled name.
+///
+/// The wrapper carries the name in its `declarator` field; a cv-qualifier
+/// (`const`, `volatile`) or a macro attribute sits beside it as a child, so
+/// reading the first named child answers `const` instead of the name.
 fn peel_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
-    match node.kind() {
-        "reference_declarator" | "pointer_declarator" | "array_declarator" => {
-            peel_declarator_name(node.named_child(0)?, source)
+    let mut current = node;
+    loop {
+        match current.kind() {
+            // A `typedef` spells its new name with the type grammar's own
+            // identifier (`typedef Iter<Element> iterator`).
+            "identifier" | "field_identifier" | "type_identifier" => {
+                return Some(node_text(current, source).to_owned());
+            }
+            "pointer_declarator"
+            | "reference_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator"
+            | "attributed_declarator"
+            | "init_declarator" => {
+                current = current.child_by_field_name("declarator").or_else(|| {
+                    named_children(current)
+                        .into_iter()
+                        .find(|child| carries_name(child.kind()))
+                })?;
+            }
+            _ => return None,
         }
-        "identifier" => Some(node_text(node, source).to_owned()),
-        _ => None,
     }
+}
+
+/// Declarator node kinds that wrap another declarator, so the search for the
+/// spelled name has to descend through them. A function declarator is
+/// deliberately absent: it names a callable, not a receiver.
+fn carries_name(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "field_identifier"
+            | "pointer_declarator"
+            | "reference_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator"
+            | "attributed_declarator"
+    )
+}
+
+/// Generic arguments do not change the declaring Java class of a member.
+fn java_type_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    // An array has its own members, not its element type's method set.
+    if node.kind() == "array_type" {
+        return None;
+    }
+    let node = if node.kind() == "generic_type" {
+        node.named_child(0)?
+    } else {
+        node
+    };
+    type_name_of(node, source)
 }
 
 fn java_binding_of(
@@ -642,18 +2358,52 @@ fn java_binding_of(
     context: &WalkContext,
 ) -> Option<(String, String)> {
     match node.kind() {
-        // `var x = new X()` and `X x = new X()`: the creation expression
-        // spells the type regardless of how the declaration's own type
-        // field spells it (`var` placeholder or the explicit name). A
-        // bare-call initializer (`var x = makeX()`) binds the factory's
-        // registered return type instead; a receiver turns the callee
-        // into a member call no factory table answers.
+        "type_parameter" => {
+            let children = named_children(node);
+            let name = children
+                .iter()
+                .find(|child| child.kind() == "type_identifier")?;
+            let bounds = children.iter().find(|child| child.kind() == "type_bound")?;
+            // Intersections need member selection across all bounds; do not
+            // claim the first bound is the complete receiver type.
+            if bounds.named_child_count() != 1 {
+                return None;
+            }
+            Some((
+                format!("[[type:{}]]", node_text(*name, source)),
+                java_type_name(bounds.named_child(0)?, source)?,
+            ))
+        }
+        "enum_constant" => {
+            let name = node.child_by_field_name("name")?;
+            let declaration = node.parent()?.parent()?;
+            if declaration.kind() != "enum_declaration" {
+                return None;
+            }
+            Some((
+                node_text(name, source).to_owned(),
+                node_text(declaration.child_by_field_name("name")?, source).to_owned(),
+            ))
+        }
+
+        // An explicit type selects the static method target. Inferred `var`
+        // declarations use a creation expression or known factory return type.
         "variable_declarator" => {
-            let value = node.child_by_field_name("value")?;
             let name = node.child_by_field_name("name")?;
             if name.kind() != "identifier" {
                 return None;
             }
+            // Explicit Java types remain authoritative, including fields
+            // without initializers and variables initialized to null.
+            if let Some(ty) = node.parent()?.child_by_field_name("type")
+                && node_text(ty, source) != "var"
+            {
+                return Some((
+                    node_text(name, source).to_owned(),
+                    java_type_name(ty, source)?,
+                ));
+            }
+            let value = node.child_by_field_name("value")?;
             if value.kind() == "method_invocation" {
                 if value.child_by_field_name("object").is_some() {
                     return None;
@@ -675,10 +2425,10 @@ fn java_binding_of(
             ))
         }
         // `void m(Left a)`: the parameter binds its declared type.
-        "formal_parameter" => {
+        "formal_parameter" | "enhanced_for_statement" => {
             let name = node.child_by_field_name("name")?;
             let type_node = node.child_by_field_name("type")?;
-            let type_name = type_name_of(type_node, source)?;
+            let type_name = java_type_name(type_node, source)?;
             Some((node_text(name, source).to_owned(), type_name))
         }
         _ => None,
@@ -727,6 +2477,12 @@ fn python_binding_of(
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
+    // `def f(index: Index)`: the annotation states the type the receiver
+    // holds for the whole body, so `index.create_variables()` reaches the
+    // interface the parameter declares rather than staying unbound.
+    if let Some(binding) = python_parameter_binding_of(node, source) {
+        return Some(binding);
+    }
     if node.kind() != "assignment" {
         return None;
     }
@@ -751,17 +2507,186 @@ fn python_binding_of(
     Some((node_text(left, source).to_owned(), bound_type.to_owned()))
 }
 
+/// The `(name, annotation)` pair a Python parameter states.
+///
+/// `def f(index: Index)` and `def f(index: Index = None)` both annotate the
+/// name the body calls through; `*args: int` and `**kwargs: int` are not
+/// receivers, so their patterns carry no binding.
+fn python_parameter_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
+    if !matches!(node.kind(), "typed_parameter" | "typed_default_parameter") {
+        return None;
+    }
+    let name = node
+        .child_by_field_name("name")
+        .or_else(|| node.named_child(0))
+        .filter(|name| name.kind() == "identifier")?;
+    let annotation = python_annotation_name(node.child_by_field_name("type")?, source)?;
+    Some((node_text(name, source).to_owned(), annotation))
+}
+
+/// The type name an annotation spells, when it names one the resolver can look
+/// up: a plain name, a quoted forward reference, or the value type of a union
+/// or an optional wrapper. A container (`list[Node]`) states its elements
+/// rather than the value a member call reads through, and a dotted spelling
+/// (`np.ndarray`) names a module the binding cannot place.
+fn python_annotation_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        // An annotation is wrapped in a `type` node stating what it declares,
+        // and a wrapper spells its shape the same way one level in: the
+        // argument of `Optional[…]` and the first arm of a `Union[…]`.
+        "type" | "type_parameter" | "tuple" => python_annotation_name(node.named_child(0)?, source),
+        "identifier" => Some(node_text(node, source).to_owned()),
+        "string" => {
+            let text = node_text(node, source);
+            let unquoted = text.trim_matches(['"', '\'']).trim();
+            is_plain_identifier(unquoted).then(|| unquoted.to_owned())
+        }
+        // `Client | None` states the value's own type beside the absence of a
+        // value, but `Left | Right` states two shapes a call may read through:
+        // only arms that agree leave the name holding one type.
+        "binary_operator" | "union_type" => python_union_annotation(node, source),
+        // `Optional[Client]` holds a value of that type; `list[Client]` is a
+        // container whose own members answer, so only the wrappers that stand
+        // for the value itself are read through.
+        "generic_type" => python_wrapped_annotation(
+            node_text(node.named_child(0)?, source),
+            node.named_child(1)?,
+            source,
+        ),
+        "subscript" => python_wrapped_annotation(
+            node_text(node.child_by_field_name("value")?, source),
+            node.child_by_field_name("subscript")?,
+            source,
+        ),
+        _ => None,
+    }
+}
+
+/// The value type a wrapper stands for, when the wrapper holds one value:
+/// `Optional[Client]`, `Union[Client, None]` and `Annotated[Client, …]` all
+/// answer `Client`, while a container answers nothing.
+fn python_wrapped_annotation(wrapper: &str, argument: Node<'_>, source: &[u8]) -> Option<String> {
+    let wrapper = wrapper.rsplit('.').next().unwrap_or_default();
+    if !matches!(wrapper, "Optional" | "Union" | "Annotated") {
+        return None;
+    }
+    // `Union[Left, Right]` states one type per argument; `Optional` and
+    // `Annotated` state the value's type first and metadata after it.
+    let arguments: Vec<Node<'_>> = match argument.kind() {
+        "type_parameter" | "tuple" => named_children(argument),
+        _ => vec![argument],
+    };
+    match wrapper {
+        "Union" => python_agreed_arm_type(&arguments, source),
+        _ => arguments
+            .first()
+            .and_then(|first| python_annotation_name(*first, source)),
+    }
+}
+
+/// The one type a union annotation denotes.
+///
+/// `Client | None` states the value's type beside the absence of a value, so
+/// the arms that name one must agree; `Left | Right` names two shapes a call
+/// may read through, and picking the arm the source happens to write first
+/// would make the graph depend on the order the annotation is spelled in.
+fn python_union_annotation(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut arms = Vec::new();
+    python_union_arms(node, &mut arms);
+    python_agreed_arm_type(&arms, source)
+}
+
+/// The one type a set of union arms denotes: the arms that name a type must
+/// agree, and `None` states the absence of a value rather than a type.
+fn python_agreed_arm_type(arms: &[Node<'_>], source: &[u8]) -> Option<String> {
+    let mut inferred: Option<String> = None;
+    for arm in arms {
+        // `None` states that the arm holds no value, not a type a call reaches.
+        if python_none_annotation(*arm, source) {
+            continue;
+        }
+        // An arm this reader cannot name (`Left | right.Right`, a container)
+        // is not evidence that the arms it can name are the only shapes the
+        // value takes: the annotation stays undecided rather than shrinking to
+        // the arms that happen to be spelled out.
+        let name = python_annotation_name(*arm, source)?;
+        match &inferred {
+            Some(previous) if previous != &name => return None,
+            Some(_) => {}
+            None => inferred = Some(name),
+        }
+    }
+    inferred
+}
+
+/// Whether an annotation arm states the absence of a value rather than a type:
+/// `None` spells as its own node kind, as a name, and as a forward reference.
+fn python_none_annotation(node: Node<'_>, source: &[u8]) -> bool {
+    match node.kind() {
+        "type" | "type_parameter" => node
+            .named_child(0)
+            .is_some_and(|inner| python_none_annotation(inner, source)),
+        "none" => true,
+        "identifier" => node_text(node, source) == "None",
+        "string" => node_text(node, source).trim_matches(['"', '\'']).trim() == "None",
+        _ => false,
+    }
+}
+
+/// The arms a union annotation states, left to right: `A | B | C` nests as
+/// `(A | B) | C`, and a `Union[…]` argument list states them as arguments.
+fn python_union_arms<'tree>(node: Node<'tree>, arms: &mut Vec<Node<'tree>>) {
+    if matches!(node.kind(), "binary_operator" | "union_type") {
+        if let Some(left) = node
+            .child_by_field_name("left")
+            .or_else(|| node.named_child(0))
+        {
+            python_union_arms(left, arms);
+        }
+        if let Some(right) = node
+            .child_by_field_name("right")
+            .or_else(|| node.named_child(1))
+        {
+            python_union_arms(right, arms);
+        }
+        return;
+    }
+    arms.push(node);
+}
+
+/// Whether `text` is one identifier: `Index` binds, `a.b` and `list[Node]`
+/// do not.
+fn is_plain_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphabetic() || first == '_') && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
 fn rust_binding_of(
     node: Node<'_>,
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
-    if node.kind() != "let_declaration" {
+    if !matches!(node.kind(), "let_declaration" | "parameter") {
         return None;
     }
     let pattern = node.child_by_field_name("pattern")?;
     if pattern.kind() != "identifier" {
         return None;
+    }
+    if let Some(ty) = node.child_by_field_name("type") {
+        let ty = if ty.kind() == "reference_type" {
+            ty.child_by_field_name("type")?
+        } else {
+            ty
+        };
+        if matches!(ty.kind(), "type_identifier" | "scoped_type_identifier")
+            && let Some(ty) = type_name_of(ty, source)
+        {
+            return Some((node_text(pattern, source).to_owned(), ty));
+        }
     }
     let value = node.child_by_field_name("value")?;
     // `let x = make_x()`: a bare call binds the callee's registered
@@ -786,46 +2711,121 @@ fn rust_binding_of(
 }
 
 fn go_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
+    let (name, declared, value) = match node.kind() {
+        "short_var_declaration" => (
+            node.child_by_field_name("left")?.named_child(0)?,
+            None,
+            node.child_by_field_name("right")?.named_child(0),
+        ),
+        "var_spec" => (
+            node.child_by_field_name("name")?,
+            node.child_by_field_name("type"),
+            node.child_by_field_name("value")
+                .and_then(|value| value.named_child(0)),
+        ),
+        "parameter_declaration" | "field_declaration" | "type_parameter_declaration" => (
+            node.child_by_field_name("name")?,
+            node.child_by_field_name("type"),
+            None,
+        ),
+        _ => return None,
+    };
+    if !matches!(name.kind(), "identifier" | "field_identifier") {
+        return None;
+    }
+    let bound_type = declared
+        .and_then(|ty| {
+            if ty.kind() == "slice_type" {
+                Some(node_text(ty, source).to_owned())
+            } else {
+                type_name_of(ty, source)
+            }
+        })
+        .or_else(|| value.and_then(|value| go_initializer_type(value, source, context)))
+        // An unknown parameter/local still shadows a same-named function.
+        // `?` cannot name a source type and must never resolve by name.
+        .unwrap_or_else(|| "?".to_owned());
+    Some((node_text(name, source).to_owned(), bound_type))
+}
+
+fn go_initializer_type(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<String> {
     match node.kind() {
-        // `x := new(X)`: the new call's type argument is the type.
-        // `x := makeX()`: a bare call binds the registered factory's
-        // return type instead.
-        "short_var_declaration" => {
-            let left = node.child_by_field_name("left")?;
-            let right = node.child_by_field_name("right")?;
-            let call = right.named_child(0)?;
-            if call.kind() != "call_expression" {
-                return None;
-            }
-            let function = call.child_by_field_name("function")?;
+        "unary_expression" if node_text(node, source).starts_with('&') => {
+            go_initializer_type(node.child_by_field_name("operand")?, source, context)
+        }
+        "composite_literal" => type_name_of(node.child_by_field_name("type")?, source),
+        "call_expression" => {
+            let function = node.child_by_field_name("function")?;
             if function.kind() != "identifier" {
-                return None;
-            }
-            let name = left.named_child(0)?;
-            if name.kind() != "identifier" {
                 return None;
             }
             let callee = node_text(function, source);
             if callee == "new" {
-                let arguments = call.child_by_field_name("arguments")?;
-                let type_node = arguments.named_child(0)?;
-                return Some((
-                    node_text(name, source).to_owned(),
-                    node_text(type_node, source).to_owned(),
-                ));
+                return type_name_of(
+                    node.child_by_field_name("arguments")?.named_child(0)?,
+                    source,
+                );
             }
-            let type_name = context.factory_return_of(callee)?;
-            Some((node_text(name, source).to_owned(), type_name.to_owned()))
-        }
-        // `func m(a Left, b *Right)`: the parameter binds its type.
-        "parameter_declaration" => {
-            let name = node.child_by_field_name("name")?;
-            let type_node = node.child_by_field_name("type")?;
-            let type_name = type_name_of(type_node, source)?;
-            Some((node_text(name, source).to_owned(), type_name))
+            context.factory_return_of(callee).map(str::to_owned)
         }
         _ => None,
     }
+}
+
+/// Whether a declaration's declarator states a value rather than a function.
+///
+/// `std::unique_ptr<W> it(raw);` is the most vexing parse: the grammar reads
+/// the initializer as a parameter list, exactly as it reads a prototype's. Only
+/// a body states one of these, and what it states there is the holder being
+/// built from `raw` — a prototype written inside a body is a statement about a
+/// function declared elsewhere, which is never spelled this way. A holder is
+/// what makes the reading possible at all: it is a type built from one value.
+fn cpp_vexing_initializer(declared: Node<'_>, declarator: Node<'_>, source: &[u8]) -> bool {
+    let Some(type_name) = cpp_type_name_of(declared, source) else {
+        return false;
+    };
+    if !cpp_holds_one_value(&type_name) {
+        return false;
+    }
+    let Some(parameters) = declarator.child_by_field_name("parameters") else {
+        return false;
+    };
+    let parameters = named_children(parameters);
+    if parameters.is_empty()
+        || !parameters
+            .iter()
+            .all(|parameter| matches!(parameter.kind(), "parameter_declaration" | "identifier"))
+    {
+        return false;
+    }
+    inside_function_body(declarator)
+}
+
+/// The templates whose value is built from one other value, which is what
+/// makes a declaration beside them readable as either a variable or a function.
+const CPP_HOLDING_TEMPLATES: &[&str] = &["unique_ptr", "shared_ptr", "weak_ptr"];
+
+/// Whether a type spelling is a holding template's application
+/// (`std::unique_ptr<Widget>`).
+fn cpp_holds_one_value(type_name: &str) -> bool {
+    type_name
+        .split_once('<')
+        .map(|(head, _)| head)
+        .and_then(|head| head.rsplit("::").next())
+        .is_some_and(|name| CPP_HOLDING_TEMPLATES.contains(&name))
+}
+
+/// Whether a node is written inside a function's body rather than beside it.
+fn inside_function_body(node: Node<'_>) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "compound_statement" => return true,
+            "translation_unit" | "declaration_list" | "field_declaration_list" => return false,
+            _ => current = parent,
+        }
+    }
+    false
 }
 
 fn cpp_binding_of(
@@ -833,20 +2833,50 @@ fn cpp_binding_of(
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
+    // A type spelled with a template parameter (`std::unique_ptr<T>`) holds
+    // whatever the instantiation supplies. The parameter name must not reach a
+    // workspace class that happens to spell the same, so the name stays
+    // unbound rather than guessed.
+    if let Some(declared) = node.child_by_field_name("type")
+        && cpp_type_uses_template_parameter(node, declared, source)
+    {
+        return None;
+    }
     match node.kind() {
-        // `auto x = X{}` / `auto x = new X()`: the placeholder type defers
-        // to the initializer's spelled type. `auto x = makeX()`: a bare
-        // call binds the registered factory's return type.
+        // `Widget w;` / `Widget* p = f();` / `Widget& r = w;` /
+        // `std::unique_ptr<W> h(new W());`: the declaration spells the type
+        // the name holds — through pointer/reference wrappers, an enclosing
+        // class (`MemTableRep::Iterator`) and a holding template argument.
+        // `auto x = ...` carries no type of its own and is handled below.
         "declaration" => {
             let declared = node.child_by_field_name("type")?;
-            if declared.kind() != "placeholder_type_specifier" {
-                return None;
-            }
             let declarator = node.child_by_field_name("declarator")?;
+            if declared.kind() != "placeholder_type_specifier" {
+                // A function prototype declares a function, not a receiver.
+                // `std::unique_ptr<W> h(raw);` is the exception: the grammar
+                // reads the initializer as a parameter list, and a parameter
+                // that spells no type is the object's argument, so the name
+                // beside the type is the object's.
+                let declarator = match declarator.kind() {
+                    "function_declarator"
+                        if cpp_vexing_initializer(declared, declarator, source) =>
+                    {
+                        declarator.child_by_field_name("declarator")?
+                    }
+                    "function_declarator" => return None,
+                    _ => declarator,
+                };
+                let name = peel_declarator_name(declarator, source)?;
+                let type_name = cpp_type_name_of(declared, source)?;
+                return Some((name, cpp_array_suffix(&type_name, declarator)));
+            }
+            // `auto x = X{}` / `auto* const x = new X()`: the placeholder type
+            // defers to the initializer's spelled type. `auto x = makeX()`: a
+            // bare call binds the registered factory's return type.
             if declarator.kind() != "init_declarator" {
                 return None;
             }
-            let name = declarator.child_by_field_name("declarator")?;
+            let name = peel_declarator_name(declarator, source)?;
             let value = declarator.child_by_field_name("value")?;
             let type_node = match value.kind() {
                 "new_expression" | "compound_literal_expression" => {
@@ -855,33 +2885,314 @@ fn cpp_binding_of(
                 "call_expression" => {
                     let function = value.child_by_field_name("function")?;
                     if function.kind() != "identifier" {
-                        return None;
+                        // `auto it = values.begin()`: the call itself states the
+                        // position the name walks, and the resolver reads the
+                        // element its receiver yields from the spelling.
+                        return Some((name, cpp_decltype_marker_of(value, source)));
                     }
-                    let type_name = context.factory_return_of(node_text(function, source))?;
-                    return Some((node_text(name, source).to_owned(), type_name.to_owned()));
+                    let Some(type_name) = context.factory_return_of(node_text(function, source))
+                    else {
+                        return Some((name, cpp_decltype_marker_of(value, source)));
+                    };
+                    return Some((name, type_name.to_owned()));
                 }
-                _ => return None,
+                // `auto& v = it->second`: the placeholder denotes whatever the
+                // path on the right names, which the resolver reads from the
+                // declarations that path walks.
+                _ => {
+                    let path = cpp_receiver_path(value, source)?;
+                    return Some((name, cpp_type_of_marker(&path)));
+                }
             };
-            Some((
-                node_text(name, source).to_owned(),
-                node_text(type_node, source).to_owned(),
-            ))
+            Some((name, node_text(type_node, source).to_owned()))
         }
         // `void m(Left &a)`: the parameter name sits under the reference
-        // declarator wrapper.
-        "parameter_declaration" => {
+        // declarator wrapper, and the type may be qualified or a holder.
+        // `Widget* member_;`: the class states the receiver type of the name
+        // its methods call through, exactly as a parameter states one. The
+        // binding belongs to the class entity, so every method body reaches it.
+        "parameter_declaration" | "field_declaration" => {
             let type_node = node.child_by_field_name("type")?;
             let declarator = node.child_by_field_name("declarator")?;
-            let type_name = type_name_of(type_node, source)?;
+            if declarator.kind() == "function_declarator" {
+                return None;
+            }
+            let type_name = cpp_type_name_of(type_node, source)?;
             let name = peel_declarator_name(declarator, source)?;
-            Some((name, type_name))
+            Some((name, cpp_array_suffix(&type_name, declarator)))
+        }
+        // `for (Engine* car : engines)`: the loop states the type of what it
+        // yields, and the binding holds for its body alone. A placeholder type
+        // (`for (const auto& meta : blob_files)`) defers to the element the
+        // range's own type yields, which is answered where that type is
+        // declared.
+        "for_range_loop" => {
+            let type_node = node.child_by_field_name("type")?;
+            let declarator = node.child_by_field_name("declarator")?;
+            let name = peel_declarator_name(declarator, source)?;
+            if type_node.kind() != "placeholder_type_specifier" {
+                let type_name = cpp_type_name_of(type_node, source)?;
+                return Some((name, cpp_array_suffix(&type_name, declarator)));
+            }
+            let range = node.child_by_field_name("right")?;
+            let range = cpp_receiver_path(range, source)?;
+            Some((name, cpp_element_marker(&range)))
+        }
+        // `using Shard = ClockCacheShard<Table>` / `typedef Iter<Element>
+        // iterator`: the class states a member type that a declaration or a
+        // call reaches by name alone, so the alias answers like a field would.
+        "alias_declaration" => {
+            let name = node.child_by_field_name("name")?;
+            let target = node.child_by_field_name("type")?;
+            let type_name = cpp_type_name_of(target, source)?;
+            Some((node_text(name, source).to_owned(), type_name))
+        }
+        "type_definition" => {
+            let target = node.child_by_field_name("type")?;
+            let declarator = node.child_by_field_name("declarator")?;
+            let name = peel_declarator_name(declarator, source)?;
+            Some((name, cpp_type_name_of(target, source)?))
+        }
+        // `using google::protobuf::Descriptor;` puts that type's own name into
+        // this scope: a declaration writing `Descriptor` here means the type
+        // the clause qualifies, not a namesake another file declares. The
+        // grammar reads `using namespace rocksdb;` as the same statement, with
+        // a bare name for the namespace, which binds nothing.
+        "using_declaration" => {
+            let target = node.named_child(0)?;
+            if target.kind() != "qualified_identifier" {
+                return None;
+            }
+            let type_name = cpp_type_name_of(target, source)?;
+            let name = type_name.rsplit("::").next()?.to_owned();
+            (name != type_name).then_some((name, type_name))
         }
         _ => None,
     }
 }
 
-fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
+/// Whether a declared type spells a template parameter the enclosing template
+/// declarations leave unbound: each ancestor `template_declaration` states the
+/// names its own subtree may spell (`template<class T> struct Box`, `template
+/// <typename T> void unknown(...)`).
+fn cpp_type_uses_template_parameter(node: Node<'_>, declared: Node<'_>, source: &[u8]) -> bool {
+    let spelled = node_text(declared, source);
+    let mut scope = node.parent();
+    while let Some(current) = scope {
+        if current.kind() == "template_declaration"
+            && let Some(parameters) = current.child_by_field_name("parameters")
+            && named_children(parameters).iter().any(|parameter| {
+                // A `type_parameter_declaration` names its parameter as a
+                // plain child (`class T`, `typename T`), not through a field.
+                parameter
+                    .child_by_field_name("name")
+                    .or_else(|| parameter.named_child(0))
+                    .is_some_and(|name| cpp_spells_word(spelled, node_text(name, source)))
+            })
+        {
+            return true;
+        }
+        scope = current.parent();
+    }
+    false
+}
+
+/// Whether `text` names `word` as a whole identifier, so `T` does not match
+/// inside `Table`.
+fn cpp_spells_word(text: &str, word: &str) -> bool {
+    let names_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '_' | '$');
+    let mut rest = text;
+    while let Some(index) = rest.find(word) {
+        let before = rest[..index].chars().next_back();
+        let after = rest[index + word.len()..].chars().next();
+        if !before.is_some_and(names_char) && !after.is_some_and(names_char) {
+            return true;
+        }
+        rest = &rest[index + word.len()..];
+    }
+    false
+}
+
+/// The receiver path an expression names, for a call site or a range's element.
+///
+/// Only a path of plain names and element reads qualifies (`logs_`, `vs->logs_`,
+/// `statuses[0]`, `(*it).second`). A path that depends on a call's return value
+/// (`*versions_->Set()`, `layout.optimized_order()`) stays unanswered rather
+/// than guessed: the extractor holds no return types to answer it with.
+///
+/// `*it` and `&it` add no step: a pointer binding already spells its pointee,
+/// and an iterator binding spells the iterator whose element the same name
+/// denotes. A subscript reads one element of what the base holds, which the
+/// resolver evaluates against the base's type the way it evaluates a loop
+/// variable's.
+fn cpp_receiver_path(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
+        "identifier" | "field_identifier" | "this" => Some(node_text(node, source).to_owned()),
+        "field_expression" => {
+            let base = cpp_receiver_path(node.child_by_field_name("argument")?, source)?;
+            let field = node.child_by_field_name("field")?;
+            Some(format!("{base}.{}", node_text(field, source)))
+        }
+        "pointer_expression" => cpp_receiver_path(node.child_by_field_name("argument")?, source),
+        "parenthesized_expression" => cpp_receiver_path(node.named_child(0)?, source),
+        "subscript_expression" => {
+            let base = cpp_receiver_path(node.child_by_field_name("argument")?, source)?;
+            Some(cpp_index_marker(&base))
+        }
+        _ => None,
+    }
+}
+
+/// Appends the decorations the declarator adds, so the resolver can read the
+/// value the name holds one step at a time: one `[]` per array level (`Status
+/// statuses[2]` yields a `Status`, `std::vector<Buffer> pools[2]` a vector) and
+/// one `*` per pointer level (`Status* statuses` answers `statuses[i]` with a
+/// `Status`).
+fn cpp_array_suffix(type_name: &str, declarator: Node<'_>) -> String {
+    let mut levels = 0;
+    let mut pointers = 0;
+    let mut current = declarator;
+    loop {
+        match current.kind() {
+            "array_declarator" => {
+                levels += 1;
+                let Some(inner) = current.child_by_field_name("declarator") else {
+                    break;
+                };
+                current = inner;
+            }
+            "pointer_declarator" => {
+                pointers += 1;
+                let Some(inner) = current.child_by_field_name("declarator") else {
+                    break;
+                };
+                current = inner;
+            }
+            "reference_declarator" | "parenthesized_declarator" => {
+                let Some(inner) = current.child_by_field_name("declarator") else {
+                    break;
+                };
+                current = inner;
+            }
+            _ => break,
+        }
+    }
+    format!("{type_name}{}{}", "[]".repeat(levels), "*".repeat(pointers))
+}
+
+/// The binding a loop variable takes from the range it walks: the element of
+/// the range's type, asked where the range is declared rather than here.
+fn cpp_element_marker(range: &str) -> String {
+    format!("{ELEMENT_MARKER}({range})")
+}
+
+/// The call its own spelling as the binding of a placeholder declaration:
+/// `auto it = values.begin()` holds the position the call yields and `auto
+/// boxed = real::Box<int>()` the value it builds; the resolver reads both from
+/// the expression the source writes.
+fn cpp_decltype_marker_of(value: Node<'_>, source: &[u8]) -> String {
+    format!(
+        "decltype({})",
+        collapse_whitespace(node_text(value, source))
+    )
+}
+
+/// Prefix of a binding that names something derived from another binding
+/// rather than a type the source spells (`for (auto& kv : buffers)`).
+const ELEMENT_MARKER: &str = "element:";
+
+/// The binding a placeholder declaration takes from the path it is
+/// initialized with: `auto& v = it->second` holds exactly what that member
+/// holds, wherever the member is declared.
+fn cpp_type_of_marker(path: &str) -> String {
+    format!("{TYPE_OF_MARKER}({path})")
+}
+
+/// Prefix of a binding that repeats the type of another path (`auto& v = it->second`).
+const TYPE_OF_MARKER: &str = "type_of:";
+
+/// The binding a subscript takes from the value it indexes: `buffers[k]`.
+fn cpp_index_marker(base: &str) -> String {
+    format!("{INDEX_MARKER}({base})")
+}
+
+/// Prefix of a binding that names one value a container read by subscript
+/// answers: a map answers the value it pairs with the key, a vector or array
+/// the element it holds.
+const INDEX_MARKER: &str = "index:";
+
+/// The type a C++ declaration names, kept in the spelling the source wrote.
+///
+/// The text keeps what qualifies it — the enclosing namespace or class
+/// (`MemTableRep::Iterator`, `BaseHyperClockCache<Table>::Shard`), the template
+/// arguments (`std::deque<Slice>`, `autovector<std::pair<int, FileMetaData*>>`)
+/// — because the resolver decides from it which class answers a call: a
+/// container answers with its own members, its element answers a subscript or a
+/// loop variable, an iterator member answers as the element it walks, and a
+/// holder (`std::unique_ptr<Widget>`) answers as the type it holds.
+///
+/// Pointer and reference wrappers are not part of the spelling: they arrive
+/// through the declarator, which already peels them to reach the name.
+fn cpp_type_name_of(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        // A qualified or template spelling states the whole name a call through
+        // it is looked up by, so the text is kept as written.
+        "type_identifier"
+        | "primitive_type"
+        | "sized_type_specifier"
+        | "qualified_identifier"
+        | "template_type" => Some(collapse_whitespace(node_text(node, source))),
+        "struct_specifier" | "class_specifier" | "union_specifier" | "enum_specifier" => node
+            .child_by_field_name("name")
+            .map(|name| collapse_whitespace(node_text(name, source))),
+        // `const Widget&`: the qualifier sits beside the type descriptor.
+        "type_descriptor" => {
+            let inner = node
+                .child_by_field_name("type")
+                .or_else(|| node.named_child(0))?;
+            cpp_type_name_of(inner, source)
+        }
+        // `typename SkipList<Key, Comparator>::Iterator`: `typename` says the
+        // name is a type, not which type it is.
+        "dependent_type" => {
+            let inner = node
+                .child_by_field_name("type")
+                .or_else(|| node.named_child(0))?;
+            cpp_type_name_of(inner, source)
+        }
+        _ => None,
+    }
+}
+
+/// Nullability does not change the target of a member call that executes.
+/// Several concrete union members still need branch/type evidence.
+fn ts_type_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut members = node_text(node, source)
+        .split('|')
+        .map(str::trim)
+        .filter(|member| !matches!(*member, "null" | "undefined"));
+    let ty = members.next()?;
+    (members.next().is_none() && is_identifier_like(ty.strip_prefix("typeof ").unwrap_or(ty)))
+        .then(|| ty.to_owned())
+}
+
+fn ts_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
+    match node.kind() {
+        "public_field_definition" | "field_definition" => {
+            let name = node
+                .child_by_field_name("name")
+                .or_else(|| node.child_by_field_name("property"))?;
+            let ty = node
+                .child_by_field_name("type")
+                .and_then(|annotation| annotation.named_child(0))
+                .and_then(|ty| ts_type_name(ty, source))
+                .or_else(|| {
+                    node.child_by_field_name("value")
+                        .and_then(|value| creation_or_factory_type(value, source))
+                })
+                .unwrap_or_else(|| "?".to_owned());
+            Some((node_text(name, source).to_owned(), ty))
+        }
         // `const x = new X()`: the constructor expression spells the type.
         // `const x = makeX()`: a bare call binds the registered factory's
         // return type.
@@ -891,19 +3202,29 @@ fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
             if name.kind() != "identifier" {
                 return None;
             }
-            let type_name = creation_or_factory_type(value, source, context)?;
+            if matches!(
+                value.kind(),
+                "function_expression" | "arrow_function" | "class"
+            ) || (value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|function| node_text(function, source) == "require"))
+            {
+                return None;
+            }
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
             Some((node_text(name, source).to_owned(), type_name))
         }
         // `x = new X()`: a reassignment rebinds the name; the resolver
         // orders the bindings by line so calls after it see the new type.
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
-            if left.kind() != "identifier" {
-                return None;
-            }
+            let name = member_expression(left, source)?;
             let value = node.child_by_field_name("right")?;
-            let type_name = creation_or_factory_type(value, source, context)?;
-            Some((node_text(left, source).to_owned(), type_name))
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
+            Some((name, type_name))
         }
         // `function m(a: Left, b: Right)`: the parameter binds its type
         // annotation's single type; unions stay unbound (either type may
@@ -918,12 +3239,9 @@ fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
                 return None;
             }
             let inner = annotation.named_child(0)?;
-            if inner.kind() != "type_identifier" {
-                return None;
-            }
             Some((
                 node_text(pattern, source).to_owned(),
-                node_text(inner, source).to_owned(),
+                ts_type_name(inner, source).unwrap_or_else(|| "?".to_owned()),
             ))
         }
         _ => None,
@@ -934,19 +3252,47 @@ fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
 /// constructor names `X`, a bare `makeX()` call binds the registered
 /// factory's return type, and anything else carries no locally spellable
 /// type.
-fn creation_or_factory_type(
-    value: Node<'_>,
-    source: &[u8],
-    context: &WalkContext,
-) -> Option<String> {
+fn creation_or_factory_type(value: Node<'_>, source: &[u8]) -> Option<String> {
+    if value.kind() == "await_expression" {
+        let returned = creation_or_factory_type(value.named_child(0)?, source)?;
+        return Some(
+            returned
+                .strip_prefix("Promise<")
+                .and_then(|ty| ty.strip_suffix('>'))
+                .map_or_else(|| format!("Awaited<{returned}>"), str::to_owned),
+        );
+    }
+    if value.kind() == "parenthesized_expression" {
+        return creation_or_factory_type(value.named_child(0)?, source);
+    }
     if value.kind() == "call_expression" {
         let function = value.child_by_field_name("function")?;
+        if function.kind() == "selector_expression" {
+            return Some(format!(
+                "ReturnType<typeof {}>",
+                node_text(function, source)
+            ));
+        }
+        if function.kind() == "member_expression"
+            && let Some(object) = function.child_by_field_name("object")
+            && object.kind() == "new_expression"
+        {
+            let class = object.child_by_field_name("constructor")?;
+            let method = function.child_by_field_name("property")?;
+            return Some(format!(
+                "ReturnType<typeof {}::{}>",
+                node_text(class, source),
+                node_text(method, source)
+            ));
+        }
         if function.kind() != "identifier" {
             return None;
         }
-        return context
-            .factory_return_of(node_text(function, source))
-            .map(str::to_owned);
+        let name = node_text(function, source);
+        return Some(format!("ReturnType<typeof {name}>"));
+    }
+    if value.kind() == "identifier" {
+        return Some(format!("typeof {}", node_text(value, source)));
     }
     if value.kind() != "new_expression" {
         return None;
@@ -955,8 +3301,27 @@ fn creation_or_factory_type(
     (constructor.kind() == "identifier").then(|| node_text(constructor, source).to_owned())
 }
 
-fn js_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
+fn js_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
     match node.kind() {
+        "field_definition" => ts_binding_of(node, source),
+        "identifier"
+            if node.parent().is_some_and(|parent| {
+                parent.kind() == "formal_parameters"
+                    || (parent.kind() == "arrow_function"
+                        && parent.child_by_field_name("parameter") == Some(node))
+            }) =>
+        {
+            Some((node_text(node, source).to_owned(), "?".to_owned()))
+        }
+        "assignment_pattern" | "rest_pattern"
+            if node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "formal_parameters") =>
+        {
+            let name = node.named_child(0)?;
+            (name.kind() == "identifier")
+                .then(|| (node_text(name, source).to_owned(), "?".to_owned()))
+        }
         // `const x = new X()`: the constructor expression spells the type.
         // `const x = makeX()`: a bare call binds the factory type the
         // function's `return` construction spells (JavaScript signs no
@@ -967,19 +3332,29 @@ fn js_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
                 return None;
             }
             let value = node.child_by_field_name("value")?;
-            let type_name = creation_or_factory_type(value, source, context)?;
+            if matches!(
+                value.kind(),
+                "function_expression" | "arrow_function" | "class"
+            ) || (value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|function| node_text(function, source) == "require"))
+            {
+                return None;
+            }
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
             Some((node_text(name, source).to_owned(), type_name))
         }
         // `x = new X()`: a reassignment rebinds the name; the resolver
         // orders the bindings by line so calls after it see the new type.
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
-            if left.kind() != "identifier" {
-                return None;
-            }
+            let name = member_expression(left, source)?;
             let value = node.child_by_field_name("right")?;
-            let type_name = creation_or_factory_type(value, source, context)?;
-            Some((node_text(left, source).to_owned(), type_name))
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
+            Some((name, type_name))
         }
         _ => None,
     }
@@ -1009,7 +3384,15 @@ fn strip_trailing_semicolons(value: &str) -> &str {
 }
 
 /// Extracts the module path from an import node via grammar fields or text.
-fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<String> {
+pub(crate) fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<String> {
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && let Some(clause) = named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "import_require_clause")
+        && let Some(path) = clause.child_by_field_name("source")
+    {
+        return Some(normalize_module_path(node_text(path, source)));
+    }
     if let Some(vocabulary) = import_vocabulary_for(format) {
         for field in vocabulary.module_fields {
             if let Some(target) = node.child_by_field_name(field) {
@@ -1057,7 +3440,10 @@ fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<S
             for child in node.named_children(&mut cursor) {
                 let path = collapse_whitespace(node_text(child, source));
                 if is_identifier_like(&path) {
-                    return Some(path);
+                    let wildcard = node
+                        .named_children(&mut node.walk())
+                        .any(|child| child.kind() == "asterisk");
+                    return Some(if wildcard { format!("{path}.*") } else { path });
                 }
             }
         }
@@ -1113,6 +3499,94 @@ fn descendants_within(node: Node<'_>, max_depth: usize) -> Vec<Node<'_>> {
     found
 }
 
+/// The spellings a Rust `use` declaration binds in the body that writes it:
+/// `use crate::other::save;` binds `save`, `use crate::other::save as write;`
+/// binds `write`, and a brace group binds one name per clause. A glob
+/// (`use super::*;`) states no spelling this reader can place.
+///
+/// The clauses are read by their tree shape rather than by cutting the
+/// declaration's text: `use_as_clause` states the alias, a `scoped_use_list`
+/// states the module its `self` entries name, and a `use_wildcard` names
+/// nothing. Comments and line breaks inside the declaration therefore cannot
+/// shift which name a clause binds.
+fn rust_use_bindings(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(argument) = node.child_by_field_name("argument") {
+        collect_rust_use_bindings(argument, "", source, &mut names);
+    }
+    names
+}
+
+/// Collects the names one clause of a `use` declaration binds.
+///
+/// `module` is the spelling a `self` entry names: the brace group of
+/// `use a::b::{self, c};` is written on `a::b`, so its `self` binds `b` — the
+/// module itself, never the keyword.
+fn collect_rust_use_bindings(node: Node<'_>, module: &str, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        // `use a::b as c;` binds the alias; `as _` binds nothing.
+        "use_as_clause" => {
+            if let Some(alias) = node.child_by_field_name("alias") {
+                push_rust_use_name(node_text(alias, source), names);
+            }
+        }
+        "scoped_use_list" => {
+            let module = node
+                .child_by_field_name("path")
+                .map(|path| rust_use_last_segment(path, source))
+                .unwrap_or_default();
+            if let Some(list) = node.child_by_field_name("list") {
+                for clause in named_children(list) {
+                    collect_rust_use_bindings(clause, &module, source, names);
+                }
+            }
+        }
+        "use_list" => {
+            for clause in named_children(node) {
+                collect_rust_use_bindings(clause, module, source, names);
+            }
+        }
+        // A glob brings names into view without spelling any of them.
+        "use_wildcard" => {}
+        "self" => push_rust_use_name(module, names),
+        _ => push_rust_use_name(&rust_use_last_segment(node, source), names),
+    }
+}
+
+/// The name a `use` path refers to: the segment after the last `::`, which is
+/// what the declaration binds (`use crate::other::save;` binds `save`).
+fn rust_use_last_segment(node: Node<'_>, source: &[u8]) -> String {
+    node.child_by_field_name("name").map_or_else(
+        || node_text(node, source).to_owned(),
+        |name| node_text(name, source).to_owned(),
+    )
+}
+
+/// Records one spelling a `use` clause binds.
+///
+/// A clause binds nothing when it names no identifier: `as _` discards the
+/// import, and a path segment that is empty (a trailing `::`) or spelled with
+/// punctuation names nothing this reader can place.
+fn push_rust_use_name(name: &str, names: &mut Vec<String>) {
+    let name = name.strip_prefix("r#").unwrap_or(name);
+    if name.is_empty() || name == "_" {
+        return;
+    }
+    if name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+        names.push(name.to_owned());
+    }
+}
+
+/// Whether a `use` declaration writes a glob (`use super::*;`,
+/// `use a::{self, *};`), which binds no name the walk can list.
+fn rust_use_is_glob(node: Node<'_>) -> bool {
+    if node.kind() == "use_wildcard" {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(rust_use_is_glob)
+}
+
 /// Reduces a normalized `use` declaration to its module path: drops a leading
 /// `use`, a trailing `as <ident>` alias, brace groups, and all whitespace.
 fn strip_rust_use_path(normalized: &str) -> Option<String> {
@@ -1163,6 +3637,7 @@ fn strip_trailing_as_alias(text: &str) -> String {
 pub(crate) fn is_import_node(node: Node<'_>, format: FileFormat) -> bool {
     import_vocabulary_for(format)
         .is_some_and(|vocabulary| vocabulary.import_types.contains(&node.kind()))
+        && (node.kind() != "export_statement" || node.child_by_field_name("source").is_some())
 }
 
 /// Buffers an `imports` reference for an import declaration node. The owner
@@ -1174,6 +3649,10 @@ pub(crate) fn collect_import_edge(
     context: &mut WalkContext,
 ) {
     if !context.is_collecting() {
+        return;
+    }
+    if format == FileFormat::Go && node.kind() == "import_declaration" {
+        // Visit each import_spec so grouped imports retain their own alias.
         return;
     }
     let Some(path) = module_path_of(node, source, format) else {
@@ -1203,7 +3682,7 @@ pub(crate) fn collect_inheritance_edges(
         return;
     };
     // (kind, clause node) pairs; the clause node feeds type-name extraction.
-    let clauses = match vocabulary {
+    let mut clauses = match vocabulary {
         HeritageVocabulary::Nested {
             extends_types,
             implements_types,
@@ -1236,8 +3715,24 @@ pub(crate) fn collect_inheritance_edges(
             }))
             .collect(),
     };
+    // `class X : public decltype(f(...))` parses the base as an ERROR node:
+    // the grammar takes a base name there, not an expression. The decltype is
+    // still the base the source states, and its answer is `f`'s result type.
+    if format == FileFormat::Cpp
+        && let Some(base) = named_children(entity_node)
+            .into_iter()
+            .find(|child| child.kind() == "ERROR")
+            .and_then(|error| {
+                descendants_within(error, 3)
+                    .into_iter()
+                    .find(|node| node.kind() == "decltype")
+            })
+    {
+        clauses.push((GraphEdgeKind::Extends, base));
+    }
     for (ref_kind, clause) in clauses {
-        for name in type_names_from_clause(clause, source) {
+        let dbg_names = type_names_from_clause(clause, source, &*context);
+        for name in dbg_names {
             context.add_inheritance_edge(
                 ref_kind,
                 owner_index,
@@ -1262,14 +3757,29 @@ const CLAUSE_DECORATION_KINDS: &[&str] = &[
 /// Splits an inheritance clause into type names. Handles the common shapes:
 /// a single type node, a comma-separated list, and C++ base specifiers with
 /// access labels (`public Base`).
-fn type_names_from_clause(clause: Node<'_>, source: &[u8]) -> Vec<String> {
+fn type_names_from_clause(clause: Node<'_>, source: &[u8], context: &WalkContext) -> Vec<String> {
     let mut names = Vec::new();
-    collect_type_names(clause, source, &mut names);
+    collect_type_names(clause, source, context, &mut names);
     names
 }
 
-fn collect_type_names(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+fn collect_type_names(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    names: &mut Vec<String>,
+) {
     if CLAUSE_DECORATION_KINDS.contains(&node.kind()) {
+        return;
+    }
+    // `class FlatAllocator : public decltype(ApplyTypeList<char, int>(0))`:
+    // the base is what that call returns, stated by the callee's own
+    // signature. Reading the callee's name as the base would link the class
+    // to a function instead of the class the call builds.
+    if node.kind() == "decltype"
+        && let Some(result) = decltype_result_type(node, source, context)
+    {
+        names.push(result);
         return;
     }
     let text = collapse_whitespace(node_text(node, source));
@@ -1281,13 +3791,108 @@ fn collect_type_names(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
         return;
     }
     for child in named_children(node) {
-        collect_type_names(child, source, names);
+        collect_type_names(child, source, context, names);
     }
+}
+
+/// The result type of the call a `decltype(...)` expression names, read from
+/// the file's own signature for that callee.
+fn decltype_result_type(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<String> {
+    if node.kind() == "call_expression"
+        && let Some(function) = node.child_by_field_name("function")
+    {
+        // `f(...)` and `f<int>(...)` name the same callee; the template
+        // arguments qualify it, they do not change what it returns.
+        let callee = match function.kind() {
+            "identifier" => Some(function),
+            "template_function" => function.child_by_field_name("name"),
+            _ => None,
+        };
+        if let Some(callee) = callee
+            && let Some(result) = context.factory_return_of(node_text(callee, source))
+        {
+            return Some(result.to_owned());
+        }
+    }
+    named_children(node)
+        .into_iter()
+        .find_map(|child| decltype_result_type(child, source, context))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_binding_scan_stops_at_callable_and_class_bodies() {
+        for (format, grammar, source) in [
+            (
+                FileFormat::JavaScript,
+                tree_sitter_javascript::LANGUAGE,
+                "function* generator() { var hidden = 1; } const f = function* () { var hidden = 2; }; const object = { method(hidden) { var local = 3; } }; const C = class { method(hidden) { var local = 4; } };",
+            ),
+            (
+                FileFormat::TypeScript,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                "function* generator() { var hidden = 1; } const f = function* () { var hidden = 2; }; const object = { method(hidden: number) { var local = 3; } }; const C = class { method(hidden: number) { var local = 4; } };",
+            ),
+            (
+                FileFormat::Go,
+                tree_sitter_go::LANGUAGE,
+                "package main\nvar f = func(hidden int) { var local int }\n",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&grammar.into())
+                .expect("fixture grammar");
+            let tree = parser.parse(source, None).expect("fixture syntax tree");
+            let mut context = WalkContext::new();
+            scan_return_types(tree.root_node(), source.as_bytes(), format, &mut context);
+            assert!(
+                context
+                    .name_edges()
+                    .iter()
+                    .all(|edge| !matches!(edge.ref_name.as_str(), "hidden" | "local")),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_use_bindings_read_the_clause_shape() {
+        for (source, expected) in [
+            ("use crate::other::save;", vec!["save"]),
+            ("use crate::other::save as write;", vec!["write"]),
+            (
+                "use crate::other::{save, write as store};",
+                vec!["save", "store"],
+            ),
+            // A `self` entry names the module the group is written on.
+            ("use crate::other::{self, save};", vec!["other", "save"]),
+            ("use super::{self};", vec!["super"]),
+            // A glob and a discarded alias bind nothing.
+            ("use crate::other::*;", vec![]),
+            ("use crate::other::{self, *};", vec!["other"]),
+            ("use crate::other::save as _;", vec![]),
+            // Comments and line breaks inside the declaration are not clauses.
+            (
+                "pub(crate) use crate::other::{\n    // the writer\n    save /* the writer */,\n};",
+                vec!["save"],
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_rust::LANGUAGE.into())
+                .expect("fixture grammar");
+            let tree = parser.parse(source, None).expect("fixture syntax tree");
+            let declaration = tree.root_node().named_child(0).expect("use declaration");
+            assert_eq!(declaration.kind(), "use_declaration", "{source}");
+            let bound = rust_use_bindings(declaration, source.as_bytes());
+            let bound: Vec<&str> = bound.iter().map(String::as_str).collect();
+            assert_eq!(bound, expected, "{source}");
+        }
+    }
 
     #[test]
     fn splits_callee_names_into_receiver_and_member() {
@@ -1451,40 +4056,58 @@ mod tests {
         );
     }
 
+    /// Every name a source binds to a spelled type, as `(name, type, line)`.
+    fn bindings(
+        format: FileFormat,
+        lang: &tree_sitter::Language,
+        source: &str,
+    ) -> Vec<(String, String, usize)> {
+        name_edges(format, lang, source)
+            .into_iter()
+            .map(|(name, bound_type, line, _)| (name, bound_type, line))
+            .collect()
+    }
+
+    /// Every name a source binds, with the last line a scoped binding holds
+    /// for. A binding the collector bounds by statement carries `bound_until`;
+    /// one it bounds by the block or loop that declares it states the range as
+    /// `scope_end`, so both spell the answer here.
+    fn name_edges(
+        format: FileFormat,
+        lang: &tree_sitter::Language,
+        source: &str,
+    ) -> Vec<(String, String, usize, Option<usize>)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(lang).expect("grammar loads");
+        let tree = parser.parse(source, None).expect("parses");
+        let mut context = WalkContext::new();
+        let owner = context.next_entity_index();
+        scan_binding_declarations(
+            tree.root_node(),
+            owner,
+            source.as_bytes(),
+            format,
+            &mut context,
+            None,
+        );
+        context
+            .name_edges()
+            .iter()
+            .map(|edge| {
+                (
+                    edge.ref_name.clone(),
+                    edge.bound_type.clone().expect("bound type"),
+                    edge.line,
+                    edge.bound_until
+                        .or_else(|| edge.scope_end.map(|(line, _)| line)),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn collects_creation_and_parameter_bindings() {
-        fn bindings(
-            format: FileFormat,
-            lang: &tree_sitter::Language,
-            source: &str,
-        ) -> Vec<(String, String, usize)> {
-            let mut parser = tree_sitter::Parser::new();
-            parser.set_language(lang).expect("grammar loads");
-            let tree = parser.parse(source, None).expect("parses");
-            let mut context = WalkContext::new();
-            let owner = context.next_entity_index();
-            scan_binding_declarations(
-                tree.root_node(),
-                owner,
-                source.as_bytes(),
-                format,
-                &mut context,
-                None,
-            );
-            context
-                .name_edges()
-                .iter()
-                .map(|edge| {
-                    (
-                        edge.ref_name.clone(),
-                        edge.bound_type.clone().expect("bound type"),
-                        edge.line,
-                    )
-                })
-                .collect()
-        }
-
         // Creation-initialized locals across the grammars.
         assert_eq!(
             bindings(
@@ -1540,7 +4163,10 @@ mod tests {
                 &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![
+                ("x".to_owned(), "?".to_owned(), 1),
+                ("x".to_owned(), "X".to_owned(), 1),
+            ]
         );
         assert_eq!(
             bindings(
@@ -1548,7 +4174,10 @@ mod tests {
                 &tree_sitter_javascript::LANGUAGE.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![
+                ("x".to_owned(), "?".to_owned(), 1),
+                ("x".to_owned(), "X".to_owned(), 1),
+            ]
         );
 
         // Typed parameters.
@@ -1596,6 +4225,431 @@ mod tests {
                 ("b".to_owned(), "Right".to_owned(), 1),
             ]
         );
+        // Python annotates the parameter rather than the name beside it. A
+        // generic states the container and a dotted spelling the module, so
+        // neither binds the receiver a body calls through.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(index: Index, other: 'Right' = None):\n    index.create_variables()\n",
+            ),
+            vec![
+                ("index".to_owned(), "Index".to_owned(), 1),
+                ("other".to_owned(), "Right".to_owned(), 1),
+            ]
+        );
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(items: list[Node], mod: np.ndarray):\n    items.clear()\n",
+            ),
+            Vec::new()
+        );
+        // A value that may be absent still holds the type a member call reads
+        // through: the optional wrapper and the union's first arm state it.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(c: Optional[Client], d: Client | None = None, e: list[Node]):\n    c.send()\n",
+            ),
+            vec![
+                ("c".to_owned(), "Client".to_owned(), 1),
+                ("d".to_owned(), "Client".to_owned(), 1),
+            ]
+        );
+        // A wrapper written through its module spells the same type.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(c: typing.Optional[Client]):\n    c.send()\n",
+            ),
+            vec![("c".to_owned(), "Client".to_owned(), 1)]
+        );
+    }
+
+    /// The names a Python class's methods bind on `self`, as `(name, type,
+    /// line)`: the class the source declares as `class_name`.
+    fn python_self_bindings(source: &str, class_name: &str) -> Vec<(String, String, usize)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .expect("grammar loads");
+        let tree = parser.parse(source, None).expect("parses");
+        let mut pending = vec![tree.root_node()];
+        let mut class_node = None;
+        while let Some(node) = pending.pop() {
+            if node.kind() == "class_definition"
+                && node
+                    .child_by_field_name("name")
+                    .is_some_and(|name| node_text(name, source.as_bytes()) == class_name)
+            {
+                class_node = Some(node);
+                break;
+            }
+            pending.extend(named_children(node));
+        }
+        let class_node = class_node.expect("class found");
+        let mut context = WalkContext::new();
+        let owner = context.next_entity_index();
+        // The class scan skips the method subtrees its members own, exactly as
+        // the production walk bounds it.
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_definition" | "decorated_definition" | "class_definition"
+            )
+        };
+        scan_binding_declarations(
+            class_node,
+            owner,
+            source.as_bytes(),
+            FileFormat::Python,
+            &mut context,
+            Some(&boundary),
+        );
+        context
+            .name_edges()
+            .iter()
+            .map(|edge| {
+                (
+                    edge.ref_name.clone(),
+                    edge.bound_type.clone().expect("bound type"),
+                    edge.line,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collects_python_self_member_bindings() {
+        let source = "\
+class ParserState:
+    def __init__(self, fontset: Fonts):
+        self.fontset = fontset
+        self._dpi = 72
+
+class Char:
+    def __init__(self, c: str, state: ParserState):
+        self.c = c
+        self.fontset = state.fontset
+";
+        // The parameter's annotation states the member, and a value the
+        // annotation cannot spell is kept as a write without a type, so the
+        // member does not answer with a type an earlier write stated.
+        assert_eq!(
+            python_self_bindings(source, "ParserState"),
+            vec![
+                ("fontset".to_owned(), "Fonts".to_owned(), 3),
+                ("_dpi".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 4),
+            ]
+        );
+        // A member read states the step the resolver reads: the member of
+        // the type another class states.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![
+                ("c".to_owned(), "str".to_owned(), 8),
+                (
+                    "fontset".to_owned(),
+                    "member_of:(ParserState,fontset)".to_owned(),
+                    9
+                ),
+            ]
+        );
+    }
+
+    /// The names a Python declaration binds on `self` when the scan starts
+    /// where the entity walk starts: a decorated class arrives as the wrapper
+    /// its decorator forms, not as the class.
+    fn python_decorated_self_bindings(source: &str) -> Vec<(String, String, usize)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .expect("grammar loads");
+        let tree = parser.parse(source, None).expect("parses");
+        let declaration = named_children(tree.root_node())
+            .into_iter()
+            .find(|child| child.kind() == "decorated_definition")
+            .expect("decorated declaration");
+        let mut context = WalkContext::new();
+        let owner = context.next_entity_index();
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_definition" | "decorated_definition" | "class_definition"
+            )
+        };
+        scan_binding_declarations(
+            declaration,
+            owner,
+            source.as_bytes(),
+            FileFormat::Python,
+            &mut context,
+            Some(&boundary),
+        );
+        context
+            .name_edges()
+            .iter()
+            .map(|edge| {
+                (
+                    edge.ref_name.clone(),
+                    edge.bound_type.clone().expect("bound type"),
+                    edge.line,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collects_self_members_of_a_decorated_class() {
+        let source = "\
+@dataclass
+class Char:
+    def __init__(self, fontset: Fonts):
+        self.fontset = fontset
+";
+        // The decorator wraps the class rather than replacing what its
+        // methods state about `self`.
+        assert_eq!(
+            python_decorated_self_bindings(source),
+            vec![("fontset".to_owned(), "Fonts".to_owned(), 4)]
+        );
+    }
+
+    #[test]
+    fn nested_python_parameters_shadow_their_outer_annotations() {
+        let source = "\
+class Char:
+    def run(self, index: Index):
+        def helper(index, *args, **kwargs):
+            self.raw = index.raw
+            self.args = args.raw
+        self.block = index.block
+";
+        // The inner `index` states no type, and `*args`/`**kwargs` bind names
+        // the body holds no receiver in: the outer annotation still holds for
+        // the outer body, and neither inner name reads through `Index`.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![
+                ("raw".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 4),
+                ("args".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 5),
+                ("block".to_owned(), "member_of:(Index,block)".to_owned(), 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn rebinding_a_python_parameter_drops_its_annotation() {
+        let source = "\
+class Char:
+    def run(self, client: Client):
+        client = AlternateClient()
+        self.rebound = client.state
+        client = registry['client']
+        self.unplaced = client.state
+";
+        // The assignment states what the name holds from that line on, and a
+        // value the index cannot place leaves the name without a type.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![
+                (
+                    "rebound".to_owned(),
+                    "member_of:(AlternateClient,state)".to_owned(),
+                    4
+                ),
+                ("unplaced".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn self_carries_the_declaring_class_into_member_reads() {
+        let source = "\
+class Char:
+    def __init__(self):
+        self.state = ParserState()
+
+    def render(self):
+        self.fontset = self.state.fontset
+";
+        // `self` holds the class the method is written on, so the member read
+        // is a step through that class's own member.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![
+                ("state".to_owned(), "ParserState".to_owned(), 3),
+                (
+                    "fontset".to_owned(),
+                    "member_of:(member_of:(Char,state),fontset)".to_owned(),
+                    6
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_union_annotations_need_agreeing_arms() {
+        let python = || tree_sitter_python::LANGUAGE.into();
+        // The absence of a value does not narrow the type the other arm
+        // states, in either spelling.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &python(),
+                "def m(a: Right | None, b: Union[Right, None]):\n    a.go()\n",
+            ),
+            vec![
+                ("a".to_owned(), "Right".to_owned(), 1),
+                ("b".to_owned(), "Right".to_owned(), 1),
+            ]
+        );
+        // Two shapes a call may read through leave the name without a type,
+        // whichever arm the annotation writes first.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &python(),
+                "def m(a: Left | Right, b: Union[Left, Right], c: Right | Left):\n    a.go()\n",
+            ),
+            Vec::new()
+        );
+        // An arm the reader cannot name (`right.Right` is a module the binding
+        // cannot place) does not narrow the union to the arm it can name.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &python(),
+                "def m(a: Left | right.Right, b: right.Right | Left):\n    a.go()\n",
+            ),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn collects_declared_type_and_member_bindings() {
+        let cpp = || tree_sitter_cpp::LANGUAGE.into();
+        // A cv-qualifier and an attribute macro sit beside the name rather
+        // than wrapping it, so the spelling must come from the declarator.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m(Widget const& w, Slice* const s) { w.Draw(); }",
+            ),
+            // The pointer the declarator states stays in the spelling: a
+            // subscript through `s` reads the `Slice` it points at, while a
+            // member call reads through the pointer to the same type.
+            vec![
+                ("w".to_owned(), "Widget".to_owned(), 1),
+                ("s".to_owned(), "Slice*".to_owned(), 1),
+            ]
+        );
+        // A member field states the receiver its class's methods call through.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "class A {\n  Slice* blocks_;\n  InstrumentedMutex mutex_;\n};",
+            ),
+            vec![
+                ("blocks_".to_owned(), "Slice*".to_owned(), 2),
+                ("mutex_".to_owned(), "InstrumentedMutex".to_owned(), 3),
+            ]
+        );
+        // A holder keeps its spelling and a container keeps its own: the
+        // resolver unwraps the holder and reads the container's element where
+        // the call is written, so the extractor states what the source says.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m() {\n  std::unique_ptr<VersionSet> versions_;\n  std::shared_ptr<DB> db;\n  std::vector<DB> dbs;\n}",
+            ),
+            vec![
+                (
+                    "versions_".to_owned(),
+                    "std::unique_ptr<VersionSet>".to_owned(),
+                    2
+                ),
+                ("db".to_owned(), "std::shared_ptr<DB>".to_owned(), 3),
+                ("dbs".to_owned(), "std::vector<DB>".to_owned(), 4),
+            ]
+        );
+        // A loop variable holds what the loop states or, for a placeholder
+        // type, the element of what the loop walks.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m(std::vector<Engine*>& engines, std::vector<Meta>& metas) {\n  for (Engine* car : engines) car->Start();\n  for (const auto& meta : metas) meta.Get();\n}",
+            ),
+            vec![
+                ("engines".to_owned(), "std::vector<Engine*>".to_owned(), 1),
+                ("metas".to_owned(), "std::vector<Meta>".to_owned(), 1),
+                ("car".to_owned(), "Engine*".to_owned(), 2),
+                ("meta".to_owned(), "element:(metas)".to_owned(), 3),
+            ]
+        );
+        // The loop's own header scopes its variable; nothing outside it sees
+        // that binding.
+        let loop_scoped = name_edges(
+            FileFormat::Cpp,
+            &cpp(),
+            "void m(std::vector<Engine*>& engines) {\n  for (Engine* car : engines) {\n    car->Start();\n  }\n}",
+        );
+        assert_eq!(
+            loop_scoped,
+            vec![
+                (
+                    "engines".to_owned(),
+                    "std::vector<Engine*>".to_owned(),
+                    1,
+                    None
+                ),
+                ("car".to_owned(), "Engine*".to_owned(), 2, Some(4)),
+            ]
+        );
+        // A member type a class states by name answers like a field would.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "class A {\n  using Shard = ClockCacheShard<Table>;\n  typedef Iter<Element> iterator;\n};",
+            ),
+            vec![
+                ("Shard".to_owned(), "ClockCacheShard<Table>".to_owned(), 2),
+                ("iterator".to_owned(), "Iter<Element>".to_owned(), 3),
+            ]
+        );
+        // Array levels live in the declarator, not the type spelling.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m() {\n  Status statuses[2];\n  Status grid[2][3];\n}",
+            ),
+            vec![
+                ("statuses".to_owned(), "Status[]".to_owned(), 2),
+                ("grid".to_owned(), "Status[][]".to_owned(), 3),
+            ]
+        );
+        // A qualified type keeps the class it is nested in.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "class A {\n  MemTableRep::Iterator* iter_;\n};",
+            ),
+            vec![("iter_".to_owned(), "MemTableRep::Iterator*".to_owned(), 2)]
+        );
+        // A function declarator names a callable, not a receiver.
+        assert!(bindings(FileFormat::Cpp, &cpp(), "class A {\n  void Run();\n};").is_empty());
     }
 
     #[test]
@@ -1656,7 +4710,11 @@ mod tests {
                 &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function makeX(): X {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 5)]
+            vec![
+                ("[[typescript_scope]]".to_owned(), "script".to_owned(), 1),
+                ("x".to_owned(), "?".to_owned(), 4),
+                ("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5),
+            ]
         );
         assert_eq!(
             factory_bindings(
@@ -1690,7 +4748,11 @@ mod tests {
                 &tree_sitter_javascript::LANGUAGE.into(),
                 "function makeX() {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 5)]
+            vec![
+                ("[[javascript_scope]]".to_owned(), "script".to_owned(), 1),
+                ("x".to_owned(), "?".to_owned(), 4),
+                ("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5),
+            ]
         );
 
         // A Python arrow annotation outranks what the body returns.
@@ -1714,14 +4776,15 @@ mod tests {
             vec![]
         );
 
-        // A member call never consults the factory table.
+        // The parameter has a known type, but the member-call result must
+        // not borrow a same-named free factory's return type.
         assert_eq!(
             factory_bindings(
                 FileFormat::Rust,
                 &tree_sitter_rust::LANGUAGE.into(),
                 "fn make_x() -> X {\n    todo!()\n}\nfn caller(v: V) {\n    let m = v.make_x();\n}\n",
             ),
-            vec![]
+            vec![("v".to_owned(), "V".to_owned(), 4)]
         );
     }
 }

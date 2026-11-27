@@ -137,6 +137,7 @@ fn status(pid: u32, url: &str) -> DaemonStatus {
         pid: Some(pid),
         server_url: Some(url.to_owned()),
         mcp_toolset: Some("agent".to_owned()),
+        compact_claude_instructions: true,
     }
 }
 
@@ -279,6 +280,46 @@ async fn relay_preserves_initialized_and_response_order() {
         .complete
         .send(Ok(()))
         .expect("complete send");
+    drop(client.incoming);
+    finish_relay(task).await.expect("stdio closes normally");
+}
+
+#[tokio::test]
+async fn relay_preserves_search_stage_metadata_and_content_for_the_request() {
+    let (downstream, mut client) = transport();
+    let (upstream, mut daemon) = transport();
+    let task = start_relay(downstream, upstream);
+    let request = json!({
+        "jsonrpc": "2.0", "id": "stage-search", "method": "tools/call",
+        "params": {"name": "zvec_grep_search", "arguments": {"fts": "needle"}}
+    });
+    client.send(request.clone());
+    let forwarded_request = daemon.receive().await;
+    assert_eq!(forwarded_request.message, request);
+    forwarded_request
+        .complete
+        .send(Ok(()))
+        .expect("request sent");
+
+    let content = json!([{"type": "text", "text": "freshness: current\nsrc/needle.rs\n"}]);
+    let traces = json!([{
+        "version": 1, "group_id": "Q1", "limit": 10,
+        "watched_paths": ["src/needle.rs"], "index_observed": true, "index_read_ms": 0.5,
+        "routes": {"fts": {"attempts": [{"depth": 100, "returned_fragments": 1}], "unique_fragments": 1}},
+        "sizes": {"merged": 1, "fused": 1, "loaded": 1, "selected": 1}, "files": {}
+    }]);
+    daemon.send(json!({
+        "jsonrpc": "2.0", "id": request["id"],
+        "result": {"content": content, "_meta": {"zg_stage_trace": traces}}
+    }));
+    let response = client.receive().await;
+    assert_eq!(response.message["id"], request["id"]);
+    assert_eq!(response.message["result"]["content"], content);
+    assert_eq!(
+        response.message["result"]["_meta"]["zg_stage_trace"],
+        traces
+    );
+    response.complete.send(Ok(())).expect("response sent");
     drop(client.incoming);
     finish_relay(task).await.expect("stdio closes normally");
 }

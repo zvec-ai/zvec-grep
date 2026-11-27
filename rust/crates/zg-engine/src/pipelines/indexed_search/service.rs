@@ -12,7 +12,7 @@ use crate::{
     models::{ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest},
     pipelines::{
         indexing::service::{
-            WorkspaceIndexService, assert_embedding_compatible, environment_api_key,
+            WorkspaceIndexService, assert_embedding_compatible, resolve_remote_api_key,
         },
         read_access::{ReadSource, acquire_read_source},
     },
@@ -21,10 +21,7 @@ use crate::{
         read_session::{ReadSessionCache, ReadSessionLease},
     },
     utils::{directory_exists, resolve_directory},
-    workspace::{
-        credentials::decrypt_api_key, find_nearest_workspace, lock::LockWait,
-        manifest::read_workspace_manifest,
-    },
+    workspace::{find_nearest_workspace, lock::LockWait, manifest::read_workspace_manifest},
 };
 
 use super::{
@@ -305,8 +302,25 @@ fn search_model_request(
             "--device is only supported for local embedding models",
         ));
     }
-    let endpoint = if local {
-        None
+    let http = crate::config::resolve_http_model(
+        &config,
+        &reference,
+        Some(&runtime),
+        options.endpoint.as_deref(),
+        false,
+    )?;
+    let (http_descriptor, endpoint) = if let Some(http) = http {
+        let endpoint = http.endpoint.expect("resolved HTTP endpoint");
+        crate::authorization::require_with_targets(
+            workspace.source_root(),
+            &reference,
+            &endpoint,
+            options.allow_remote,
+            &options.authorized_remote,
+        )?;
+        (http.http, Some(endpoint))
+    } else if local {
+        (None, None)
     } else {
         let endpoint = crate::authorization::remote_endpoint(
             &reference,
@@ -319,46 +333,37 @@ fn search_model_request(
             options.allow_remote,
             &options.authorized_remote,
         )?;
-        Some(endpoint)
+        (None, Some(endpoint))
     };
-    let saved_key = if local || options.api_key.is_some() {
+    let api_key = resolve_remote_api_key(
+        &config,
+        &reference,
+        http_descriptor.as_ref(),
+        Some(workspace),
+        Some(&runtime),
+        options.api_key.as_deref(),
+    )?;
+    let cache_dir = if http_descriptor.is_some() {
         None
     } else {
-        runtime
-            .api_key
-            .as_ref()
-            .map(|key| decrypt_api_key(key, workspace.layout(), &reference))
-            .transpose()?
+        crate::config::model_cache(
+            &config,
+            options.model_cache.clone(),
+            workspace.model_cache_dir().map(Path::to_path_buf),
+        )
     };
     Ok(ModelRuntimeRequest::new(
         reference.clone(),
         ModelConfig {
-            api_key: (!local)
-                .then(|| {
-                    options
-                        .api_key
-                        .clone()
-                        .or(saved_key)
-                        .or_else(|| {
-                            crate::config::string(
-                                &config,
-                                &["providers", schema.model().provider(), "apiKey"],
-                            )
-                        })
-                        .or_else(environment_api_key)
-                })
-                .flatten(),
+            http: http_descriptor,
+            api_key,
             endpoint,
             device: if local {
                 crate::config::runtime_device(&config, &reference, options.device, runtime.device)?
             } else {
                 None
             },
-            cache_dir: crate::config::model_cache(
-                &config,
-                options.model_cache.clone(),
-                runtime.cache_dir,
-            ),
+            cache_dir,
         },
         None,
     ))

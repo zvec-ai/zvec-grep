@@ -4,7 +4,7 @@ use crate::domain::{CodeMetadata, Content, EntityFragment, FragmentId, Range, Sy
 fn entity(file_id: u32, metadata: bool) -> Entity {
     let file_id = FileId::new(file_id);
     let content = Content::Text("canonical content".into());
-    let id = EntityId::new(file_id, &content, Range::Full).expect("entity ID");
+    let id = EntityId::new(file_id, &content, &Range::Full).expect("entity ID");
     Entity::new(
         id.clone(),
         file_id,
@@ -23,6 +23,12 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             })
         }),
         vec![EntityFragment {
@@ -119,7 +125,7 @@ fn indexed_entity(id: &str, file_id: u32) -> Doc {
     let id = EntityId::from_string(id.to_owned());
     let fragments = vec![EntityFragment {
         id: FragmentId::new(&id, 0),
-        range: entity.fragments()[0].range,
+        range: entity.fragments()[0].range.clone(),
     }];
     entity = Entity::new(
         id,

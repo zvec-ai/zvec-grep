@@ -13,6 +13,7 @@ default = []
 # configurations require source toolchains. Runtime CPU fallback is unchanged.
 cuda = [
     "dep:zg-llama-native",
+    "dep:zg-ort-native",
     "llama-cpp-2/cuda",
     "llama-cpp-2/dynamic-backends",
     "ort/cuda",
@@ -35,10 +36,12 @@ ignore.workspace = true
 httpdate = "1.0.3"
 hyper.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "client-proxy"] }
+jsonc-parser = { version = "0.34", features = ["serde"] }
 llama-cpp-2.workspace = true
 # Use the same pinned official runtime in Cargo tests and every native package.
 # API selection does not select the download version; build.rs owns that pin.
 ort.workspace = true
+liteparse.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"
@@ -67,7 +70,9 @@ tree-sitter-typescript.workspace = true
 uuid.workspace = true
 zg-engine-macros = { path = "macros" }
 zg-host-native = { path = "../zg-host-native" }
+zg-pdfium = { path = "../zg-pdfium" }
 zg-llama-native = { path = "../zg-llama-native", optional = true }
+zg-ort-native = { path = "../zg-ort-native", optional = true }
 zg-zvec-fp16 = { path = "../zg-zvec-fp16" }
 zvec-rust.workspace = true
 

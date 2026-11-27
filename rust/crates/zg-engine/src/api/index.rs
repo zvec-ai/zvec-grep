@@ -6,6 +6,9 @@ pub use result::IndexResult;
 /// Read-only model choices for interactive index creation.
 pub mod setup;
 
+/// Workspace analysis and the source of an embedding selection.
+pub mod embedding;
+
 /// Input types for [`crate::ZvecGrep::index`].
 pub mod options {
     use std::{
@@ -47,13 +50,17 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
-        /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
-        /// ORT CPU/CUDA sessions, or remote requests. Values must be positive.
-        /// ORT caps direct-mode sessions to available hardware concurrency.
-        /// Server requests only limit execution within the startup-configured
-        /// model pool; they never resize it or change the global ORT thread pool.
-        /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, the legacy
-        /// llama.cpp index override, then the backend default; never persisted.
+        /// Caller-resolved default, used only if neither an explicit model nor
+        /// an existing index is present at writer admission. Daemon clients must
+        /// check setup capabilities before sending this optional v2 extension.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub embedding_default: Option<super::embedding::EmbeddingSelection>,
+        /// Positive index-only concurrency: llama.cpp contexts, ORT sessions, or remote requests.
+        /// Direct mode sizes local pools from this value; ORT caps sessions to hardware concurrency.
+        /// Server requests are capped by startup capacity without resizing pools or changing threads.
+        /// llama.cpp server capacity: `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (default 1).
+        /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, then (llama.cpp only)
+        /// `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM`, then backend defaults; never persisted.
         pub embedding_concurrency: Option<usize>,
         /// Maximum time to wait for workspace admission, in milliseconds (default: 30 seconds).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -567,6 +574,14 @@ pub mod progress {
                     Some(IndexEmbeddingStage::Preparing | IndexEmbeddingStage::Downloading) => {
                         state.0 = true;
                     }
+                    Some(IndexEmbeddingStage::Skipped) => {
+                        state.0 = false;
+                        self.report(progress);
+                        if let Some(latest) = state.1.take() {
+                            self.report(latest);
+                        }
+                        return;
+                    }
                     Some(IndexEmbeddingStage::Ready) => {
                         state.0 = false;
                         self.report(state.1.take().unwrap_or(progress));
@@ -708,10 +723,14 @@ pub mod progress {
         Downloading,
         Ready,
         Warning,
+        Skipped,
     }
 
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     pub struct IndexEmbeddingProgress {
+        /// Retained across snapshots so transports cannot lose the selection explanation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub selection: Option<super::embedding::EmbeddingSelection>,
         pub concurrency: Option<usize>,
         pub max_concurrency: Option<usize>,
         pub retryable_failures: Option<usize>,
@@ -748,6 +767,9 @@ pub mod result {
         pub files_deleted: usize,
         pub files_unchanged: usize,
         pub files_failed: usize,
+        /// Non-fatal extraction notices, including PDFs with no searchable native text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub warnings: Vec<String>,
         /// Files that could not be indexed; successful files remain published.
         #[serde(default)]
         pub failed_files: Vec<crate::api::info::result::FailedFile>,

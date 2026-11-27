@@ -704,6 +704,7 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
     for (const file of cpuFiles) await writeFile(join(profile, file), `current CPU ${file}`);
     const separateBinary = join(root, platform.binary);
     await writeFile(separateBinary, "new CPU executable fixture, never executed");
+    if (windows) await writeFile(join(root, "zg-launcher.exe"), "native launcher fixture, never executed");
     const output = join(root, "release");
     const script = fileURLToPath(new URL("./npm-release.mjs", import.meta.url));
     const args = [script, "pack-platform", "--target", target, "--no-build", "--output-dir", output];
@@ -726,9 +727,10 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
     const metadata = JSON.parse(await readFile(join(staged, "package.json"), "utf8"));
     assert.equal(metadata.zvecGrep.variant, "cpu");
     const checksums = JSON.parse(await readFile(join(staged, "checksums.json"), "utf8"));
-    const expected = [`bin/${platform.binary}`, ...cpuFiles.map((file) => `lib/${file}`)].sort();
+    const runtimeFiles = windows ? [...cpuFiles, "zg-launcher.exe"] : cpuFiles;
+    const expected = [`bin/${platform.binary}`, ...runtimeFiles.map((file) => `lib/${file}`)].sort();
     assert.deepEqual(Object.keys(checksums.files).sort(), expected);
-    assert.deepEqual((await readdir(join(staged, "lib"))).sort(), [...cpuFiles].sort());
+    assert.deepEqual((await readdir(join(staged, "lib"))).sort(), [...runtimeFiles].sort());
     const tarballs = await readdir(join(output, "tarballs"));
     assert.equal(tarballs.length, 1);
     const packedFiles = run("tar", ["-tzf", join(output, "tarballs", tarballs[0])], { capture: true })
@@ -743,6 +745,7 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
     const bundle = join(root, "bundle");
     const files = [`bin/${platform.binary}`, `lib/${platform.os === "win32" ? "zvec_c_api.dll" : "libzvec_c_api.so"}`,
       "lib/licenses/onnxruntime-LICENSE",
+      ...(platform.os === "win32" ? ["lib/zg-launcher.exe"] : []),
       ...new Set(platform.components.map((c) => c.file))];
     for (const file of files) {
       await mkdir(join(bundle, file, ".."), { recursive: true });

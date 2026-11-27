@@ -74,6 +74,7 @@ impl PendingProgress {
 struct PlainOutput {
     writer: Box<dyn Write + Send>,
     last: Option<(Stage, Instant, String)>,
+    selection: crate::embedding::SelectionDisplay,
     finished: bool,
 }
 
@@ -86,6 +87,7 @@ impl IndexProgressDisplay {
                 state: ProgressState::Plain(Arc::new(Mutex::new(PlainOutput {
                     writer: Box::new(writer),
                     last: None,
+                    selection: crate::embedding::SelectionDisplay::default(),
                     finished: false,
                 }))),
                 worker: Mutex::new(None),
@@ -104,6 +106,7 @@ impl IndexProgressDisplay {
                     || (color == ColorMode::Auto && std::env::var_os("NO_COLOR").is_none()),
                 unicode,
                 latest: None,
+                selection: crate::embedding::SelectionDisplay::default(),
                 stage: None,
                 stage_started: Instant::now(),
                 frame: String::with_capacity(512),
@@ -197,6 +200,13 @@ impl PlainOutput {
         if self.finished {
             return Ok(());
         }
+        let selection = self.selection.lines(progress);
+        if !selection.is_empty() {
+            for line in selection {
+                writeln!(self.writer, "{line}")?;
+            }
+            self.writer.flush()?;
+        }
         let stage = Stage::of(progress);
         let now = Instant::now();
         if let Some((previous_stage, time, _)) = &self.last
@@ -259,7 +269,7 @@ impl Stage {
                 IndexEmbeddingStage::Preparing => Self::Preparing,
                 IndexEmbeddingStage::Downloading => Self::Downloading,
                 IndexEmbeddingStage::Ready => Self::ModelReady,
-                IndexEmbeddingStage::Warning => Self::Warning,
+                IndexEmbeddingStage::Warning | IndexEmbeddingStage::Skipped => Self::Warning,
             };
         }
         match (progress.phase, progress.detail.as_deref()) {
@@ -315,6 +325,7 @@ struct TerminalOutput {
     color: bool,
     unicode: bool,
     latest: Option<IndexProgress>,
+    selection: crate::embedding::SelectionDisplay,
     stage: Option<TerminalStage>,
     stage_started: Instant,
     frame: String,
@@ -368,6 +379,22 @@ fn render_loop(state: &(Mutex<PendingProgress>, Condvar), output: &mut TerminalO
 }
 
 impl TerminalOutput {
+    fn render_selection(&mut self, progress: &IndexProgress) {
+        let lines = self.selection.lines(progress);
+        if lines.is_empty() {
+            return;
+        }
+        if self.visible {
+            self.frame.push_str("\r\x1b[K");
+            self.visible = false;
+        }
+        for line in lines {
+            self.frame.push_str(&line);
+            self.frame.push_str("\r\n");
+        }
+        self.previous_line.clear();
+    }
+
     fn render(
         &mut self,
         transitions: Vec<IndexProgress>,
@@ -378,6 +405,7 @@ impl TerminalOutput {
     ) -> io::Result<()> {
         self.frame.clear();
         for progress in transitions.into_iter().chain(latest) {
+            self.render_selection(&progress);
             let stage = TerminalStage::of(&progress);
             if self.stage != Some(stage) {
                 if let Some(previous) = &self.latest
@@ -723,6 +751,7 @@ fn format_progress(progress: &IndexProgress, terminal: bool) -> (String, String)
             IndexEmbeddingStage::Downloading => "Downloading model",
             IndexEmbeddingStage::Ready => "Model ready",
             IndexEmbeddingStage::Warning => "Model warning",
+            IndexEmbeddingStage::Skipped => "Model skipped",
         };
         let mut line = format!("{label}: {model}");
         if let Some(downloaded) = embedding.downloaded_bytes {
@@ -843,6 +872,39 @@ mod tests {
             files_failed: None,
             detail: None,
             embedding: None,
+        }
+    }
+
+    #[test]
+    fn selection_is_printed_once_even_when_only_a_completion_snapshot_arrives() {
+        use zg_engine::api::index::embedding::{EmbeddingSelection, EmbeddingSelectionSource};
+        for terminal in [false, true] {
+            let capture = Capture::default();
+            let display = if terminal {
+                IndexProgressDisplay::terminal(capture.clone(), ColorMode::Never, false)
+            } else {
+                IndexProgressDisplay::new(capture.clone(), false, ColorMode::Never)
+            };
+            let mut progress = indexing(0, 0);
+            progress.phase = IndexProgressPhase::Done;
+            progress.embedding = Some(IndexEmbeddingProgress {
+                selection: Some(EmbeddingSelection {
+                    model: "local/bekko-256-int8".into(),
+                    source: EmbeddingSelectionSource::Automatic,
+                    analysis: None,
+                }),
+                ..Default::default()
+            });
+            display.reporter().report(progress.clone());
+            display.reporter().report(progress);
+            display.finish();
+            assert_eq!(
+                capture
+                    .text()
+                    .matches("Using: local/bekko-256-int8 (automatic)")
+                    .count(),
+                1
+            );
         }
     }
 
@@ -1046,6 +1108,7 @@ mod tests {
             color: false,
             unicode: true,
             latest: None,
+            selection: crate::embedding::SelectionDisplay::default(),
             stage: None,
             stage_started: now,
             frame: String::new(),
@@ -1153,6 +1216,7 @@ mod tests {
             color: false,
             unicode: true,
             latest: None,
+            selection: crate::embedding::SelectionDisplay::default(),
             stage: None,
             stage_started: now,
             frame: String::new(),
@@ -1304,6 +1368,7 @@ mod tests {
                     color,
                     unicode,
                     latest: None,
+                    selection: crate::embedding::SelectionDisplay::default(),
                     stage: None,
                     stage_started: now,
                     frame: String::new(),
@@ -1545,7 +1610,12 @@ mod tests {
     #[test]
     fn warnings_are_durable_complete_and_survive_coalescing() {
         let warning = "Transformers cuda embedding initialization failed (Unable to configure CUDA ONNX embedding model), falling back to CPU.";
-        for terminal in [false, true] {
+        for (terminal, stage) in [
+            (false, IndexEmbeddingStage::Warning),
+            (true, IndexEmbeddingStage::Warning),
+            (false, IndexEmbeddingStage::Skipped),
+            (true, IndexEmbeddingStage::Skipped),
+        ] {
             let capture = Capture::default();
             let display = if terminal {
                 IndexProgressDisplay::terminal(capture.clone(), ColorMode::Never, true)
@@ -1560,7 +1630,7 @@ mod tests {
                 files_failed: None,
                 detail: None,
                 embedding: Some(IndexEmbeddingProgress {
-                    stage: Some(IndexEmbeddingStage::Warning),
+                    stage: Some(stage),
                     model: Some("local/all-minilm-l6-v2".into()),
                     message: Some(warning.into()),
                     ..IndexEmbeddingProgress::default()

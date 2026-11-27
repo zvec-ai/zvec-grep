@@ -29,7 +29,11 @@ export function rankingSignature(items) {
 }
 
 /** One query/mode has one vote, obtained from its five repeated calls. */
-export function summarizeRepeatedQuality(calls, targets) {
+export function summarizeRepeatedQuality(
+  calls,
+  targets,
+  { includeFileRecall = false } = {},
+) {
   assert.equal(calls.length, 5, "quality requires five calls per query/mode");
   assert.deepEqual(
     calls.map((call) => call.repetition),
@@ -45,12 +49,29 @@ export function summarizeRepeatedQuality(calls, targets) {
   });
   const rankings = new Set(calls.map((call) => rankingSignature(call.items)));
   return {
-    file: Object.fromEntries(
-      FILE_FIELDS.map((field) => [
-        field,
-        mean(scores.map((score) => score.file[field])),
-      ]),
-    ),
+    file: {
+      ...Object.fromEntries(
+        FILE_FIELDS.map((field) => [
+          field,
+          mean(scores.map((score) => score.file[field])),
+        ]),
+      ),
+      ...(includeFileRecall
+        ? Object.fromEntries(
+            [1, 5, 10].map((k) => [
+              `recall_at_${k}`,
+              mean(
+                scores.map(
+                  ({ file }) =>
+                    file.target_ranks.filter(
+                      (rank) => rank !== null && rank <= k,
+                    ).length / file.n_relevant,
+                ),
+              ),
+            ]),
+          )
+        : {}),
+    },
     ndcg_at_10: mean(scores.map((score) => score.ndcg.ndcg_at_10)),
     ranking_repeatable: rankings.size === 1,
     unique_rankings: rankings.size,

@@ -15,9 +15,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::{EdgeProvenance, GraphEdgeKind};
+use crate::domain::{EdgeProvenance, GraphEdgeKind, PreprocessorDirective};
 
-use super::{NameEdge, WalkContext, WalkEdge};
+use super::{
+    Constructs, ItemExtent, NameEdge, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, RustScopeTables,
+    WalkContext, WalkEdge,
+};
 
 /// A name reference resolved against this file's own symbol table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,7 +52,14 @@ pub(crate) struct PendingNameRef {
     pub raw_text: Option<String>,
     /// Declared type of the bound name for `Declares` edges.
     pub bound_type: Option<String>,
+    /// Last line the bound name stays in effect, for a loop-scoped binding.
+    pub bound_until: Option<usize>,
+    /// Exclusive end of a branch/loop-local binding, in source coordinates.
+    pub scope_end: Option<(usize, usize)>,
     pub arity: Option<usize>,
+    /// Whether the call stands at a construction site, where a type name is a
+    /// legitimate target.
+    pub constructs: Constructs,
     pub line: usize,
     pub column: usize,
 }
@@ -68,25 +78,88 @@ pub(crate) struct PartitionedGraph {
     /// an ordinal onto the entity's representative fragment — whose index the
     /// pipeline turns into the minted `EntityId`.
     pub head_fragment_indices: Vec<usize>,
+    /// C/C++ preprocessor directives in source order; empty for every other
+    /// language. Partition does not read them — they describe the file, not a
+    /// reference — but the pipeline persists them beside the graph so the
+    /// resolver can replay the unit a call site belongs to.
+    pub directives: Vec<PreprocessorDirective>,
 }
 
-/// Function-pointer initializers (`void (*work)(void) = target;`) alias
-/// one name to a same-file function per owner: a call spelled through the
-/// alias reaches that function rather than a same-named declaration the
-/// local hides.
-fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), String> {
-    name_edges
+/// Declarations binding one name to another, per owner: a function-pointer
+/// initializer (`void (*work)(void) = target;` records `target` as the bound
+/// *type*) and a value initializer (`const dispatch = send` records `send`).
+/// A call spelled through the bound name reaches the named function rather than
+/// a same-named declaration the local hides — but only as far as the binding
+/// that is in effect where the call stands, so the bindings stay in source
+/// order instead of collapsing into one answer per name.
+fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), Vec<NameEdge>> {
+    let mut aliases: HashMap<_, Vec<_>> = HashMap::new();
+    for edge in name_edges
         .iter()
         .filter(|edge| edge.ref_kind == GraphEdgeKind::Declares)
-        .filter_map(|edge| {
-            edge.bound_type
-                .clone()
-                .map(|bound| ((edge.owner_index, edge.ref_name.clone()), bound))
-        })
-        .collect()
+    {
+        aliases
+            .entry((edge.owner_index, edge.ref_name.clone()))
+            .or_default()
+            .push(edge.clone());
+    }
+    aliases
 }
 
-/// Shape used to collapse non-call, non-binding references.
+/// The name a reference spelled through `edge.ref_name` reaches at its own
+/// position: the last local binding written before it that has not gone out of
+/// scope, and failing that the file's own declaration, which every body of the
+/// file can see. Position is the whole point — a `const target = other` inside
+/// a block stops answering when the block ends, and a later declaration must
+/// not reach backwards past an earlier one.
+fn alias_at<'a>(
+    aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
+    edge: &NameEdge,
+) -> Option<&'a str> {
+    let position = (edge.line, edge.column);
+    let local = aliases
+        .get(&(edge.owner_index, edge.ref_name.clone()))
+        .and_then(|bindings| {
+            bindings.iter().rev().find(|binding| {
+                (binding.line, binding.column) <= position
+                    && binding.scope_end.is_none_or(|end| position < end)
+            })
+        });
+    local
+        .or_else(|| {
+            aliases
+                .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
+                .and_then(|bindings| bindings.last())
+        })
+        .and_then(|binding| binding.bound_type.as_deref())
+}
+
+/// Whether a binding states a value this file can place. `?` marks a
+/// declaration whose value is unreadable here — a parameter, or an initializer
+/// that is neither a construction nor a factory call — and `typeof X` marks a
+/// callable copy. Binding the spelled name instead would claim the file's
+/// namesake even where a parameter or a nested definition of that name is the
+/// value, while the cross-file resolver still reads the declared binding at the
+/// call's position and can tell the two apart.
+fn states_a_placeable_value(bound: &str) -> bool {
+    !(bound == "?" || bound.starts_with("typeof "))
+}
+
+/// Whether a binding is the sentinel a Python body writes when it rebinds a
+/// name to a value it cannot place or states only the name's absence.
+fn is_python_rebound(bound: &str) -> bool {
+    matches!(bound, PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE)
+}
+
+/// The entity the file declares exactly once under `name`; two same-named
+/// declarations are not evidence for either.
+fn unique_symbol(symbols: &HashMap<String, Vec<usize>>, name: &str) -> Option<usize> {
+    symbols
+        .get(name)
+        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+}
+
+/// Shape used to collapse references without per-site binding evidence.
 type RefSite = (GraphEdgeKind, usize, Option<String>, String, Option<usize>);
 
 /// Partitions the walk buffers against the completed symbol table.
@@ -107,7 +180,11 @@ pub(crate) fn partition_walk(
         name_edges,
         symbols,
         file_symbols,
-        scoped_symbols,
+        rust_scopes,
+        shadowed_names,
+        borrowed_names,
+        value_aliases,
+        preprocessor,
         ..
     } = context;
     let mut partitioned = PartitionedGraph {
@@ -115,16 +192,24 @@ pub(crate) fn partition_walk(
         resolved: Vec::new(),
         pending: Vec::new(),
         head_fragment_indices,
+        directives: preprocessor,
     };
+    // Containment is the only record of which entity sits inside which, so it
+    // is what lets a call read the using-declarations of the classes above it.
+    let enclosing = partitioned
+        .contains
+        .iter()
+        .map(|edge| (edge.target_index, edge.source_index))
+        .collect::<HashMap<usize, usize>>();
     let aliases = alias_table(&name_edges);
     let mut collapsed: HashSet<RefSite> = HashSet::new();
     for edge in name_edges {
         if !matches!(
             edge.ref_kind,
-            GraphEdgeKind::Calls | GraphEdgeKind::Declares
+            GraphEdgeKind::Calls | GraphEdgeKind::Declares | GraphEdgeKind::Imports
         ) {
-            // Preserve each call position and binding declaration. The walk already
-            // deduplicates collecting the same call site more than once.
+            // Preserve call sites, declarations and import statements: two imports
+            // of the same module can bind different local names in their raw text.
             let site = (
                 edge.ref_kind,
                 edge.owner_index,
@@ -136,47 +221,20 @@ pub(crate) fn partition_walk(
                 continue;
             }
         }
-        let resolved_target = match edge.ref_kind {
-            // Containment is emitted as a resolved edge during the walk, so it
-            // normally never reaches this queue; if one does, it stays pending.
-            // Imports stay pending because their target is another file by
-            // definition, and Declares edges bind a variable to a type name that
-            // may live elsewhere — the cross-file resolver consumes all three.
-            GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => None,
-            GraphEdgeKind::Calls if edge.receiver_name.is_some() => None,
-            // A bare call resolves through, in order: its owner's alias
-            // initializers, its owner's local name table (the nested
-            // spelling an entity declares in its body shadows any
-            // file-level name inside it), then the file-level table.
-            // Members and nested definitions stay out of that last table: a
-            // top-level `caller()` naming `run` does not see `A::run` just
-            // because the file declares it once. Without better evidence the
-            // reference stays pending for the cross-file resolver, which also
-            // weighs imports.
-            GraphEdgeKind::Calls => aliases
-                .get(&(edge.owner_index, edge.ref_name.clone()))
-                .and_then(|bound| {
-                    symbols
-                        .get(bound)
-                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                })
-                .or_else(|| {
-                    scoped_symbols
-                        .get(&edge.owner_index)
-                        .and_then(|locals| locals.get(&edge.ref_name))
-                        .copied()
-                })
-                .or_else(|| {
-                    file_symbols
-                        .get(&edge.ref_name)
-                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                }),
-            GraphEdgeKind::Extends | GraphEdgeKind::Implements => symbols
-                .get(&edge.ref_name)
-                .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
-        };
+        let resolved_target = in_file_target(
+            &edge,
+            shadowed_at_site(&edge, &enclosing, &shadowed_names, &borrowed_names),
+            InFileTables {
+                symbols: &symbols,
+                rust: &rust_scopes,
+                file_symbols: &file_symbols,
+                aliases: &aliases,
+                value_aliases: &value_aliases,
+                enclosing: &enclosing,
+            },
+        );
         match resolved_target {
-            Some(target_index) => partitioned.resolved.push(ResolvedNameEdge {
+            InFileTarget::Bound(target_index) => partitioned.resolved.push(ResolvedNameEdge {
                 ref_kind: edge.ref_kind,
                 source_index: edge.owner_index,
                 target_index,
@@ -188,20 +246,358 @@ pub(crate) fn partition_walk(
                 column: edge.column,
                 provenance: EdgeProvenance::FileLocal,
             }),
-            None => partitioned.pending.push(PendingNameRef {
+            InFileTarget::Pending => partitioned.pending.push(PendingNameRef {
                 ref_kind: edge.ref_kind,
                 owner_index: edge.owner_index,
                 ref_name: edge.ref_name,
                 receiver_name: edge.receiver_name,
                 raw_text: edge.raw_text,
                 bound_type: edge.bound_type,
+                bound_until: edge.bound_until,
+                scope_end: edge.scope_end,
                 arity: edge.arity,
+                constructs: edge.constructs,
                 line: edge.line,
                 column: edge.column,
             }),
+            // The scopes around the call rule out every spelling this file
+            // holds, so there is nothing for the resolver to weigh either.
+            InFileTarget::OutOfReach => {}
         }
     }
     partitioned
+}
+
+/// Whether the name a call spells is already taken nearer than the file's own
+/// table, so no enclosing item scope may answer it.
+///
+/// A bare name the owner's body took for itself is not the file's name:
+/// `invoke(dispatch: () => void)` reaching `dispatch()` calls the parameter,
+/// never an imported function some alias table happens to spell. A name one of
+/// the classes around the owner imports (`using First<T>::Run;`) is that
+/// class's member rather than the file's namesake, and the cross-file resolver
+/// decides which member it reaches.
+fn shadowed_at_site(
+    edge: &NameEdge,
+    enclosing: &HashMap<usize, usize>,
+    shadowed_names: &HashMap<usize, HashSet<String>>,
+    borrowed_names: &HashMap<usize, HashSet<String>>,
+) -> bool {
+    if edge.receiver_name.is_some() {
+        return false;
+    }
+    shadowed_names
+        .get(&edge.owner_index)
+        .is_some_and(|names| names.contains(&edge.ref_name))
+        || borrowed_by_enclosing_class(edge.owner_index, &edge.ref_name, enclosing, borrowed_names)
+}
+
+/// Whether one of the entities around `owner` imports `name` from another
+/// scope: a class body's `using First<T>::Run;` answers `Run()` in the
+/// methods written in that class, so the file's own namesake is not the call.
+fn borrowed_by_enclosing_class(
+    owner: usize,
+    name: &str,
+    enclosing: &HashMap<usize, usize>,
+    borrowed_names: &HashMap<usize, HashSet<String>>,
+) -> bool {
+    let mut current = owner;
+    // The file node is not an entity, so the walk ends where containment does.
+    for _ in 0..64 {
+        let Some(parent) = enclosing.get(&current) else {
+            return false;
+        };
+        if borrowed_names
+            .get(parent)
+            .is_some_and(|names| names.contains(name))
+        {
+            return true;
+        }
+        current = *parent;
+    }
+    false
+}
+
+/// What one scope's name table says about the spelling of a bare call.
+enum LocalName {
+    /// A value-namespace item the call site can reach.
+    Value(usize),
+    /// Only the type namespace holds the spelling (`trait save`, `type save`,
+    /// `mod save`), and a bare call names a value.
+    TypeOnly,
+    /// A value-namespace item holds the spelling, but not one this call site
+    /// can see: the block that declared it had already closed.
+    Hidden,
+}
+
+/// The entity a bare call reaches among the ones one body declares under one
+/// spelling.
+///
+/// Rust keeps the type and value namespaces apart, so a later `trait save`
+/// never takes the call away from `fn save`: a trait is not a value, and a
+/// spelling only the type namespace holds leaves the call pending. An item is
+/// in bare scope only inside the block that declares it, so a nested `fn save`
+/// whose block closed before the call site is no answer either.
+///
+/// Of the visible items the nearest wins: `{ fn save() {} fn inner() { save() } }`
+/// written inside `fn outer` that also declares a `save` reaches the block's
+/// own item, whichever of the two declarations comes later in the text.
+fn local_target(declared: &[usize], call: (usize, usize), rust: &RustScopeTables) -> LocalName {
+    let mut saw_value = false;
+    let mut visible: Option<(usize, Option<ItemExtent>)> = None;
+    for &index in declared.iter().rev() {
+        if rust.module_scopes.contains(&index) || rust.type_namespace_items.contains(&index) {
+            continue;
+        }
+        saw_value = true;
+        let extent = rust.item_extents.get(&index).copied();
+        if extent.is_some_and(|extent| !extent.contains(call.0, call.1)) {
+            continue;
+        }
+        match visible {
+            // Languages that record no block keep the walk's own order: the
+            // last registration under the spelling answers the call.
+            None => visible = Some((index, extent)),
+            Some((_, best)) => {
+                if extent.is_some_and(|extent| extent.is_nearer_than(best)) {
+                    visible = Some((index, extent));
+                }
+            }
+        }
+    }
+    match visible {
+        Some((index, _)) => LocalName::Value(index),
+        None if saw_value => LocalName::Hidden,
+        None => LocalName::TypeOnly,
+    }
+}
+
+/// What the item scopes around one bare call say about the name it spells.
+enum BareName {
+    /// No enclosing body or module binds the name, so the file's own table and
+    /// the cross-file resolver still get their say.
+    Unbound,
+    /// A `use` written in one of the enclosing bodies binds the name: the call
+    /// reaches what that import names, which only the resolver can read.
+    Imported,
+    /// An item scope declares the spelling. `Some` is the entity a bare call
+    /// reaches; `None` means only the type namespace holds it — a module, a
+    /// trait or a type alias is not a value — so the call stays pending
+    /// instead of climbing to an outer scope.
+    Declared(Option<usize>),
+    /// The nearest module binds no such spelling and writes no glob, so the
+    /// file's own items are not in view: reaching them from there needs
+    /// `super::`. The call stays pending rather than taking a file-level
+    /// namesake the module cannot see.
+    OutOfScope,
+}
+
+/// What the modules and function bodies around `owner` say about `name`.
+///
+/// The climb starts at the call's own owner, whose table answers whatever kind
+/// of entity it is: the entities written beside a call are the values that body
+/// can name. Farther out only a module or a function body is a scope worth
+/// reading — bare scope holds a module's items for every body written inside
+/// it, and a function's items for the bodies nested in it: `mod storage`
+/// answers its `flush`, and `fn outer` answers the `save()` its nested `inner`
+/// writes. An outer module never answers — reaching it needs `super::` — and an
+/// `impl`, a trait or a class body is skipped, because its members need a
+/// receiver. A `use` written in one of those bodies is nearer than the items: it
+/// binds the spelling for the calls that see it, and where it points is the
+/// resolver's question. The file's own table belongs to the file scope, so a
+/// module reaches it only through a glob import.
+fn enclosing_bare_name(
+    owner: usize,
+    name: &str,
+    call: (usize, usize),
+    rust: &RustScopeTables,
+    enclosing: &HashMap<usize, usize>,
+) -> BareName {
+    let mut current = owner;
+    // A glob `use` on the way out (`use super::*;`) states that the names
+    // around the innermost module are in view without spelling any of them, so
+    // the file's own table stays a candidate once the walk reaches that module.
+    let mut glob_in_view = false;
+    // The file node is not an entity, so the walk ends where containment does.
+    for _ in 0..64 {
+        if rust.import_globs.contains(&current) {
+            glob_in_view = true;
+        }
+        if rust
+            .import_bindings
+            .get(&current)
+            .is_some_and(|names| names.contains(name))
+        {
+            return BareName::Imported;
+        }
+        let module = rust.module_scopes.contains(&current);
+        if module || rust.function_scopes.contains(&current) || current == owner {
+            if let Some(declared) = rust
+                .scoped_symbols
+                .get(&current)
+                .and_then(|names| names.get(name))
+            {
+                match local_target(declared, call, rust) {
+                    LocalName::Value(index) => return BareName::Declared(Some(index)),
+                    // Only the type namespace spells the name here. A module
+                    // ends the walk; any other body does not, because the
+                    // outer scope's value namespace is still in view.
+                    LocalName::TypeOnly if module => return BareName::Declared(None),
+                    // Either only the type namespace spells the name here, or
+                    // the value item's block closed before this call site: this
+                    // scope's spelling is not the answer either way, so the
+                    // climb continues towards the module.
+                    LocalName::TypeOnly | LocalName::Hidden => {}
+                }
+            }
+            if module {
+                // The nearest module ends the walk: the items of the modules
+                // around it need `super::`, and so do the file's own items
+                // unless a glob import states that some of them are in view.
+                return if glob_in_view {
+                    BareName::Unbound
+                } else {
+                    BareName::OutOfScope
+                };
+            }
+        }
+        let Some(&parent) = enclosing.get(&current) else {
+            return BareName::Unbound;
+        };
+        current = parent;
+    }
+    BareName::Unbound
+}
+
+/// The file's own name tables, as one reference reads them.
+#[derive(Clone, Copy)]
+struct InFileTables<'a> {
+    symbols: &'a HashMap<String, Vec<usize>>,
+    /// The Rust item and block tables a bare call climbs through.
+    rust: &'a RustScopeTables,
+    file_symbols: &'a HashMap<String, Vec<usize>>,
+    aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
+    value_aliases: &'a HashMap<(usize, String), String>,
+    /// Containment, target ordinal → containing ordinal: the chain a module
+    /// lookup climbs.
+    enclosing: &'a HashMap<usize, usize>,
+}
+
+/// What one name reference binds inside its own file.
+enum InFileTarget {
+    /// The in-file entity the reference reaches.
+    Bound(usize),
+    /// The file holds no single answer, so the reference stays pending for the
+    /// cross-file resolver.
+    Pending,
+    /// No spelling of this file can answer the reference from where it stands:
+    /// the nearest module declares none, imports none and writes no glob. The
+    /// walk emits no edge rather than binding a namesake that module cannot
+    /// reach.
+    OutOfReach,
+}
+
+/// The in-file answer for one name reference.
+fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> InFileTarget {
+    let InFileTables {
+        symbols,
+        rust,
+        file_symbols,
+        aliases,
+        value_aliases,
+        enclosing,
+    } = tables;
+    match edge.ref_kind {
+        // Containment is emitted as a resolved edge during the walk, so it
+        // normally never reaches this queue; if one does, it stays pending.
+        // Imports stay pending because their target is another file by
+        // definition, and Declares edges bind a variable to a type name that
+        // may live elsewhere — the cross-file resolver consumes all three.
+        GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => {
+            InFileTarget::Pending
+        }
+        GraphEdgeKind::Calls if edge.receiver_name.is_some() => InFileTarget::Pending,
+        // A construction site (`new X()`) names a type, and which type a
+        // bare name denotes is a namespace question: the file's lone
+        // same-named class in an unrelated namespace must not answer it
+        // (`ui::Paint`'s `new Widget()` is `ui::Widget`, not
+        // `legacy::Widget`). Only the cross-file resolver sees the
+        // enclosing namespaces, so constructions stay pending.
+        GraphEdgeKind::Calls if edge.constructs.is_some() => InFileTarget::Pending,
+        // A bare call resolves through, in order: the binding its owner's body
+        // gave the name *at the call's own position*, the file-level bindings
+        // (a module-level `const dispatch = send` is visible to every body in
+        // the file, whatever its order), its owner's local name table (the
+        // nested spelling an entity declares in its body shadows any file-level
+        // name inside it), then the item scopes around the owner — the module's
+        // own `save` answers its `flush`, and a nested `fn save` answers the
+        // bodies inside the function that declares it — and finally, for a call
+        // no module encloses or one whose modules write a glob import, the
+        // file-level table. Members and nested definitions stay out of that
+        // last table: a top-level `caller()` naming `run` does not see `A::run`
+        // just because the file declares it once. Without better evidence the
+        // reference stays pending for the cross-file resolver, which also
+        // weighs imports.
+        GraphEdgeKind::Calls => {
+            if let Some(bound) = alias_at(aliases, edge) {
+                // A Python body that rebinds a name states it holds no type
+                // the index can place (`client = clients[0]`), but a copy of
+                // another name is evidence of its own: `alias = target` still
+                // reaches `target` through the alias table.
+                if !is_python_rebound(bound) {
+                    // The binding states no value this file can place, so the
+                    // spelled name is not the answer: the resolver reads the
+                    // declared binding at the call's position and can still
+                    // tell a parameter, a nested definition or a later
+                    // reassignment apart from the file's name.
+                    return if states_a_placeable_value(bound) {
+                        unique_in_file(symbols, bound)
+                    } else {
+                        InFileTarget::Pending
+                    };
+                }
+            }
+            // A pair the walk recorded without a position of its own (`x = y`
+            // where the declaration states no type) is the only evidence there
+            // is.
+            if let Some(bound) = value_aliases
+                .get(&(edge.owner_index, edge.ref_name.clone()))
+                .or_else(|| value_aliases.get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone())))
+            {
+                return unique_in_file(symbols, bound);
+            }
+            // A parameter or an untyped local of that name in the owner's own
+            // body is the value the call reaches; no enclosing scope may
+            // answer it.
+            if shadowed {
+                return InFileTarget::Pending;
+            }
+            match enclosing_bare_name(
+                edge.owner_index,
+                &edge.ref_name,
+                (edge.line, edge.column),
+                rust,
+                enclosing,
+            ) {
+                BareName::Declared(Some(target)) => InFileTarget::Bound(target),
+                BareName::Declared(None) | BareName::Imported => InFileTarget::Pending,
+                BareName::OutOfScope => InFileTarget::OutOfReach,
+                BareName::Unbound => unique_in_file(file_symbols, &edge.ref_name),
+            }
+        }
+        GraphEdgeKind::Extends | GraphEdgeKind::Implements => {
+            unique_in_file(symbols, &edge.ref_name)
+        }
+    }
+}
+
+/// The in-file entity a name reaches, or pending when the table holds none or
+/// more than one.
+fn unique_in_file(symbols: &HashMap<String, Vec<usize>>, name: &str) -> InFileTarget {
+    match unique_symbol(symbols, name) {
+        Some(index) => InFileTarget::Bound(index),
+        None => InFileTarget::Pending,
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +732,131 @@ mod tests {
         );
         assert_eq!(graph.pending.len(), 1);
         assert_eq!(graph.pending[0].ref_name, "run");
+    }
+
+    #[test]
+    fn module_local_definitions_answer_bare_calls_before_the_file_scope() {
+        // `mod storage { fn save() {} fn flush() { save() } }` beside a
+        // top-level `save`: `save()` inside `flush` reaches the module's own
+        // definition, and the top-level one keeps only the callers that name it
+        // from the file scope.
+        let mut context = WalkContext::new();
+        let normalize = context.next_entity_index();
+        context.register_symbol(Some("normalize"), normalize);
+        let file_save = context.next_entity_index();
+        context.register_symbol(Some("save"), file_save);
+        let import_record = context.next_entity_index();
+        context.register_symbol(Some("import_record"), import_record);
+        let export_record = context.next_entity_index();
+        context.register_symbol(Some("export_record"), export_record);
+        let storage = context.next_entity_index();
+        context.register_symbol(Some("storage"), storage);
+        context.register_module_scope(storage);
+        context.push_scope(storage);
+        let module_save = context.next_entity_index();
+        context.register_symbol(Some("save"), module_save);
+        context.register_scoped_symbol(Some("save"), module_save);
+        context.add_contains_edge(module_save, 14, 4);
+        let flush = context.next_entity_index();
+        context.register_symbol(Some("flush"), flush);
+        context.register_scoped_symbol(Some("flush"), flush);
+        context.add_contains_edge(flush, 16, 4);
+        context.pop_scope();
+
+        context.add_call_edge(import_record, "save", None, None, Some(1), 6, 43);
+        context.add_call_edge(export_record, "save", None, None, Some(1), 8, 43);
+        context.add_call_edge(flush, "save", None, None, Some(1), 16, 39);
+
+        let graph = partition_walk(context, (0..7).collect());
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (import_record, file_save),
+                (export_record, file_save),
+                (flush, module_save),
+            ],
+            "the module's own `save` answers `flush`; the file-level one keeps only its callers"
+        );
+        assert!(graph.pending.is_empty());
+    }
+
+    #[test]
+    fn outer_modules_do_not_answer_bare_calls_in_inner_modules() {
+        // `mod outer { fn save() {} mod inner { fn flush() { save() } } }`: an
+        // outer module's items need `super::`, so `inner`'s missing `save` must
+        // not fall through to `outer::save` — nor to a namesake outside the
+        // module, which the call cannot reach either.
+        let mut context = WalkContext::new();
+        let outer = context.next_entity_index();
+        context.register_symbol(Some("outer"), outer);
+        context.register_module_scope(outer);
+        context.push_scope(outer);
+        let outer_save = context.next_entity_index();
+        context.register_symbol(Some("save"), outer_save);
+        context.register_scoped_symbol(Some("save"), outer_save);
+        let inner = context.next_entity_index();
+        context.register_symbol(Some("inner"), inner);
+        context.register_scoped_symbol(Some("inner"), inner);
+        context.add_contains_edge(inner, 2, 4);
+        context.register_module_scope(inner);
+        context.push_scope(inner);
+        let flush = context.next_entity_index();
+        context.register_symbol(Some("flush"), flush);
+        context.register_scoped_symbol(Some("flush"), flush);
+        context.add_contains_edge(flush, 3, 8);
+        context.pop_scope();
+        context.pop_scope();
+
+        context.add_call_edge(flush, "save", None, None, Some(0), 3, 20);
+
+        let graph = partition_walk(context, (0..4).collect());
+        assert!(
+            graph.resolved.is_empty(),
+            "an outer module's function must not answer a bare call in an inner module"
+        );
+        assert!(
+            graph.pending.is_empty(),
+            "no spelling the inner module can reach exists, so the call stays unanswered"
+        );
+    }
+
+    #[test]
+    fn glob_import_keeps_the_file_namesakes_in_view() {
+        // `mod inner { use super::*; fn flush() { save() } }` beside a
+        // top-level `save`: the glob states that the file's names are in view
+        // without spelling them, so the file-level namesake still answers.
+        let mut context = WalkContext::new();
+        let file_save = context.next_entity_index();
+        context.register_symbol(Some("save"), file_save);
+        let inner = context.next_entity_index();
+        context.register_symbol(Some("inner"), inner);
+        context.register_module_scope(inner);
+        context.push_scope(inner);
+        let flush = context.next_entity_index();
+        context.register_symbol(Some("flush"), flush);
+        context.register_scoped_symbol(Some("flush"), flush);
+        context.add_contains_edge(flush, 3, 8);
+        context.register_import_glob(inner);
+        context.pop_scope();
+
+        context.add_call_edge(flush, "save", None, None, Some(0), 3, 20);
+
+        let graph = partition_walk(context, (0..2).collect());
+        assert_eq!(
+            graph
+                .resolved
+                .iter()
+                .map(|edge| (edge.source_index, edge.target_index))
+                .collect::<Vec<_>>(),
+            vec![(flush, file_save)]
+        );
+        assert!(graph.pending.is_empty());
     }
 
     #[test]

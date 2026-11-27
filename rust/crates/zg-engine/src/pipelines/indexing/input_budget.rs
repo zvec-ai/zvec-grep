@@ -1,4 +1,7 @@
-use crate::extraction::ChunkOptions;
+use crate::{
+    api::info::result::{ChunkInputBudget, EmbeddingInputBudget},
+    extraction::ChunkOptions,
+};
 
 const DEFAULT_CHARS_PER_100_TOKENS: usize = 185;
 const TOKEN_DENSE_CHARS_PER_100_TOKENS: usize = 100;
@@ -19,10 +22,34 @@ pub(super) fn index_chunk_options(
     } else {
         DEFAULT_CHARS_PER_100_TOKENS
     };
-    let max_chunk_chars = max_input_tokens.saturating_mul(chars_per_100_tokens) / 100;
+    let budget = chunk_budget(max_input_tokens, chars_per_100_tokens);
     ChunkOptions {
-        max_chunk_chars: Some(max_chunk_chars.max(1)),
-        chunk_overlap_chars: Some(max_chunk_chars.saturating_mul(CHUNK_OVERLAP_PERCENT) / 100),
+        max_chunk_chars: Some(budget.max_length),
+        chunk_overlap_chars: Some(budget.overlap),
+    }
+}
+
+/// Report both policies without reading source text or preparing a model runtime.
+pub(super) fn embedding_input_budget(
+    max_input_tokens: Option<usize>,
+) -> Option<EmbeddingInputBudget> {
+    let max_input_tokens = max_input_tokens?;
+    Some(EmbeddingInputBudget {
+        max_input_tokens,
+        unit: "utf16_code_units".to_owned(),
+        rounding: "floor".to_owned(),
+        overlap_percent: CHUNK_OVERLAP_PERCENT,
+        normal: chunk_budget(max_input_tokens, DEFAULT_CHARS_PER_100_TOKENS),
+        dense: chunk_budget(max_input_tokens, TOKEN_DENSE_CHARS_PER_100_TOKENS),
+    })
+}
+
+fn chunk_budget(max_input_tokens: usize, chars_per_100_tokens: usize) -> ChunkInputBudget {
+    let max_chunk_chars = max_input_tokens.saturating_mul(chars_per_100_tokens) / 100;
+    ChunkInputBudget {
+        chars_per_100_tokens,
+        max_length: max_chunk_chars.max(1),
+        overlap: max_chunk_chars.saturating_mul(CHUNK_OVERLAP_PERCENT) / 100,
     }
 }
 
@@ -95,5 +122,47 @@ mod tests {
             index_chunk_options(None, Some("anything")),
             ChunkOptions::default()
         );
+        assert_eq!(embedding_input_budget(None), None);
+    }
+
+    #[test]
+    fn diagnostic_budgets_share_indexing_arithmetic_and_round_down() {
+        for (tokens, normal_length, normal_overlap, dense_overlap) in
+            [(1_024, 1_894, 284, 153), (128_000, 236_800, 35_520, 19_200)]
+        {
+            let budget = embedding_input_budget(Some(tokens)).expect("known model limit");
+            assert_eq!(budget.max_input_tokens, tokens);
+            assert_eq!(budget.unit, "utf16_code_units");
+            assert_eq!(budget.rounding, "floor");
+            assert_eq!(budget.overlap_percent, 15);
+            assert_eq!(
+                budget.normal,
+                ChunkInputBudget {
+                    chars_per_100_tokens: 185,
+                    max_length: normal_length,
+                    overlap: normal_overlap,
+                }
+            );
+            assert_eq!(
+                budget.dense,
+                ChunkInputBudget {
+                    chars_per_100_tokens: 100,
+                    max_length: tokens,
+                    overlap: dense_overlap,
+                }
+            );
+            for (text, expected) in [
+                ("ordinary words and spaces".to_owned(), budget.normal),
+                ("你".repeat(tokens + 1), budget.dense),
+            ] {
+                assert_eq!(
+                    index_chunk_options(Some(tokens), Some(&text)),
+                    ChunkOptions {
+                        max_chunk_chars: Some(expected.max_length),
+                        chunk_overlap_chars: Some(expected.overlap),
+                    }
+                );
+            }
+        }
     }
 }

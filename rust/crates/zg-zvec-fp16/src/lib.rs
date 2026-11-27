@@ -2,7 +2,7 @@
 //!
 //! Embeddings stay `f32` in the engine. They are narrowed to FP16 when written
 //! and when a vector query is built. Reads widen the stored bits back to `f32`.
-//! zvec-rust 0.8.0 can declare a `VectorFp16` field, but its safe document and
+//! zvec-rust 0.8.1 can declare a `VectorFp16` field, but its safe document and
 //! query APIs only accept FP32 bytes. Those bytes fail zvec's dimension check
 //! on an FP16 field, so this crate passes binary16 bytes through the C API.
 

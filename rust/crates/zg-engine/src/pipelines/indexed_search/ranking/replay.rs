@@ -106,6 +106,7 @@ fn replay_rule_ablation() {
                 2.0 / 61.0,
                 10,
                 policy,
+                None,
             );
             let hits = hits.iter().map(|h| {
                 let original = &case.hits[h.entity.id().as_str().parse::<usize>().expect("candidate index")];
@@ -151,6 +152,12 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             });
             let mut result = hit(
                 &i.to_string(),

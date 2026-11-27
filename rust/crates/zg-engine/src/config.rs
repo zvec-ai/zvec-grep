@@ -2,7 +2,7 @@
 
 use crate::{
     EngineError,
-    domain::model::Device,
+    domain::model::{Device, HttpEmbeddingConfig, ModelConfig},
     utils::{atomic_write, sync_directory},
 };
 use serde_json::{Map, Value, json};
@@ -180,6 +180,23 @@ fn parse_providers(fields: &Map<String, Value>) -> Result<Option<Value>, EngineE
     Ok(non_empty_object(parsed))
 }
 
+const HTTP_MODEL_FIELDS: &[&str] = &[
+    "endpoint",
+    "model",
+    "dimension",
+    "metric",
+    "maxInputTokens",
+    "maxBatchSize",
+    "timeoutMs",
+    "auth",
+    "apiKeyEnv",
+    "queryPrefix",
+    "documentPrefix",
+    "sendDimensions",
+    "sendEncodingFormat",
+    "singleInput",
+];
+
 fn parse_models(fields: &Map<String, Value>) -> Result<Option<Value>, EngineError> {
     let mut parsed = Map::new();
     for (reference, value) in fields {
@@ -188,6 +205,11 @@ fn parse_models(fields: &Map<String, Value>) -> Result<Option<Value>, EngineErro
             return Err(invalid_field(&path));
         }
         let model_fields = value.as_object().ok_or_else(|| invalid_field(&path))?;
+        if reference.starts_with("http/") {
+            let model = parse_http_model(reference, model_fields, &path)?;
+            parsed.insert(reference.to_owned(), Value::Object(model));
+            continue;
+        }
         check_known_fields(model_fields, &["endpoint", "device"], &path)?;
         let endpoint = non_empty_string(model_fields, "endpoint", &format!("{path}.endpoint"))?;
         if let Some(endpoint) = &endpoint {
@@ -218,6 +240,29 @@ fn parse_models(fields: &Map<String, Value>) -> Result<Option<Value>, EngineErro
         }
     }
     Ok(non_empty_object(parsed))
+}
+
+fn parse_http_model(
+    reference: &str,
+    model_fields: &Map<String, Value>,
+    path: &str,
+) -> Result<Map<String, Value>, EngineError> {
+    check_known_fields(model_fields, HTTP_MODEL_FIELDS, path)?;
+    let endpoint = non_empty_string(model_fields, "endpoint", &format!("{path}.endpoint"))?
+        .ok_or_else(|| invalid_field(&format!("{path}.endpoint")))?;
+    crate::authorization::canonical_remote_endpoint(reference, &endpoint)?;
+    let mut descriptor_fields = model_fields.clone();
+    descriptor_fields.remove("endpoint");
+    let descriptor: HttpEmbeddingConfig = serde_json::from_value(Value::Object(descriptor_fields))
+        .map_err(|_| invalid_field(path))?;
+    descriptor.validate()?;
+    let Value::Object(mut model) =
+        serde_json::to_value(descriptor).map_err(|_| invalid_field(path))?
+    else {
+        return Err(invalid_field(path));
+    };
+    model.insert("endpoint".to_owned(), json!(endpoint));
+    Ok(model)
 }
 
 fn parse_client(fields: &Map<String, Value>) -> Result<Option<Value>, EngineError> {
@@ -376,6 +421,82 @@ pub(crate) fn device(value: &Value, reference: &str) -> Option<Device> {
     serde_json::from_value(value["models"][reference]["device"].clone()).ok()
 }
 
+pub(crate) fn http_model(
+    config: &Value,
+    reference: &str,
+) -> Result<Option<ModelConfig>, EngineError> {
+    if !reference.starts_with("http/") {
+        return Ok(None);
+    }
+    let Some(value) = config["models"].get(reference) else {
+        return Ok(None);
+    };
+    let fields = value.as_object().ok_or_else(|| {
+        EngineError::invalid_argument("Invalid HTTP embedding model configuration")
+    })?;
+    let endpoint = non_empty_string(fields, "endpoint", &format!("models.{reference}.endpoint"))?;
+    let mut descriptor_fields = fields.clone();
+    descriptor_fields.remove("endpoint");
+    let descriptor: HttpEmbeddingConfig = serde_json::from_value(Value::Object(descriptor_fields))
+        .map_err(|_| EngineError::invalid_argument("Invalid HTTP embedding model configuration"))?;
+    descriptor.model_info(reference)?;
+    Ok(Some(ModelConfig {
+        endpoint,
+        http: Some(descriptor),
+        ..Default::default()
+    }))
+}
+
+/// Saved HTTP definitions remain authoritative until an explicit rebuild.
+/// This resolver is also used by consent preflight, without loading credentials.
+pub(crate) fn resolve_http_model<Key>(
+    config: &Value,
+    reference: &str,
+    saved: Option<&ModelConfig<Key>>,
+    endpoint: Option<&str>,
+    rebuild: bool,
+) -> Result<Option<ModelConfig>, EngineError> {
+    if !reference.starts_with("http/") {
+        return Ok(None);
+    }
+    let saved_options = saved.map(|saved| ModelConfig {
+        http: saved.http.clone(),
+        endpoint: saved.endpoint.clone(),
+        ..Default::default()
+    });
+    let selected = if rebuild || saved_options.is_none() {
+        http_model(config, reference)?.or(saved_options)
+    } else {
+        saved_options
+    };
+    let mut selected = selected
+        .ok_or_else(|| EngineError::invalid_argument("HTTP embedding model is not configured"))?;
+    let descriptor = selected.http.as_ref().ok_or_else(|| {
+        EngineError::invalid_argument(
+            "Saved HTTP embedding descriptor is missing; rebuild the index",
+        )
+    })?;
+    descriptor.model_info(reference)?;
+    let endpoint = endpoint
+        .or(selected.endpoint.as_deref())
+        .ok_or_else(|| EngineError::invalid_argument("HTTP embedding endpoint is missing"))?;
+    let endpoint = crate::authorization::canonical_remote_endpoint(reference, endpoint)?;
+    if !rebuild && let Some(saved) = saved {
+        let saved_endpoint = saved.endpoint.as_deref().ok_or_else(|| {
+            EngineError::invalid_argument(
+                "Saved HTTP embedding endpoint is missing; rebuild the index",
+            )
+        })?;
+        if endpoint != crate::authorization::canonical_remote_endpoint(reference, saved_endpoint)? {
+            return Err(EngineError::invalid_argument(
+                "HTTP embedding endpoint changed; rebuild the index",
+            ));
+        }
+    }
+    selected.endpoint = Some(endpoint);
+    Ok(Some(selected))
+}
+
 pub(crate) fn runtime_device(
     config: &Value,
     reference: &str,
@@ -442,7 +563,9 @@ pub fn set_model(
     device: Option<Device>,
     default_model: bool,
 ) -> Result<PathBuf, EngineError> {
-    if crate::models::get_embedding_model_catalog_entry(reference).is_none() {
+    if crate::models::get_embedding_model_catalog_entry(reference).is_none()
+        && http_model(&read()?, reference)?.is_none()
+    {
         return Err(EngineError::invalid_argument(
             "Unsupported embedding model; run zg --help models",
         ));
@@ -544,6 +667,171 @@ fn merge(target: &mut Value, patch: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_descriptor_is_accepted_without_a_catalog_entry() {
+        let value = json!({"version": 1, "models": {"http/private": {
+            "endpoint": "http://127.0.0.1:8080/v1",
+            "model": "private-embedding",
+            "dimension": 3,
+            "maxInputTokens": 512,
+            "auth": "none"
+        }}});
+        let parsed = parse_global_config(&value).expect("runtime HTTP descriptor");
+        assert_eq!(
+            parsed["models"]["http/private"]["model"],
+            "private-embedding"
+        );
+        assert!(parsed["models"]["http/private"].get("http").is_none());
+        let runtime = http_model(&parsed, "http/private")
+            .expect("resolve flat HTTP model")
+            .expect("HTTP model options");
+        let saved = serde_json::to_value(runtime).expect("serialize options");
+        assert_eq!(saved["endpoint"], "http://127.0.0.1:8080/v1");
+        assert_eq!(saved["http"]["model"], "private-embedding");
+        assert_eq!(saved["http"]["maxBatchSize"], 1);
+        assert_eq!(saved["http"]["timeoutMs"], 60_000);
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("config.json");
+        fs::write(&path, serde_json::to_vec(&value).expect("json")).expect("write flat config");
+        update_at(&path, json!({"defaults": {"embedding": "http/private"}}))
+            .expect("update preserves flat HTTP model");
+        let updated = read_at(&path).expect("re-read flat config");
+        assert_eq!(updated["defaults"]["embedding"], "http/private");
+        assert_eq!(
+            updated["models"]["http/private"]["model"],
+            "private-embedding"
+        );
+        assert!(updated["models"]["http/private"].get("http").is_none());
+    }
+
+    #[test]
+    fn http_saved_endpoint_requires_rebuild_to_change() {
+        let saved: ModelConfig = serde_json::from_value(json!({
+            "endpoint": "http://localhost:8080/v1",
+            "http": {"model": "private-embedding", "dimension": 3,
+                     "maxInputTokens": 512, "auth": "none"}
+        }))
+        .expect("saved definition");
+        let global = json!({});
+        let resolve = |endpoint, rebuild| {
+            resolve_http_model(
+                &global,
+                "http/private",
+                Some(&saved),
+                Some(endpoint),
+                rebuild,
+            )
+        };
+        let canonical = "http://localhost:8080/v1/embeddings";
+        assert_eq!(
+            resolve(canonical, false)
+                .expect("equivalent endpoint")
+                .expect("HTTP definition")
+                .endpoint
+                .as_deref(),
+            Some(canonical)
+        );
+        let changed = "http://localhost:9090/v1/embeddings";
+        let error = resolve(changed, false).expect_err("cannot mix endpoints");
+        assert!(error.message().contains("endpoint changed; rebuild"));
+        assert_eq!(
+            resolve(changed, true)
+                .expect("explicit rebuild")
+                .expect("HTTP definition")
+                .endpoint
+                .as_deref(),
+            Some(changed)
+        );
+    }
+
+    #[test]
+    fn http_descriptor_rejects_invalid_limits_auth_and_credentials() {
+        let base = json!({"version": 1, "models": {"http/private": {
+            "endpoint": "https://example.test/v1",
+            "model": "private-embedding",
+            "dimension": 3,
+            "maxInputTokens": 512,
+            "auth": "none"
+        }}});
+        let nested = json!({"version": 1, "models": {"http/private": {
+            "endpoint": "https://example.test/v1",
+            "http": {"model": "private-embedding", "dimension": 3,
+                     "maxInputTokens": 512, "auth": "none"}
+        }}});
+        assert!(
+            parse_global_config(&nested)
+                .expect_err("nested http object must be rejected")
+                .message()
+                .contains("models.http/private.http")
+        );
+        for (field, value) in [
+            ("dimension", json!(0)),
+            ("maxInputTokens", json!(0)),
+            ("maxBatchSize", json!(0)),
+            ("timeoutMs", json!(0)),
+            ("model", json!("   ")),
+            ("auth", json!("basic")),
+            ("metric", json!("unknown")),
+            ("device", json!("cpu")),
+            ("http", json!({})),
+            ("apiKey", json!("private-token")),
+            ("apiKeyEnv", json!("PRIVATE_TOKEN")),
+        ] {
+            let mut invalid = base.clone();
+            invalid["models"]["http/private"][field] = value;
+            let error = parse_global_config(&invalid).expect_err(field);
+            assert!(!error.to_string().contains("private-token"));
+        }
+        for (reference, field, value) in [
+            ("qwen/model", "model", json!("served")),
+            ("qwen/model", "http", json!({})),
+            ("local/model", "auth", json!("none")),
+        ] {
+            let invalid = json!({"version": 1, "models": {reference: {field: value}}});
+            assert!(
+                parse_global_config(&invalid)
+                    .expect_err(reference)
+                    .message()
+                    .contains(&format!("models.{reference}.{field}"))
+            );
+        }
+        let mut missing_auth = base.clone();
+        missing_auth["models"]["http/private"]
+            .as_object_mut()
+            .expect("valid test fixture")
+            .remove("auth");
+        assert!(parse_global_config(&missing_auth).is_err());
+        for endpoint in [
+            "https://user:private-token@example.test/v1",
+            "https://example.test/v1?api_key=private-token",
+            "https://example.test/v1#private-token",
+        ] {
+            let mut invalid = base.clone();
+            invalid["models"]["http/private"]["endpoint"] = json!(endpoint);
+            let error = parse_global_config(&invalid).expect_err("endpoint credentials");
+            assert!(!error.to_string().contains("private-token"));
+        }
+        let mut bearer = base.clone();
+        bearer["models"]["http/private"]["auth"] = json!("bearer");
+        assert!(parse_global_config(&bearer).is_ok());
+        for name in [
+            "",
+            "Bearer private-token",
+            "1TOKEN",
+            "$TOKEN",
+            "TOKEN=private-token",
+        ] {
+            bearer["models"]["http/private"]["apiKeyEnv"] = json!(name);
+            assert!(parse_global_config(&bearer).is_err());
+        }
+        bearer["models"]["http/private"]["apiKeyEnv"] = json!("PRIVATE_TOKEN");
+        assert!(parse_global_config(&bearer).is_ok());
+        bearer["models"]["http/private"]["singleInput"] = json!(true);
+        bearer["models"]["http/private"]["maxBatchSize"] = json!(2);
+        assert!(parse_global_config(&bearer).is_err());
+    }
 
     #[test]
     fn model_cache_skips_unusable_workspace_preferences() {

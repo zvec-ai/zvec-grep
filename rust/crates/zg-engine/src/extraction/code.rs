@@ -5,16 +5,22 @@ pub(crate) use outline::code_outline;
 
 use tree_sitter::{Language, Node, Parser};
 
+use std::collections::HashMap;
+
 use crate::{
     EngineError,
-    domain::{CodeMetadata, Content, EntityMetadata, FileFormat, Range, SymbolType},
+    domain::{CodeMetadata, Content, EntityMetadata, FileFormat, MemberAlias, Range, SymbolType},
     utils::line_byte_offsets,
 };
 
-use self::adapter::{LanguageAdapter, named_children, php_declaration, resolve_adapter};
+use self::adapter::{
+    LanguageAdapter, ObjectLiteral, declares_type, named_children, php_declaration,
+    resolve_adapter, text,
+};
 use super::graph::{
-    WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
-    scan_binding_declarations, scan_call_edges, scan_return_types,
+    WalkContext, alias_target_of, collect_import_edge, collect_inheritance_edges, is_import_node,
+    partition_walk, scan_binding_declarations, scan_call_edges, scan_preprocessor,
+    scan_return_types,
 };
 use super::{
     ChunkOptions, ExtractedEntity, ExtractionOutput, TextRange, TextSource,
@@ -91,24 +97,15 @@ fn extract_code(
     let Some((adapter, language, code_format)) =
         format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?, format)))
     else {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     };
 
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     }
     let Some(tree) = parser.parse(&source.text, None) else {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     };
     let bytes = source.text.as_bytes();
     let mut entities = Vec::new();
@@ -122,8 +119,20 @@ fn extract_code(
     };
     // Factory return types register before the entity walk so a bare-call
     // initializer binds its factory even when the factory is spelled after
-    // the caller in this file.
-    scan_return_types(tree.root_node(), bytes, code_format, &mut graph_context);
+    // the caller in this file. The scans below only feed the graph, so a walk
+    // that records nothing skips them instead of computing dropped results —
+    // and does not pay their recursion on the source's syntax tree.
+    if graph_context.is_collecting() {
+        scan_return_types(tree.root_node(), bytes, code_format, &mut graph_context);
+        // Directives describe the file rather than any entity, so they are read
+        // once from the root: the resolver replays them to decide whether a call
+        // site's name was already a macro in that translation unit.
+        graph_context.register_preprocessor(scan_preprocessor(
+            tree.root_node(),
+            bytes,
+            code_format,
+        ));
+    }
     walk_code_node(
         tree.root_node(),
         adapter,
@@ -133,35 +142,77 @@ fn extract_code(
         &mut graph_context,
         code_format,
     );
+    // `export { realImpl as aliasName }` renames a declaration from a
+    // statement of its own, so the walk cannot see it from the declaration.
+    // The names it attaches serve import binding, which only the graph reads.
+    if graph_context.is_collecting() {
+        attach_export_aliases(tree.root_node(), bytes, code_format, &mut entities);
+    }
 
+    Ok(assemble_output(
+        source,
+        &tree,
+        &entities,
+        graph_context,
+        code_format,
+        (max_chars, overlap_chars),
+    ))
+}
+
+/// Turns the walked entities into what retrieval indexes and the resolver
+/// stores: their fragments in walk order, the gaps between them, and the
+/// partitioned graph. Both consume the same walk, which is why the entity set
+/// never depends on the graph setting.
+fn assemble_output(
+    source: &TextSource,
+    tree: &tree_sitter::Tree,
+    entities: &[CodeEntity<'_>],
+    graph_context: WalkContext,
+    code_format: FileFormat,
+    (max_chars, overlap_chars): (usize, usize),
+) -> ExtractionOutput {
     let mut output = Vec::new();
     let mut entity_heads = Vec::with_capacity(entities.len());
-    for entity in &entities {
+    for entity in entities {
         // Fragments are appended contiguously in walk order, so the output
         // length before each append is that entity's head fragment index.
         entity_heads.push(output.len());
         append_entity(source, entity, max_chars, overlap_chars, &mut output);
     }
-    // Gap chunks follow every entity, so they leave the head indexes intact.
-    if code_format == FileFormat::Php && !output.is_empty() {
-        append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
-    }
+    // Anonymous retrieval chunks follow the symbols, preserving graph ordinals.
+    append_code_gaps(
+        source,
+        entities,
+        tree.root_node(),
+        code_format,
+        max_chars,
+        overlap_chars,
+        &mut output,
+    );
     if output.is_empty() {
-        Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        })
-    } else {
-        // The symbol table is complete now, so partitioning resolves forward
-        // references as readily as backward ones. A walk that recorded nothing
-        // produces no graph at all, so assembly skips it.
+        // A file that declares no entity the walk could bound still describes
+        // its translation units when it carries preprocessor directives — a
+        // header of nothing but `#define`s and `#include`s is exactly that, and
+        // the resolver needs those directives to read the includer's macro
+        // state. The graph is therefore kept when the scan recorded one.
         let partitioned = graph_context
             .is_collecting()
-            .then(|| partition_walk(graph_context, entity_heads));
-        Ok(ExtractionOutput {
-            fragments: output,
+            .then(|| partition_walk(graph_context, entity_heads))
+            .filter(|graph| !graph.directives.is_empty());
+        return ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
             graph: partitioned,
-        })
+        };
+    }
+    // The symbol table is complete now, so partitioning resolves forward
+    // references as readily as backward ones. A walk that recorded nothing
+    // produces no graph at all, so assembly skips it.
+    let partitioned = graph_context
+        .is_collecting()
+        .then(|| partition_walk(graph_context, entity_heads));
+    ExtractionOutput {
+        fragments: output,
+        graph: partitioned,
     }
 }
 
@@ -203,6 +254,25 @@ fn fallback(source: &TextSource, max_chars: usize, overlap_chars: usize) -> Vec<
     extract_plain_text_entities(source, max_chars, overlap_chars)
 }
 
+/// What a file no adapter parses still yields: its text, chunked, and no
+/// graph. Nothing was walked, so there are no edges to partition.
+fn fallback_output(
+    source: &TextSource,
+    max_chars: usize,
+    overlap_chars: usize,
+) -> ExtractionOutput {
+    ExtractionOutput {
+        fragments: fallback(source, max_chars, overlap_chars),
+        graph: None,
+    }
+}
+
+// The flags carry independent extraction facts; the entity is the one place
+// they are gathered before metadata is written.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate extracted fact carried into metadata"
+)]
 #[derive(Debug)]
 struct CodeEntity<'tree> {
     node: Node<'tree>,
@@ -223,12 +293,303 @@ struct CodeEntity<'tree> {
     /// The Java `package` this source declares, empty for the default package;
     /// `None` for every other language.
     package: Option<String>,
+    /// Whether a C/C++ declaration has internal linkage (unnamed namespace or
+    /// file-scope `static`), so only its own file can address it by name.
+    has_internal_linkage: bool,
+    /// Whether this entity introduces a type's name, as opposed to carrying it
+    /// (`impl Target`, which is a scope named after the type it implements).
+    declares_type: bool,
+    /// Name this entity is another spelling of, when its initializer is a bare
+    /// name (`const dispatch = send`). Bare calls through the alias reach the
+    /// aliased function, and an import of the alias follows the same link.
+    alias_of: Option<String>,
+    /// Properties an object literal initializer binds (`{ run: right }`), in
+    /// the literal's order, a later property replacing an earlier one of its
+    /// key. A member call on this entity reaches the value its key last named.
+    object_members: Vec<MemberAlias>,
+    /// Value a later property of the same key replaces this declaration with.
+    overwritten_by: Option<String>,
+    /// Names an `export { local as exported }` clause republishes this
+    /// declaration under. The clause is a statement of its own, so the
+    /// declared node never spells these names; they are attached after the
+    /// walk from a scan of the file's export clauses, and an import of one
+    /// binds to the declaration it renames.
+    exported_as: Vec<String>,
 }
 
-// The entity branch shares first/scope entity indices and the scope boundary
-// with the call, binding and inheritance scans below it; extracting it would
-// force an eight-argument helper, trading one lint for another.
+/// Whether a Rust item spells a name the value namespace does not hold, so a
+/// bare call never reaches it.
+///
+/// `impl save` names the type it implements, which is a scope rather than a
+/// value, and a trait, type alias, enum, union and a named-field struct each
+/// declare a type without a constructible value. A tuple struct and a unit
+/// struct do declare a constructor, so they stay candidates: `struct save(i32)`
+/// beside `fn save` is a conflict rustc rejects.
+fn rust_type_namespace_only(node: Node<'_>) -> bool {
+    match node.kind() {
+        "impl_item" | "trait_item" | "type_item" | "enum_item" | "union_item" => true,
+        "struct_item" => node
+            .child_by_field_name("body")
+            .is_some_and(|body| body.kind() == "field_declaration_list"),
+        _ => false,
+    }
+}
+
+// A node's entities and their scans share one index sequence and one
+// boundary; splitting the entity branch from the scope descent keeps both in
+// one place for the walk and for the types a body declares.
 #[allow(clippy::too_many_lines)]
+fn walk_entity_node<'tree>(
+    child: Node<'tree>,
+    adapter: &LanguageAdapter,
+    source: &[u8],
+    breadcrumb: &[String],
+    out: &mut Vec<CodeEntity<'tree>>,
+    graph_context: &mut WalkContext,
+    format: FileFormat,
+) -> Option<usize> {
+    let start_index = out.len();
+    let mut first_entity_index = None;
+    let mut scope_entity_index = None;
+    // The facts below describe references the resolver follows, and nothing
+    // retrieval reads, so a walk that records no graph leaves them at their
+    // defaults instead of scanning for them.
+    let collecting = graph_context.is_collecting();
+    // A declaration that spells an object literal states every member's value
+    // once; each entity the declaration produces reads that single scan.
+    let object_literal = collecting
+        .then(|| ObjectLiteral::read(child, source))
+        .flatten();
+    for entity in adapter.resolve_entities(child, source) {
+        let entity_index = graph_context.next_entity_index();
+        first_entity_index.get_or_insert(entity_index);
+        scope_entity_index = Some(entity_index);
+        let name = adapter.extract_name(entity, source);
+        let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
+        let symbol_type = adapter.classify(entity);
+        // Declarations stay out of the in-file symbol table: an in-file call
+        // must not bind to a bodyless prototype when a definition exists
+        // anywhere in the workspace, and the resolver's name index applies that
+        // preference globally.
+        if !adapter.is_declaration(entity) {
+            graph_context.register_symbol(name.as_deref(), entity_index);
+            graph_context.register_scoped_symbol(name.as_deref(), entity_index);
+            // A module puts the items it declares in bare scope for every body
+            // inside it, and a function does the same for the bodies nested in
+            // it (`fn outer() { fn save() {} }` answers `inner`'s `save()`),
+            // unlike a class, whose members need a receiver. Other languages
+            // reach a namespace through the resolver's scope rules, where a
+            // type's members are searched before the namespace.
+            if format == FileFormat::Rust {
+                match symbol_type {
+                    Some(SymbolType::Module) => graph_context.register_module_scope(entity_index),
+                    Some(SymbolType::Function) => {
+                        graph_context.register_function_scope(entity_index);
+                    }
+                    // Only a value answers a bare call. Every other item that
+                    // spells a name in this position keeps it in the type
+                    // namespace; the helper lists them by AST shape.
+                    _ if rust_type_namespace_only(entity) => {
+                        graph_context.register_type_namespace_item(entity_index);
+                    }
+                    _ => {}
+                }
+                // The item's bare scope ends with the block that declares it:
+                // `{ fn save() {} } save()` written after that block reaches
+                // the enclosing spelling, not the one the closed block declared.
+                if let Some(block) = entity.parent() {
+                    let start = block.start_position();
+                    let end = block.end_position();
+                    graph_context.register_item_extent(
+                        entity_index,
+                        (start.row + 1, start.column),
+                        (end.row + 1, end.column),
+                    );
+                }
+            }
+        }
+        graph_context.add_contains_edge(
+            entity_index,
+            entity.start_position().row + 1,
+            entity.start_position().column,
+        );
+        // The alias belongs to this entity's own name, so it is read before the
+        // name moves into the record.
+        let alias_of = collecting
+            .then(|| alias_target_of(entity, source, format))
+            .flatten()
+            .filter(|(aliased, _)| name.as_deref() == Some(aliased.as_str()))
+            .map(|(_, target)| target);
+        let object_members = object_literal
+            .as_ref()
+            .filter(|literal| literal.declares(entity))
+            .map(|literal| {
+                literal
+                    .aliases()
+                    .iter()
+                    .map(|(name, target)| MemberAlias {
+                        name: name.clone(),
+                        target: target.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(CodeEntity {
+            node: entity,
+            language: adapter.language(),
+            name,
+            symbol_type,
+            breadcrumb: entity_breadcrumb,
+            signature: adapter.extract_signature(entity, source),
+            documentation: adapter.extract_doc(entity, source),
+            arity: adapter.extract_arity(entity, source),
+            is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
+            format,
+            is_declaration: adapter.is_declaration(entity),
+            package: java_package(entity, source, format),
+            has_internal_linkage: collecting && adapter.has_internal_linkage(entity, source),
+            declares_type: collecting && declares_type(entity),
+            alias_of,
+            object_members,
+            overwritten_by: object_literal
+                .as_ref()
+                .and_then(|literal| literal.overwritten_by(entity, source)),
+            exported_as: Vec::new(),
+        });
+    }
+    // A declaration can emit several object members. Each member owns its
+    // calls and nested definitions, independently of its siblings.
+    for (ordinal, entity) in out.iter().enumerate().skip(start_index) {
+        let entity_index = first_entity_index.expect("entity ordinal") + ordinal - start_index;
+        let entity_scope = adapter.is_scope(entity.node);
+        let member_owned = |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
+        let local_type = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier"
+            )
+        };
+        let has_member_entities = entity.node.id() == child.id() && out.len() > start_index + 1;
+        // A body's own types are read after this entity, so its scans leave
+        // them out: what a member writes belongs to the member, not to the
+        // function that declares the class.
+        let boundary: Option<&dyn Fn(Node<'_>) -> bool> = if entity_scope || has_member_entities {
+            Some(&member_owned as &dyn Fn(Node<'_>) -> bool)
+        } else if format == FileFormat::Cpp && entity.node.kind() == "function_definition" {
+            Some(&local_type as &dyn Fn(Node<'_>) -> bool)
+        } else {
+            None
+        };
+        scan_call_edges(entity.node, entity_index, source, graph_context, boundary);
+        scan_binding_declarations(
+            entity.node,
+            entity_index,
+            source,
+            format,
+            graph_context,
+            boundary,
+        );
+        collect_inheritance_edges(entity.node, source, format, entity_index, graph_context);
+    }
+    // Synthetic members have no separate declaration walk. Descend their
+    // scopes here; ordinary scope nodes are handled by the caller.
+    let member_scopes: Vec<_> = out[start_index..]
+        .iter()
+        .enumerate()
+        .filter(|(_, entity)| entity.node.id() != child.id() && adapter.is_scope(entity.node))
+        .map(|(offset, entity)| {
+            let mut scope = entity.breadcrumb.clone();
+            scope.extend(entity.name.clone());
+            (
+                first_entity_index.expect("entity ordinal") + offset,
+                entity.node,
+                scope,
+            )
+        })
+        .collect();
+    for (owner, member, scope) in member_scopes {
+        graph_context.push_scope(owner);
+        walk_code_node(member, adapter, source, &scope, out, graph_context, format);
+        graph_context.pop_scope();
+    }
+    // A type a body declares (`void f() { class L { ... }; }`) is a type that
+    // body names: its members own the calls they write, and a name the body
+    // binds to it reads their members.
+    if format == FileFormat::Cpp
+        && child.kind() == "function_definition"
+        && let Some(body) = child.child_by_field_name("body")
+        && let Some(name) = adapter.extract_name(child, source)
+    {
+        let mut scope = breadcrumb.to_vec();
+        scope.push(name);
+        walk_body_types(body, adapter, source, &scope, out, graph_context, format);
+    }
+    scope_entity_index
+}
+
+/// Reads the types a body declares, leaving its statements alone.
+///
+/// The entity walk bounds entities at a declaration, so a body's types would
+/// otherwise be invisible: `void f() { class L { ... }; }` declares a type the
+/// file can name, and its members are entities of their own.
+fn walk_body_types<'tree>(
+    body: Node<'tree>,
+    adapter: &LanguageAdapter,
+    source: &[u8],
+    breadcrumb: &[String],
+    out: &mut Vec<CodeEntity<'tree>>,
+    graph_context: &mut WalkContext,
+    format: FileFormat,
+) {
+    for child in named_children(body) {
+        if !adapter.is_entity(child) {
+            // A statement may nest its own block (`if (…) { class L {}; }`).
+            walk_body_types(
+                child,
+                adapter,
+                source,
+                breadcrumb,
+                out,
+                graph_context,
+                format,
+            );
+            continue;
+        }
+        if !adapter.is_scope(child) {
+            continue;
+        }
+        let owner = walk_entity_node(
+            child,
+            adapter,
+            source,
+            breadcrumb,
+            out,
+            graph_context,
+            format,
+        );
+        let mut scope = breadcrumb.to_vec();
+        if let Some(name) = adapter.extract_name(child, source) {
+            scope.push(name);
+        }
+        if let Some(owner) = owner {
+            graph_context.push_scope(owner);
+        }
+        let scope_node = adapter.enter_scope_node(child);
+        walk_code_node(
+            scope_node,
+            adapter,
+            source,
+            &scope,
+            out,
+            graph_context,
+            format,
+        );
+        if owner.is_some() {
+            graph_context.pop_scope();
+        }
+    }
+}
+
 fn walk_code_node<'tree>(
     node: Node<'tree>,
     adapter: &LanguageAdapter,
@@ -241,95 +602,27 @@ fn walk_code_node<'tree>(
     for child in named_children(node) {
         let is_scope = adapter.is_scope(child);
         let is_entity = adapter.is_entity(child);
-        let mut first_entity_index = None;
-        let mut scope_entity_index = None;
 
-        if is_entity {
-            let start_index = out.len();
-            let mut entity_indexes = Vec::new();
-            for entity in adapter.resolve_entities(child, source) {
-                let entity_index = graph_context.next_entity_index();
-                first_entity_index.get_or_insert(entity_index);
-                entity_indexes.push(entity_index);
-                scope_entity_index = Some(entity_index);
-                let name = adapter.extract_name(entity, source);
-                let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
-                // Declarations stay out of the in-file symbol table: an
-                // in-file call must not bind to a bodyless prototype when a
-                // definition exists anywhere in the workspace, and the
-                // resolver's name index applies that preference globally.
-                if !adapter.is_declaration(entity) {
-                    graph_context.register_symbol(name.as_deref(), entity_index);
-                    graph_context.register_scoped_symbol(name.as_deref(), entity_index);
-                }
-                graph_context.add_contains_edge(
-                    entity_index,
-                    entity.start_position().row + 1,
-                    entity.start_position().column,
-                );
-                out.push(CodeEntity {
-                    node: entity,
-                    language: adapter.language(),
-                    name,
-                    symbol_type: adapter.classify(entity),
-                    breadcrumb: entity_breadcrumb,
-                    signature: adapter.extract_signature(entity, source),
-                    documentation: adapter.extract_doc(entity, source),
-                    arity: adapter.extract_arity(entity, source),
-                    is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
-                    format,
-                    is_declaration: adapter.is_declaration(entity),
-                    package: java_package(entity, source, format),
-                });
-            }
-            // Name-based references are collected from the first resolved
-            // entity's subtree: the walk does not descend into entity bodies,
-            // so this attributes call sites and inheritance clauses to their
-            // owning entity. A container entity (class/namespace) also walks
-            // as a scope, so its scan must skip nested member subtrees —
-            // those claim their own call sites when the scope recursion
-            // reaches them, and claiming them twice duplicates edges.
-            if let (Some(first_entity_index), Some(first_entity)) =
-                (first_entity_index, out.get(start_index))
-            {
-                let member_owned =
-                    |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
-                let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
-                    is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
-                // A split PHP statement resolves to its elements, so the first
-                // element's subtree misses the initializers of the others,
-                // as in `const A = new Foo, B = new Bar;`.
-                let scanned = if format == FileFormat::Php {
-                    entity_indexes.len()
-                } else {
-                    1
-                };
-                for (offset, entity_index) in entity_indexes.iter().take(scanned).enumerate() {
-                    let entity_node = out[start_index + offset].node;
-                    scan_call_edges(entity_node, *entity_index, source, graph_context, boundary);
-                    scan_binding_declarations(
-                        entity_node,
-                        *entity_index,
-                        source,
-                        format,
-                        graph_context,
-                        boundary,
-                    );
-                }
-                collect_inheritance_edges(
-                    first_entity.node,
-                    source,
-                    format,
-                    first_entity_index,
-                    graph_context,
-                );
-            }
-        }
-
+        let scope_entity_index = is_entity.then(|| {
+            walk_entity_node(
+                child,
+                adapter,
+                source,
+                breadcrumb,
+                out,
+                graph_context,
+                format,
+            )
+        });
+        let scope_entity_index = scope_entity_index.flatten();
         if is_scope {
             let name = adapter.extract_name(child, source);
             let mut child_breadcrumb = breadcrumb.to_vec();
-            if let Some(name) = name {
+            // Static initializers own their direct calls; nested functions
+            // retain the class-qualified names used by call hierarchy clients.
+            if let Some(name) = name
+                && child.kind() != "class_static_block"
+            {
                 child_breadcrumb.push(name);
             }
             let scope_node = adapter.enter_scope_node(child);
@@ -402,21 +695,39 @@ fn append_entity(
     output.push(ExtractedEntity {
         index: output.len(),
         source_range: Range::Text(range),
+        source_map: None,
         fragments: text_fragments(&content, content_max, content_overlap),
         content: Content::Text(content),
         metadata: Some(metadata),
     });
 }
 
-// PHP files mix declarations with templates and top-level statements. The
-// source outside every declaration stays searchable as plain-text chunks.
-fn append_php_gaps(
+// PHP retains all code outside declarations. JS/TS also needs the bodies of
+// callbacks with no symbol owner: excluding their local variables must not
+// remove their contents from retrieval. C/C++ keeps the text no entity bounded
+// — a file whose only entity owns a call still has to answer for the constants,
+// macros and includes beside it. Existing entities remain authoritative.
+fn append_code_gaps(
     source: &TextSource,
     entities: &[CodeEntity<'_>],
+    root: Node<'_>,
+    format: FileFormat,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
+    if output.is_empty()
+        || !matches!(
+            format,
+            FileFormat::C
+                | FileFormat::Cpp
+                | FileFormat::JavaScript
+                | FileFormat::Php
+                | FileFormat::TypeScript
+        )
+    {
+        return;
+    }
     let mut covered = Vec::with_capacity(entities.len() * 2);
     for entity in entities {
         covered.push((entity.node.start_byte(), entity.node.end_byte()));
@@ -424,7 +735,11 @@ fn append_php_gaps(
         // inherit theirs from the statement, so walk back from there, as
         // `extract_doc` does, leaving comments between elements searchable.
         if entity.documentation.is_some() {
-            let declaration = php_declaration(entity.node);
+            let declaration = if format == FileFormat::Php {
+                php_declaration(entity.node)
+            } else {
+                entity.node
+            };
             let mut sibling = declaration.prev_named_sibling();
             let mut run: Option<(usize, usize)> = None;
             while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
@@ -448,6 +763,28 @@ fn append_php_gaps(
     }
     gaps.push((offset, source.text.len()));
 
+    // A JS/TS gap is a statement of a body no entity owns; only callbacks
+    // carry contents worth searching, and indexing the rest would duplicate
+    // the statements between declarations. C/C++ and PHP gaps are the whole
+    // uncovered text, so they are taken as they are.
+    if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript) {
+        let mut callbacks = Vec::new();
+        collect_uncovered_callbacks(root, &gaps, &mut callbacks);
+        gaps = callbacks
+            .into_iter()
+            .flat_map(|(start, end)| {
+                let first = gaps.partition_point(|&(_, gap_end)| gap_end <= start);
+                gaps[first..]
+                    .iter()
+                    .take_while(move |&&(gap_start, _)| gap_start < end)
+                    .map(move |&(gap_start, gap_end)| (start.max(gap_start), end.min(gap_end)))
+            })
+            .collect();
+    }
+    if gaps.is_empty() {
+        return;
+    }
+
     let line_offsets = line_byte_offsets(&source.text);
     let mut gap_source = source.clone();
     for (start, end) in gaps {
@@ -462,6 +799,31 @@ fn append_php_gaps(
         let remapped =
             remap_script_block_entities(source, chunks, output.len(), &line_offsets, text_start);
         output.extend(remapped);
+    }
+}
+
+fn collect_uncovered_callbacks(
+    node: Node<'_>,
+    gaps: &[(usize, usize)],
+    callbacks: &mut Vec<(usize, usize)>,
+) {
+    let first = gaps.partition_point(|&(_, end)| end <= node.start_byte());
+    if gaps
+        .get(first)
+        .is_none_or(|&(start, _)| start >= node.end_byte())
+    {
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "arrow_function" | "function_expression" | "generator_function" | "method_definition"
+    ) {
+        // An outer callback contains its nested callbacks; do not index both.
+        callbacks.push((node.start_byte(), node.end_byte()));
+        return;
+    }
+    for child in named_children(node) {
+        collect_uncovered_callbacks(child, gaps, callbacks);
     }
 }
 
@@ -496,7 +858,76 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         is_exported: entity.is_exported,
         is_declaration: entity.is_declaration,
         package: entity.package.clone(),
+        has_internal_linkage: entity.has_internal_linkage,
+        declares_type: entity.declares_type,
+        alias_of: entity.alias_of.clone(),
+        object_members: entity.object_members.clone(),
+        overwritten_by: entity.overwritten_by.clone(),
+        exported_as: entity.exported_as.clone(),
     })
+}
+
+/// Attaches the names the file's export clauses republish each declaration
+/// under, so an import of one of them binds to the declaration it renames.
+fn attach_export_aliases(
+    root: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+    entities: &mut [CodeEntity<'_>],
+) {
+    let aliases = scan_export_aliases(root, source, format);
+    for entity in entities {
+        let Some(names) = entity.name.as_deref().and_then(|local| aliases.get(local)) else {
+            continue;
+        };
+        entity.exported_as.clone_from(names);
+        entity.is_exported = true;
+    }
+}
+
+/// Exported names an `export { local as exported }` clause republishes, keyed
+/// by the local name it re-exports.
+///
+/// Only TypeScript and JavaScript spell the rename in a statement of its own;
+/// the other languages rename at the declaration, which the walk already reads.
+fn scan_export_aliases(
+    root: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+) -> HashMap<String, Vec<String>> {
+    let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
+    if !matches!(format, FileFormat::TypeScript | FileFormat::JavaScript) {
+        return aliases;
+    }
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "export_statement" {
+            for clause in named_children(node) {
+                if clause.kind() != "export_clause" {
+                    continue;
+                }
+                for specifier in named_children(clause) {
+                    if specifier.kind() != "export_specifier" {
+                        continue;
+                    }
+                    let (Some(local), Some(alias)) = (
+                        specifier.child_by_field_name("name"),
+                        specifier.child_by_field_name("alias"),
+                    ) else {
+                        // An unrenamed specifier exports the name it already
+                        // has, which the name index answers on its own.
+                        continue;
+                    };
+                    aliases
+                        .entry(text(local, source).to_owned())
+                        .or_default()
+                        .push(text(alias, source).to_owned());
+                }
+            }
+        }
+        pending.extend(named_children(node));
+    }
+    aliases
 }
 
 /// The `package` a Java source declares, read from the declaration at the root
@@ -698,8 +1129,8 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::domain::{
-        CodeMetadata, Content, EntityMetadata, FileFormat, Language as CodeLanguage, Range,
-        SymbolType, TextRange,
+        CodeMetadata, Content, EntityMetadata, FileFormat, Language as CodeLanguage, MemberAlias,
+        Range, SymbolType, TextRange,
     };
 
     use super::super::{test_content, test_metadata};
@@ -753,7 +1184,9 @@ mod tests {
                     usize::try_from(local.start_offset()).expect("fragment start"),
                     usize::try_from(local.end_offset()).expect("fragment end"),
                 ),
-                Range::Text(_) => panic!("fragments store byte offsets without text coordinates"),
+                Range::Text(_) | Range::Pdf(_) => {
+                    panic!("fragments store byte offsets without text coordinates")
+                }
             };
             assert!(start < end && end <= content.len());
             let selected = source
@@ -823,6 +1256,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -843,6 +1282,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -870,7 +1315,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each language's whole metadata is asserted in one fixture"
+    )]
     fn preserves_php_symbols_scopes_properties_and_constants() {
         let source = test_source(
             FileFormat::Php,
@@ -906,7 +1354,12 @@ mod tests {
             ]
             .join("\n"),
         );
-        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        // The indexing walk computes every fact retrieval and the resolver
+        // read; only the graph-free search walk leaves the resolver's own
+        // facts at their defaults.
+        let fragments = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("php extraction")
+            .fragments;
         let expected: [(&str, SymbolType, &str, &str, Option<&str>); 16] = [
             (
                 "ChargerInterface",
@@ -1037,6 +1490,19 @@ mod tests {
                     is_exported: false,
                     is_declaration: false,
                     package: None,
+                    has_internal_linkage: false,
+                    // A PHP class, interface or enum introduces the type's
+                    // name; a trait only groups members, and the members
+                    // inside either never do.
+                    declares_type: !signature.starts_with("trait ")
+                        && matches!(
+                            kind,
+                            SymbolType::Class | SymbolType::Enum | SymbolType::Interface
+                        ),
+                    alias_of: None,
+                    object_members: Vec::new(),
+                    overwritten_by: None,
+                    exported_as: Vec::new(),
                 })),
                 "{name}"
             );
@@ -1222,6 +1688,9 @@ mod tests {
             .collect()
     }
 
+    // The three languages are one regression: the same extractor reads each
+    // metadata field, and the assertions compare side by side.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn preserves_c_go_and_python_language_specific_metadata() {
         let c_source = test_source(
@@ -1244,6 +1713,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -1277,6 +1752,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -1311,6 +1792,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
     }
@@ -1419,6 +1906,22 @@ mod tests {
         ));
     }
 
+    /// Retrieval and the resolver read different facts: the graph-free walk
+    /// keeps every entity and its text, and leaves the resolver's own facts at
+    /// their defaults instead of computing what it would drop.
+    fn graph_facts_cleared(metadata: Option<&EntityMetadata>) -> Option<EntityMetadata> {
+        let mut metadata = metadata.cloned()?;
+        if let EntityMetadata::Code(code) = &mut metadata {
+            code.has_internal_linkage = false;
+            code.declares_type = false;
+            code.alias_of = None;
+            code.object_members.clear();
+            code.overwritten_by = None;
+            code.exported_as.clear();
+        }
+        Some(metadata)
+    }
+
     #[test]
     fn skipping_graph_collection_keeps_every_entity() {
         let source = test_source(
@@ -1439,8 +1942,179 @@ mod tests {
             "a graph-free workspace must not collect one"
         );
         assert_eq!(
-            without.fragments, with_graph.fragments,
-            "the indexed content must not depend on the graph setting"
+            without.fragments.len(),
+            with_graph.fragments.len(),
+            "the entity set must not depend on the graph setting"
+        );
+        for (without, with_graph) in without.fragments.iter().zip(&with_graph.fragments) {
+            assert_eq!(without.content, with_graph.content, "indexed text");
+            assert_eq!(without.source_range, with_graph.source_range, "text range");
+            assert_eq!(
+                graph_facts_cleared(test_metadata(without)),
+                graph_facts_cleared(test_metadata(with_graph)),
+                "retrieval metadata"
+            );
+        }
+        assert!(
+            without.fragments.iter().all(|fragment| matches!(
+                test_metadata(fragment),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    has_internal_linkage: false,
+                    declares_type: false,
+                    alias_of: None,
+                    object_members,
+                    overwritten_by: None,
+                    exported_as,
+                    ..
+                })) if object_members.is_empty() && exported_as.is_empty()
+            )),
+            "a graph-free walk leaves the resolver's facts at their defaults"
+        );
+        // The graph-setting must not change the facts the resolver reads either.
+        assert!(
+            with_graph.fragments.iter().any(|fragment| matches!(
+                test_metadata(fragment),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    declares_type: true,
+                    ..
+                }))
+            )),
+            "the struct introduces its type's name"
+        );
+    }
+
+    #[test]
+    fn unused_initializer_entities_keep_the_files_other_text_searchable() {
+        // `ready` owns the initializer's call, so the walk emits it as an
+        // entity. The file used to fall back to its whole text; the entities
+        // alone would drop the constant beside them from retrieval.
+        let source = test_source(
+            FileFormat::Cpp,
+            "marker.cpp",
+            concat!(
+                "#include \"api.h\"\n",
+                "const char *marker = \"needle\";\n",
+                "int ready = initialize();\n",
+            ),
+        );
+        for fragments in [
+            extract_for_indexing(&source, ChunkOptions::default())
+                .expect("graph extraction")
+                .fragments,
+            crate::extraction::extract_without_graph(&source, ChunkOptions::default())
+                .expect("graph-free extraction")
+                .fragments,
+        ] {
+            assert!(
+                fragments.iter().any(|fragment| matches!(
+                    &fragment.content,
+                    Content::Code(content) if content.contains("needle")
+                )),
+                "the constant stays searchable beside the initializer entity"
+            );
+            assert!(
+                fragments.iter().any(|fragment| matches!(
+                    &fragment.content,
+                    Content::Code(content) if content.contains("#include \"api.h\"")
+                )),
+                "the include stays searchable"
+            );
+            assert!(
+                fragments.iter().any(|fragment| matches!(
+                    test_metadata(fragment),
+                    Some(EntityMetadata::Code(CodeMetadata {
+                        symbol_name: Some(name),
+                        ..
+                    })) if name == "ready"
+                )),
+                "the initializer stays an entity"
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_objects_properties_do_not_shadow_the_files_own_function() {
+        // The property is no workspace-level symbol, so its bare name must not
+        // enter the enclosing body's local table: `run()` calls the file's
+        // function, not the object's property.
+        let source = test_source(
+            FileFormat::JavaScript,
+            "shadow.js",
+            concat!(
+                "function run() {}\n",
+                "function outer() {\n",
+                "  const local = { run: () => {} };\n",
+                "  run();\n",
+                "}\n",
+            ),
+        );
+        let extracted =
+            extract_for_indexing(&source, ChunkOptions::default()).expect("graph extraction");
+        assert!(
+            !extracted.fragments.iter().any(|fragment| matches!(
+                test_metadata(fragment),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    symbol_name: Some(name),
+                    scope: Some(scope),
+                    ..
+                })) if name == "run" && scope.contains("local")
+            )),
+            "a local object's property is not an entity"
+        );
+        let graph = extracted.graph.expect("code sources carry a graph");
+        let calls = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_name == "run" && edge.receiver_name.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "the bare call is the outer body's only one");
+        assert_ne!(
+            calls[0].target_index, calls[0].source_index,
+            "the call must not bind the property that overwrote its name"
+        );
+    }
+
+    #[test]
+    fn object_literal_members_keep_last_property_wins_at_scale() {
+        // Every key but the last is overwritten by a later property of its
+        // name: one scan of the literal answers all of them.
+        use std::fmt::Write as _;
+
+        let mut literal = String::from("export const api = {\n");
+        for index in 0..600 {
+            write!(
+                literal,
+                "  run{index}: first{index},\n  run{index}: second{index},\n"
+            )
+            .expect("append to a string");
+        }
+        literal.push_str("};\nfunction second0() {}\nfunction first0() {}\n");
+        let source = test_source(FileFormat::TypeScript, "scale.ts", &literal);
+        let extracted =
+            extract_for_indexing(&source, ChunkOptions::default()).expect("graph extraction");
+        let metadata = extracted
+            .fragments
+            .iter()
+            .filter_map(test_metadata)
+            .find_map(|metadata| match metadata {
+                EntityMetadata::Code(code) if code.symbol_name.as_deref() == Some("api") => {
+                    Some(code)
+                }
+                _ => None,
+            })
+            .expect("the object stays an entity");
+        assert_eq!(
+            metadata.object_members.len(),
+            600,
+            "one alias per key, the later property of each name replacing the earlier"
+        );
+        assert_eq!(
+            metadata.object_members[0],
+            MemberAlias {
+                name: "run0".to_owned(),
+                target: "second0".to_owned(),
+            },
+            "the later property of a key states the member's value"
         );
     }
 
@@ -2314,13 +2988,19 @@ public class Service {
     }
 
     #[test]
-    fn keeps_unclassified_type_declarations_without_value_fallback() {
+    fn classifies_type_declarations_without_value_fallback() {
         let fixtures = [
             (
                 FileFormat::Go,
                 "package demo\ntype UserID int",
                 "UserID",
-                None,
+                Some(SymbolType::Alias),
+            ),
+            (
+                FileFormat::Go,
+                "package demo\ntype Handler func()",
+                "Handler",
+                Some(SymbolType::Alias),
             ),
             (
                 FileFormat::Rust,
@@ -2459,6 +3139,57 @@ public class Service {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, ["limit", "run"]);
+    }
+
+    #[test]
+    fn keeps_unowned_callbacks_searchable_without_local_symbols() {
+        let text = "const head = 1;\n\
+                    function helper() {}\n\
+                    suite('outside', () => {\n\
+                      const expected = 'callbackneedle🙂';\n\
+                      function nested() { return 'ownednested'; }\n\
+                      suite('inside', function() { const inner = 'innerneedle'; helper(); });\n\
+                    });\n\
+                    register({ run() { const methodLocal = 'methodneedle'; } });\n\
+                    const tail = 2;\n\
+                    function covered() { register(() => { const inside = 'coveredneedle'; }); }\n";
+        for format in [FileFormat::JavaScript, FileFormat::TypeScript] {
+            let source = test_source(format, "callbacks", text);
+            for collect_graph in [false, true] {
+                let output = super::extract_for_indexing(
+                    &source,
+                    ChunkOptions {
+                        max_chunk_chars: Some(120),
+                        chunk_overlap_chars: Some(20),
+                    },
+                    collect_graph,
+                )
+                .expect("callback extraction");
+                let names = output
+                    .fragments
+                    .iter()
+                    .filter_map(|entity| match test_metadata(entity) {
+                        Some(EntityMetadata::Code(metadata)) => metadata.symbol_name.as_deref(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(names, ["head", "helper", "nested", "tail", "covered"]);
+                let anonymous = plain_chunks(&output.fragments).join("\n");
+                assert!(anonymous.contains("callbackneedle🙂"), "{format:?}");
+                assert!(anonymous.contains("innerneedle"), "{format:?}");
+                assert!(anonymous.contains("methodneedle"), "{format:?}");
+                // Bodies already owned by symbols are not duplicated in gap chunks.
+                assert!(!anonymous.contains("ownednested"));
+                assert!(!anonymous.contains("coveredneedle"));
+                for (index, entity) in output.fragments.iter().enumerate() {
+                    assert_source_backed(&source, entity);
+                    assert_eq!(entity.index, index);
+                }
+                if let Some(graph) = output.graph {
+                    assert_eq!(graph.head_fragment_indices.len(), names.len());
+                }
+            }
+        }
     }
 
     #[test]
@@ -3072,6 +3803,181 @@ public class Service {
         assert_eq!(
             (pending[3].owner_index, pending[3].ref_name.as_str()),
             (2, "helper")
+        );
+    }
+
+    #[test]
+    fn module_local_definition_shadows_the_file_scope_for_bare_calls() {
+        use crate::domain::GraphEdgeKind;
+
+        // A `mod storage` declaring its own `save` beside a top-level `save`:
+        // `storage::flush`'s bare `save()` reaches the module's definition, and
+        // the top-level one keeps only the callers that name it from file scope.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "/// Normalize a value before storing it.\n",
+                "pub fn normalize(value: i32) -> i32 { value.max(0) }\n",
+                "\n",
+                "pub fn save(value: i32) -> i32 { normalize(value) }\n",
+                "\n",
+                "pub fn import_record(value: i32) -> i32 { save(value) }\n",
+                "\n",
+                "pub fn export_record(value: i32) -> i32 { save(value) }\n",
+                "\n",
+                "pub mod storage {\n",
+                "    pub fn save(value: i32) -> i32 { super::normalize(value) }\n",
+                "\n",
+                "    pub fn flush(value: i32) -> i32 { save(value) }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: normalize 0, save 1, import_record 2, export_record 3,
+        // storage 4, storage::save 5, storage::flush 6.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(1, 0), (2, 1), (3, 1), (6, 5)],
+            "`flush` reaches the module's own `save`, not the file-level namesake"
+        );
+    }
+
+    #[test]
+    fn nested_function_items_answer_the_bare_calls_of_their_bodies() {
+        use crate::domain::GraphEdgeKind;
+
+        // A function's items are in bare scope for the bodies nested in it:
+        // `inner`'s `save()` reaches `outer::save`. The module around them
+        // declares a `save` of its own, and the nearer function item wins
+        // before the walk accepts that module's answer.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value * 2 }\n",
+                "\n",
+                "    pub fn outer(value: i32) -> i32 {\n",
+                "        fn save(value: i32) -> i32 { value + 1 }\n",
+                "\n",
+                "        fn inner() -> i32 { save(1) }\n",
+                "\n",
+                "        inner() + save(value)\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: save 0, m 1, m::save 2, m::outer 3, outer::save 4,
+        // outer::inner 5.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(3, 5), (3, 4), (5, 4)],
+            "`inner` reaches the item its enclosing function declares"
+        );
+    }
+
+    #[test]
+    fn a_module_beside_a_function_of_the_same_name_keeps_the_call_on_the_function() {
+        use crate::domain::GraphEdgeKind;
+
+        // Rust keeps the type and value namespaces apart, so `mod save` may sit
+        // beside `fn save`. A bare `save()` is a call, and only the function
+        // answers it whatever order the two are declared in.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value * 2 }\n",
+                "\n",
+                "    pub mod save {}\n",
+                "\n",
+                "    pub fn flush() -> i32 { save(1) }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: save 0, m 1, m::save 2, m::save (module) 3, m::flush 4.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(4, 2)],
+            "`flush` calls the module's function, not the same-named module"
+        );
+    }
+
+    #[test]
+    fn a_local_use_declaration_keeps_its_call_pending() {
+        use crate::domain::GraphEdgeKind;
+
+        // `use crate::other::save;` inside `flush` binds the spelling nearer
+        // than the module's own `save`: which function the import names is the
+        // resolver's question, so the call must not bind the module's namesake.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "    pub fn flush(value: i32) -> i32 {\n",
+                "        use crate::other::save;\n",
+                "\n",
+                "        save(value)\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: m 0, m::save 1, m::flush 2.
+        assert!(
+            graph
+                .resolved
+                .iter()
+                .all(|edge| edge.ref_kind != GraphEdgeKind::Calls),
+            "the imported name must not bind the module's own `save`"
+        );
+        let pending: Vec<(usize, &str)> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.owner_index, edge.ref_name.as_str()))
+            .collect();
+        assert_eq!(
+            pending,
+            vec![(2, "save")],
+            "the call waits for the resolver's reading of the import"
         );
     }
 

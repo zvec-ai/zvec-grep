@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  assertFullPreviewSchema,
   findSchemaVariant,
   isProductPreparationFailure,
   nativeCandidate,
@@ -119,6 +120,7 @@ Indexed source size: 8192 bytes
     root: "/tmp/corpus",
     index_path: "/tmp/corpus/.zvec-grep",
     embedding: "local/potion-code-16m-v2",
+    input_budget: null,
     files_scanned: 12,
     files_indexed: 10,
     files_pending: 0,
@@ -510,7 +512,9 @@ test("successful status retains its existing snapshot identity", async (t) => {
     },
   });
   assert.equal(summary.files, 10);
-  assert.equal(summary.fragments, 42);
+  assert.equal(summary.schema_version, 3);
+  assert.equal(summary.entities, 42);
+  assert.equal(summary.fragments, null);
   assert.deepEqual(Object.keys(summary.artifacts).sort(), [
     "status.json",
     "status.stderr.txt",
@@ -574,7 +578,8 @@ Indexed source size: 3060923 bytes
     snapshots[2].logical_content_sha256,
   );
   assert.equal(snapshots[1].files, 381);
-  assert.equal(snapshots[1].fragments, 4269);
+  assert.equal(snapshots[1].entities, 4269);
+  assert.equal(snapshots[1].fragments, null);
   assert.equal(
     await readFile(join(output, "2", "status.stderr.txt"), "utf8"),
     diagnosticsLine(readyDiagnostics()),
@@ -612,6 +617,25 @@ test("Rust JSON Schema nullable type arrays retain their concrete type", () => {
     true,
   );
   assert.equal(schemaAllowsType({ type: ["string", "null"] }, "array"), false);
+});
+
+test("search schemas must explicitly support full preview, including referenced variants", () => {
+  for (const preview of [
+    { type: "string", enum: ["short", "full"] },
+    { anyOf: [{ const: "short" }, { const: "full" }] },
+    { $ref: "#/$defs/Preview" },
+  ]) {
+    assertFullPreviewSchema({
+      properties: { preview },
+      $defs: { Preview: { type: "string", enum: ["short", "full"] } },
+    });
+  }
+  for (const preview of [undefined, { type: "string", enum: ["short"] }]) {
+    assert.throws(
+      () => assertFullPreviewSchema({ properties: { preview } }),
+      /must support preview: "full"/,
+    );
+  }
 });
 
 test("public index-readiness failures are product errors", () => {

@@ -80,6 +80,11 @@ impl<'de> serde::Deserialize<'de> for FileFormat {
 }
 
 impl FileFormat {
+    /// Raw file bytes do not represent the searchable document text.
+    pub(crate) fn requires_extracted_search(self) -> bool {
+        matches!(self, Self::Pdf)
+    }
+
     /// Matches only catalog filename rules, without inspecting the filesystem.
     pub(crate) fn from_file_name(file_name: &OsStr) -> Vec<Self> {
         let file_name_formats = file_name.to_str().map_or(&[][..], catalog::lookup_name);
@@ -94,7 +99,7 @@ impl FileFormat {
         formats
     }
 
-    /// Trusts catalog matches; probes only unmatched files without a suffix.
+    /// Trusts catalog matches; probes unmatched files for readable text.
     pub(crate) fn from_path(path: &Path) -> EngineResult<Vec<Self>> {
         let file_name = path.file_name().ok_or_else(|| {
             EngineError::invalid_argument(format!(
@@ -106,10 +111,6 @@ impl FileFormat {
         if formats != [Self::Unknown] {
             return Ok(formats);
         }
-        if path.extension().is_some() {
-            return Ok(vec![Self::Unknown]);
-        }
-
         let metadata = fs::metadata(path).map_err(|error| {
             EngineError::from_io(
                 format!(
@@ -151,7 +152,7 @@ impl FileFormat {
         let complete = header.len() <= HEADER_BYTES;
         header.truncate(HEADER_BYTES);
         Ok(vec![
-            sniff::script(&header, complete).unwrap_or(Self::Unknown),
+            sniff::format(&header, complete, path.extension().is_none()).unwrap_or(Self::Unknown),
         ])
     }
 }

@@ -76,6 +76,44 @@ fn file_at(storage: &IndexStore, path: &str) -> (FileRecord, FixtureEntity) {
 }
 
 #[test]
+fn indexed_sources_reads_only_requested_existing_files_in_writers_and_readers() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let storage = open(directory.path(), false);
+    let (watched, entry) = file_at(&storage, "src/watched.rs");
+    storage
+        .replace_fixture_file(&watched, std::slice::from_ref(&entry))
+        .expect("index watched file");
+    let (other, other_entry) = file_at(&storage, "src/other.rs");
+    storage
+        .replace_fixture_file(&other, &[other_entry])
+        .expect("index other file");
+    let paths = HashSet::from([
+        watched.relative_path().to_path_buf(),
+        PathBuf::from("missing.rs"),
+    ]);
+    let check = |store: &IndexStore| {
+        let sources = store.indexed_sources(&paths).expect("watched sources");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].id, watched.id());
+        assert_eq!(sources[0].path, watched.relative_path().as_path());
+        assert_eq!(
+            sources[0].entities,
+            vec![super::IndexedSourceEntity {
+                id: entry.entity.id().clone(),
+                range: entry.entity.source_range(),
+                source_bytes: entry.entity.source_byte_offsets(),
+                searchable: true
+            }]
+        );
+    };
+    check(&storage);
+    storage.close().expect("close writer");
+    let reader = open(directory.path(), true);
+    check(&reader);
+    reader.close().expect("close reader");
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "Compare FTS and ANN across the same complete metadata fixture"
@@ -651,6 +689,12 @@ fn fixture(
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             })),
         ),
         vector,
@@ -659,7 +703,7 @@ fn fixture(
 }
 
 fn fixture_entity(file_id: FileId, content: Content, metadata: Option<EntityMetadata>) -> Entity {
-    let id = EntityId::new(file_id, &content, Range::Full).expect("entity id");
+    let id = EntityId::new(file_id, &content, &Range::Full).expect("entity id");
     let fragment = EntityFragment {
         id: FragmentId::new(&id, 0),
         range: Range::Full,
@@ -740,7 +784,7 @@ fn persists_filters_and_replaces_complete_files() {
         },
         StorageSearchFilter {
             entity_ids: Some(vec![
-                EntityId::new(first.id(), &Content::Text("missing".into()), Range::Full)
+                EntityId::new(first.id(), &Content::Text("missing".into()), &Range::Full)
                     .expect("entity id"),
             ]),
             ..filter.clone()
@@ -1077,7 +1121,7 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     .expect("valid entity with duplicate ID");
     let mut duplicate_fragment = entry.clone();
     duplicate_fragment.entity = Entity::new(
-        EntityId::new(file.id(), &Content::Text("other".into()), Range::Full).expect("entity id"),
+        EntityId::new(file.id(), &Content::Text("other".into()), &Range::Full).expect("entity id"),
         entry.entity.file_id(),
         entry.entity.source_range(),
         entry.entity.content().clone(),
@@ -1097,7 +1141,7 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     let (entities, entries) = fixture_records(std::slice::from_ref(&entry));
     let mut wrong_owner = entries[0].clone();
     wrong_owner.entity_id =
-        EntityId::new(file.id(), &Content::Text("unrelated".into()), Range::Full)
+        EntityId::new(file.id(), &Content::Text("unrelated".into()), &Range::Full)
             .expect("entity id");
     let mut unknown_fragment = entries[0].clone();
     unknown_fragment.fragment_id = FragmentId::new(entry.entity.id(), 1);
@@ -2008,6 +2052,12 @@ fn index_code_file(
             is_exported: true,
             is_declaration: false,
             package: None,
+            has_internal_linkage: false,
+            declares_type: false,
+            alias_of: None,
+            object_members: Vec::new(),
+            overwritten_by: None,
+            exported_as: Vec::new(),
         })),
     );
     let graph = FileGraphResult {
@@ -2116,13 +2166,13 @@ fn resolver_binds_workspace_unique_cross_file_call() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage, None).expect("sweep");
+    let sweep = resolve_pending(&storage, None, None).expect("sweep");
     assert_eq!(sweep.scanned, 1);
     assert_eq!(sweep.resolved, 1);
     assert_eq!(sweep.failed, 0);
     assert!(
         storage
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty()
@@ -2156,7 +2206,7 @@ fn resolver_maps_relative_import_onto_file_endpoint() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage, None).expect("sweep");
+    let sweep = resolve_pending(&storage, None, None).expect("sweep");
     assert_eq!(sweep.resolved, 1);
     assert_eq!(sweep.failed, 0);
     // The target is the file endpoint of the imported module.
@@ -2181,12 +2231,12 @@ fn resolver_fails_import_of_missing_package() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage, None).expect("sweep");
+    let sweep = resolve_pending(&storage, None, None).expect("sweep");
     assert_eq!(sweep.resolved, 0);
     assert_eq!(sweep.failed, 1);
     assert!(
         storage
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty()
@@ -2216,13 +2266,71 @@ fn resolver_records_candidates_for_ambiguous_names() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage, None).expect("sweep");
+    let sweep = resolve_pending(&storage, None, None).expect("sweep");
     assert_eq!(sweep.scanned, 1);
     assert_eq!(sweep.resolved, 0, "two definitions stay ambiguous");
     assert_eq!(sweep.candidates_recorded, 1);
-    let page = storage.list_pending_refs(10, 0).expect("queue");
+    let page = storage
+        .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert_eq!(page.refs.len(), 1);
-    assert_eq!(page.refs[0].candidates.as_ref().map(Vec::len), Some(2));
+    let ref_id = page.refs[0].id;
+    let candidates = page.refs[0].candidates.clone().expect("stored candidates");
+    assert_eq!(candidates.len(), 2);
+
+    let sweep = resolve_pending(&storage, None, None).expect("unchanged sweep");
+    assert_eq!(sweep.scanned, 1);
+    assert_eq!(sweep.resolved, 0);
+    assert_eq!(sweep.failed, 0);
+    assert_eq!(
+        sweep.candidates_recorded, 0,
+        "unchanged evidence is not rewritten"
+    );
+    let page = storage
+        .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
+        .expect("unchanged queue");
+    assert_eq!(page.refs.len(), 1);
+    assert_eq!(page.refs[0].id, ref_id);
+    assert_eq!(page.refs[0].candidates.as_ref(), Some(&candidates));
+
+    let third_file = index_code_file(
+        &storage,
+        "src/third.rs",
+        "fn dup() {}",
+        "dup",
+        FileGraphResult::default(),
+    );
+    let snapshot = storage.resolution_snapshot(None).expect("updated snapshot");
+    let third = snapshot
+        .lookup_candidates("dup")
+        .expect("visible candidates")
+        .iter()
+        .find(|candidate| candidate.file_id == third_file.get())
+        .expect("third definition");
+    let mut expected = candidates.clone();
+    expected.push(third.entity_id.clone());
+    expected.sort();
+    let page = storage
+        .list_pending_refs(10, 0, &snapshot)
+        .expect("queue before sweep");
+    assert_eq!(page.refs.len(), 1);
+    assert_eq!(page.refs[0].id, ref_id);
+    assert_eq!(page.refs[0].candidates.as_ref(), Some(&candidates));
+
+    let sweep = resolve_pending(&storage, None, None).expect("changed candidate sweep");
+    assert_eq!(sweep.scanned, 1);
+    assert_eq!(sweep.resolved, 0, "three definitions stay ambiguous");
+    assert_eq!(sweep.failed, 0);
+    assert_eq!(
+        sweep.candidates_recorded, 1,
+        "changed evidence is persisted"
+    );
+    let page = storage
+        .list_pending_refs(10, 0, &snapshot)
+        .expect("updated queue");
+    assert_eq!(page.refs.len(), 1);
+    assert_eq!(page.refs[0].id, ref_id);
+    assert_eq!(page.refs[0].candidates.as_ref(), Some(&expected));
 }
 
 #[test]
@@ -2248,7 +2356,7 @@ fn resolver_defers_scoped_import_instead_of_binding_a_same_named_entity() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage, None).expect("sweep");
+    let sweep = resolve_pending(&storage, None, None).expect("sweep");
     assert_eq!(
         sweep.resolved, 0,
         "a module specifier is not an entity name: {sweep:?}"
@@ -2257,7 +2365,9 @@ fn resolver_defers_scoped_import_instead_of_binding_a_same_named_entity() {
         sweep.failed, 0,
         "a path alias may still route inside the workspace: {sweep:?}"
     );
-    let page = storage.list_pending_refs(10, 0).expect("queue");
+    let page = storage
+        .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert_eq!(
         page.refs.len(),
         1,
@@ -2288,7 +2398,7 @@ fn resolver_still_binds_rust_use_through_the_name_index() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage, None).expect("sweep");
+    let sweep = resolve_pending(&storage, None, None).expect("sweep");
     assert_eq!(sweep.resolved, 1, "a `use` specifier is a name binding");
     let edges = resolved_edges(&storage, importer);
     assert_eq!(edges.len(), 1);
@@ -2305,8 +2415,8 @@ fn resolver_returns_an_empty_sweep_when_the_workspace_has_no_graph() {
         embeddings: vec![schema()],
     })
     .expect("open graph-free storage");
-    let sweep =
-        resolve_pending(&storage, None).expect("a graph-free workspace has nothing to resolve");
+    let sweep = resolve_pending(&storage, None, None)
+        .expect("a graph-free workspace has nothing to resolve");
     assert_eq!(sweep.scanned, 0, "no snapshot is built without a graph");
     assert_eq!(sweep.resolved, 0);
     assert_eq!(sweep.failed, 0);
@@ -2404,12 +2514,14 @@ fn resolver_keeps_self_receiver_pending_when_the_member_belongs_to_another_class
         .replace_file_with_graph(&file, &entities, &entries, &graph)
         .expect("index class file");
 
-    let sweep = resolve_pending(&storage, None).expect("sweep");
+    let sweep = resolve_pending(&storage, None, None).expect("sweep");
     assert_eq!(
         sweep.resolved, 0,
         "self.save() must not bind to B.save: {sweep:?}"
     );
-    let page = storage.list_pending_refs(10, 0).expect("queue");
+    let page = storage
+        .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert_eq!(page.refs.len(), 1, "the receiver call stays queued");
     assert!(resolved_edges(&storage, id).is_empty());
 }

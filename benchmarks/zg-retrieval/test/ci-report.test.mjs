@@ -16,11 +16,20 @@ import {
   summarizeFileRetrieval,
 } from "../metrics/files.mjs";
 import { loadSuite } from "../core/lib.mjs";
+import { compareReports } from "../reports/compare.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import { summarizeRepeatedQuality } from "../metrics/repetitions.mjs";
+import {
+  publicQaItems,
+  scoreQaRetrieval,
+  summarizeRepeatedQaRetrieval,
+  summarizeQaRetrieval,
+} from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "../reports/validation.mjs";
+import { summarizeIndexCounts } from "../core/index-counts.mjs";
+import { summarizeIndexSettings } from "../core/index-settings.mjs";
 
 const suite = await loadSuite();
 const clone = (value) => structuredClone(value);
@@ -40,7 +49,7 @@ function qualityRow(task, mode, { failed = false, firstRank = 3 } = {}) {
   const row = {
     task_id: task.task_id,
     mode,
-    preview: "mcp-default",
+    preview: "full",
     repetition: 5,
     quality_observation: true,
     repository: task.repository,
@@ -94,7 +103,7 @@ function zgReport({ failedModes = [], rankForTask = () => 3 } = {}) {
   return {
     schema_version: 7,
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
-    preview: "mcp-default",
+    preview: "full",
     quality_repetition: 5,
     quality_aggregation: "mean_of_five",
     quality_score_valid: true,
@@ -117,6 +126,103 @@ function zgReport({ failedModes = [], rankForTask = () => 3 } = {}) {
     })),
   };
 }
+
+function withQa(report = zgReport()) {
+  report.qa_gold = clone(suite.qa_gold);
+  report.qa_scoring = clone(suite.qa_scoring);
+  for (const row of report.tasks) {
+    const pair = suite.qa_pairs[row.task_id];
+    row.qa_observations = row.quality_observations.map(
+      (observation, index) => ({
+        repetition: observation.repetition,
+        items: publicQaItems(observation.items),
+        status: row.measurement_observations[index].status,
+        execution_status: row.measurement_observations[index].execution_status,
+      }),
+    );
+    row.qa_retrieval = scoreQaRetrieval(row.items, pair, {
+      status: row.status,
+      executionStatus: row.execution_status,
+    });
+    row.qa_quality_mean = summarizeRepeatedQaRetrieval(
+      row.qa_observations,
+      pair,
+    );
+  }
+  for (const mode of ZG_MODES)
+    report.modes[mode].qa_retrieval = summarizeQaRetrieval(
+      report.tasks.filter((row) => row.mode === mode),
+    );
+  return report;
+}
+
+test("SWE-QA inventory sums each pinned repository once across all calls", async () => {
+  const report = zgReport();
+  for (const [index, manifest] of report.repositories.entries()) {
+    const repo = suite.lock.repositories[index];
+    manifest.index_counts = summarizeIndexCounts([
+      {
+        id: `${repo.repository}@${repo.commit}`,
+        entities: 2,
+        fragments: 5,
+      },
+    ]);
+  }
+  const summary = await buildCiSummary({ zg: report });
+  assert.equal(summary.status, "success");
+  assert.equal(summary.index_counts.entities, 22);
+  assert.equal(summary.index_counts.fragments, 55);
+  assert.match(markdownCiSummary(summary), /22 Entities · 55 Fragments/);
+  delete report.repositories[0].index_counts;
+  const missing = await buildCiSummary({ zg: report });
+  assert.equal(missing.status, "success");
+  assert.equal(missing.index_counts.entities, null);
+  assert.equal(missing.index_counts.fragments, null);
+});
+
+test("SWE-QA index settings require every repository and the configured model", async () => {
+  const report = zgReport();
+  const budget = {
+    max_input_tokens: 1024,
+    unit: "utf16_code_units",
+    rounding: "floor",
+    overlap_percent: 15,
+    normal: { chars_per_100_tokens: 185, max_length: 1894, overlap: 284 },
+    dense: { chars_per_100_tokens: 100, max_length: 1024, overlap: 153 },
+  };
+  for (const [index, manifest] of report.repositories.entries()) {
+    const repo = suite.lock.repositories[index];
+    manifest.index_settings = summarizeIndexSettings([
+      {
+        id: `${repo.repository}@${repo.commit}`,
+        model: suite.protocol.model,
+        input_budget: budget,
+      },
+    ]);
+  }
+  const summary = await buildCiSummary({ zg: report });
+  assert.equal(summary.status, "success");
+  assert.equal(summary.index_settings.model, suite.protocol.model);
+  assert.deepEqual(summary.index_settings.input_budget, budget);
+  assert.equal(summary.index_settings.corpora.length, 11);
+  delete report.repositories[0].index_settings;
+  const missing = await buildCiSummary({ zg: report });
+  assert.equal(missing.status, "success");
+  assert.equal(missing.index_settings.model, null);
+  assert.equal(missing.index_settings.input_budget, null);
+  assert.deepEqual(missing.index_settings.corpora[1].input_budget, budget);
+  report.repositories[1].index_settings = summarizeIndexSettings([
+    {
+      ...report.repositories[1].index_settings.corpora[0],
+      model: "local/wrong-model",
+    },
+  ]);
+  const mismatch = await buildCiSummary({ zg: report });
+  assertUnavailable(mismatch);
+  assert.ok(
+    mismatch.errors.some((error) => /configured suite model/.test(error)),
+  );
+});
 function assertUnavailable(result) {
   assert.equal(result.status, "failed");
   assert.deepEqual(
@@ -136,7 +242,7 @@ test("summary schema 5 has exactly the fixed three Rust MCP ZG arms", async () =
   const result = await buildCiSummary({ zg: zgReport() });
   assert.equal(result.schema_version, 5);
   assert.equal(result.status, "success");
-  assert.equal(result.preview, "mcp-default");
+  assert.equal(result.preview, "full");
   assert.deepEqual(result.quality_metrics, [
     "file_hit_at_1",
     "file_hit_at_5",
@@ -165,6 +271,179 @@ test("summary schema 5 has exactly the fixed three Rust MCP ZG arms", async () =
   assert.doesNotMatch(
     JSON.stringify(result),
     /comparison|previews|primary_preview/,
+  );
+});
+
+test("CI exposes diagnostic QA scores and denominators while formal scores remain N/A", async () => {
+  const report = withQa();
+  const result = await buildCiSummary({ zg: report });
+  assert.equal(result.status, "success", result.errors.join("\n"));
+  assert.deepEqual(result.qa_gold, suite.qa_gold);
+  assert.deepEqual(result.qa_scoring, { version: 2, entity_match: "contains" });
+  for (const [index, mode] of ZG_MODES.entries()) {
+    const qa = result.rows[index].qa_retrieval;
+    assert.deepEqual(qa, report.modes[mode].qa_retrieval);
+    assert.equal(qa.planned_tasks, 20);
+    assert.equal(qa.formal.eligible_tasks, 0);
+    assert.equal(qa.formal.entity.recall_at_10, null);
+    assert.equal(qa.formal.entity.metric_task_counts.recall_at_10, 0);
+    assert.ok(qa.diagnostic.eligible_tasks > 0);
+    assert.ok(qa.diagnostic.file.metric_task_counts.recall_at_10 > 0);
+    assert.ok(result.rows[index].metrics.file_mrr_at_10 > 0);
+  }
+  assert.ok(
+    result.tasks.some((task) => task.qa_quality_mean?.status === "diagnostic"),
+  );
+  const text = markdownCiSummary(result);
+  assert.match(text, /Scope \| Arm \| Level \| Recall@1/);
+  assert.match(text, /All File and Entity metrics/);
+  assert.match(text, /Formal QA scores are unavailable/);
+  assert.match(text, /\| Diagnostic \| zg-hybrid \|/);
+  assert.doesNotMatch(text, /scored\/eligible questions/);
+  assert.doesNotMatch(text, /(?:%|N\/A) \([^)]*\/[^)]*\)/);
+  assert.match(text, /do not establish formal Entity performance/);
+  assert.deepEqual(result.quality_metrics, QUALITY_METRICS);
+});
+
+test("CI rejects altered QA provenance, scores, eligibility, observations and aggregates", async () => {
+  const mutations = [
+    (report) => {
+      delete report.qa_scoring;
+    },
+    (report) => {
+      report.qa_scoring = { entity_match: "identity" };
+    },
+    (report) => {
+      report.qa_gold = { ...report.qa_gold, forged: true };
+    },
+    (report, row) => {
+      row.qa_retrieval.entity.recall_at_10 = 999;
+    },
+    (report, row) => {
+      row.qa_quality_mean.entity.recall_at_10 = 999;
+    },
+    (report, row) => {
+      row.qa_retrieval.formal_eligible = true;
+    },
+    (report, row) => {
+      row.qa_quality_mean.formal_eligible = true;
+    },
+    (report, row) => {
+      row.qa_observations.pop();
+    },
+    (report, row) => {
+      row.qa_observations[0].items[0].rank = 2;
+    },
+    (report, row) => {
+      row.qa_observations[0].execution_status = "product_error";
+    },
+    (report, row) => {
+      row.qa_observations[4].items[0].metadata = ["forged evidence"];
+    },
+    (report) => {
+      report.modes.hybrid.qa_retrieval.formal.eligible_tasks = 1;
+    },
+    (report) => {
+      report.modes.hybrid.qa_retrieval.diagnostic.entity.recall_at_10 = 999;
+    },
+  ];
+  for (const mutate of mutations) {
+    const report = withQa();
+    const row = report.tasks.find((task) => task.qa_retrieval?.entity);
+    assert.ok(row, "fixture needs a diagnostic QA question");
+    mutate(report, row);
+    assertUnavailable(await buildCiSummary({ zg: report }));
+  }
+});
+
+test("QA comparisons bind matching rules independently of unchanged Gold", () => {
+  const baseline = withQa();
+  const candidate = clone(baseline);
+  const result = compareReports(baseline, candidate, { suite });
+  assert.deepEqual(result.qa_gold, suite.qa_gold);
+  assert.deepEqual(result.qa_scoring, { version: 2, entity_match: "contains" });
+  for (const scoring of [
+    undefined,
+    { version: 1, entity_match: "identity" },
+    { version: 1, entity_match: "contains" },
+  ]) {
+    const legacy = clone(candidate);
+    if (scoring) legacy.qa_scoring = scoring;
+    else delete legacy.qa_scoring;
+    // Unchanged numeric scores cannot make older matching rules compatible.
+    assert.throws(
+      () => compareReports(baseline, legacy, { suite }),
+      /QA scoring rules differ/,
+    );
+  }
+  assert.throws(
+    () => compareReports(zgReport(), candidate, { suite }),
+    /incompatible QA Gold/,
+  );
+});
+
+test("QA failed calls remain unscored without changing historical File error zeros", async () => {
+  const result = await buildCiSummary({
+    zg: withQa(zgReport({ failedModes: ["vector"] })),
+  });
+  assert.equal(result.status, "failed");
+  const vector = result.rows.find((row) => row.label === "zg-vector");
+  assert.equal(vector.metrics.file_hit_at_10, 0);
+  assert.equal(vector.qa_retrieval.formal.eligible_tasks, 0);
+  assert.equal(vector.qa_retrieval.diagnostic.entity.recall_at_10, null);
+  assert.equal(
+    vector.qa_retrieval.diagnostic.entity.metric_task_counts.recall_at_10,
+    0,
+  );
+  assert.ok(vector.qa_retrieval.diagnostic.eligible_tasks > 0);
+  assert.match(markdownCiSummary(result), /\| N\/A \|/);
+});
+
+test("QA coverage keeps invalid questions in the planned denominator", async () => {
+  const report = withQa();
+  const row = report.tasks.find(
+    (task) =>
+      task.mode === "hybrid" && task.qa_quality_mean?.status === "diagnostic",
+  );
+  const previous = report.modes.hybrid.qa_retrieval;
+  row.status = "harness_invalid";
+  row.execution_status = "harness_invalid";
+  row.invalid_reason = "format_unknown: public source range mismatch";
+  row.ndcg = null;
+  row.file_retrieval = null;
+  row.qa_retrieval = null;
+  row.qa_quality_mean = null;
+  row.items = [];
+  row.measurement_observations = row.measurement_observations.map((sample) => ({
+    ...sample,
+    status: "harness_invalid",
+    execution_status: "harness_invalid",
+  }));
+  report.quality_score_valid = false;
+  report.integrity_passed = false;
+  report.integrity_errors = [
+    "one or more observations are experimentally invalid",
+  ];
+  report.modes.hybrid.qa_retrieval = summarizeQaRetrieval(
+    report.tasks.filter((task) => task.mode === "hybrid"),
+  );
+  const result = await buildCiSummary({ zg: report });
+  const hybrid = result.rows[0];
+  assert.equal(hybrid.status, "partial", result.errors.join("\n"));
+  assert.equal(hybrid.questions, 19);
+  assert.equal(hybrid.qa_retrieval.planned_tasks, 20);
+  assert.equal(
+    hybrid.qa_retrieval.diagnostic.eligible_tasks,
+    previous.diagnostic.eligible_tasks - 1,
+  );
+  assert.equal(
+    hybrid.qa_retrieval.unavailable_tasks.length,
+    previous.unavailable_tasks.length + 1,
+  );
+  assert.ok(
+    hybrid.qa_retrieval.unavailable_tasks.some(
+      (task) => task.task_id === row.task_id,
+    ),
   );
 });
 
@@ -487,7 +766,7 @@ test("Markdown exposes three arms, five quality metrics, stability and latency",
     candidateRef: "feature/rust-search",
   });
   const text = markdownCiSummary(result);
-  assert.match(text, /Rust public MCP default presentation/);
+  assert.match(text, /Rust public MCP full presentation/);
   assert.match(
     text,
     /Each question\/mode averages its five call-level quality scores/,

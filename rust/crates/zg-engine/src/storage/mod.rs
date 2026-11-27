@@ -11,7 +11,10 @@ mod store;
 pub(crate) mod types;
 mod zvec;
 
-pub(crate) use store::{IndexStore, ReadView, ResolutionSnapshot};
+pub(crate) use store::{IndexStore, IndexedSourceFile, ReadView, ResolutionSnapshot};
+
+#[cfg(test)]
+pub(crate) use store::IndexedSourceEntity;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum VectorEngine {

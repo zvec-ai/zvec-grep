@@ -1,5 +1,8 @@
 //! Direct file search, request normalization, and context-result assembly.
 
+mod extracted;
+#[cfg(test)]
+mod pdf_tests;
 mod structure;
 
 use std::{
@@ -30,9 +33,18 @@ use self::structure::{
 
 const DEFAULT_MAX_CONCURRENT_SEARCHES: usize = 2;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct DirectSearchService {
     lexical: LexicalSearchService,
+    writers: crate::pipelines::indexed_search::writer::WriterContexts,
+}
+
+impl std::fmt::Debug for DirectSearchService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectSearchService")
+            .field("lexical", &self.lexical)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DirectSearchService {
@@ -40,7 +52,16 @@ impl DirectSearchService {
         Self {
             lexical: LexicalSearchService::default()
                 .with_max_searches(DEFAULT_MAX_CONCURRENT_SEARCHES),
+            writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
         }
+    }
+
+    pub(crate) fn with_writers(
+        mut self,
+        writers: crate::pipelines::indexed_search::writer::WriterContexts,
+    ) -> Self {
+        self.writers = writers;
+        self
     }
 
     pub(crate) async fn context(&self, options: ContextOptions) -> EngineResult<ContextResult> {
@@ -87,6 +108,8 @@ impl DirectSearchService {
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
             paths_selected: use_entity_ranges,
+            // Each candidate may belong to a different (or nested) workspace.
+            defer_extracted_sources: true,
             paths,
             limit: options.limit,
             options: LexicalOptions {
@@ -106,6 +129,17 @@ impl DirectSearchService {
             },
         };
         let mut reply = self.lexical.search(&root, &request).await?;
+        let mut extracted = extracted::search(
+            std::mem::take(&mut reply.extracted_paths),
+            &request,
+            options.lock_timeout_ms,
+            &self.writers,
+        )
+        .await?;
+        self.include_raw_fallback(&root, &request, &extracted.raw_paths, &mut reply)
+            .await?;
+        limit_matches(&mut reply, &mut extracted.matches, request.limit);
+        let extracted_items = extracted::context_items(extracted.matches, &request)?;
         let structure_started = Instant::now();
         let enrichment = structure_file_limit.map(|file_limit| {
             enrich_lexical_matches_with_structure(
@@ -122,6 +156,14 @@ impl DirectSearchService {
             enrichment,
             use_entity_ranges,
         );
+        merge_extracted_items(&mut result, extracted_items, extracted.truncated);
+        if let Some(rg) = &mut result.diagnostics.rg {
+            rg.unindexed_files = extracted.unavailable;
+            let mut index_warnings = extracted.warnings;
+            index_warnings.sort();
+            index_warnings.dedup();
+            rg.index_warnings = index_warnings;
+        }
         if let Some(duration) = structure_duration {
             result.diagnostics.timings.push(TimingEntry {
                 name: "structure_enrichment".to_owned(),
@@ -130,6 +172,128 @@ impl DirectSearchService {
             });
         }
         Ok(result)
+    }
+
+    async fn include_raw_fallback(
+        &self,
+        root: &Path,
+        request: &LexicalSearchRequest,
+        paths: &[PathBuf],
+        reply: &mut LexicalSearchReply,
+    ) -> EngineResult<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        // These files passed the original walker filters. Reuse the ordinary
+        // matcher and binary policy, with no extraction loop.
+        let fallback = self
+            .lexical
+            .search(
+                root,
+                &LexicalSearchRequest {
+                    paths: paths.to_vec(),
+                    paths_selected: true,
+                    defer_extracted_sources: false,
+                    ..request.clone()
+                },
+            )
+            .await?;
+        reply.matches.extend(fallback.matches);
+        if fallback.coverage == LexicalCoverage::Truncated {
+            reply.coverage = LexicalCoverage::Truncated;
+            reply.diagnostics.truncated = true;
+        }
+        Ok(())
+    }
+}
+
+/// Count matching records before entity grouping, including ordinary/raw files.
+fn limit_matches(
+    reply: &mut LexicalSearchReply,
+    extracted: &mut Vec<extracted::EntityMatches>,
+    limit: Option<usize>,
+) {
+    enum MatchIndex {
+        File(usize),
+        Entity(usize),
+    }
+    let Some(limit) = limit else {
+        return;
+    };
+    let mut order = reply
+        .matches
+        .iter()
+        .enumerate()
+        .map(|(index, matched)| {
+            (
+                matched.relative_path(),
+                matched.range.start_byte_offset() as u64,
+                MatchIndex::File(index),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (index, matched) in extracted.iter().enumerate() {
+        order.extend(matched.hits.iter().map(|hit| {
+            (
+                matched.relative_path.as_path(),
+                matched
+                    .source_start
+                    .saturating_add(hit.range.start_byte_offset() as u64),
+                MatchIndex::Entity(index),
+            )
+        }));
+    }
+    order.sort_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(&right.1)));
+    let truncated = order.len() > limit;
+    let mut keep_files = vec![false; reply.matches.len()];
+    let mut keep_entities = vec![0; extracted.len()];
+    for (_, _, matched) in order.into_iter().take(limit) {
+        match matched {
+            MatchIndex::File(index) => keep_files[index] = true,
+            MatchIndex::Entity(index) => keep_entities[index] += 1,
+        }
+    }
+    let mut keep = keep_files.into_iter();
+    reply
+        .matches
+        .retain(|_| keep.next().expect("one flag per match"));
+    for (matched, count) in extracted.iter_mut().zip(keep_entities) {
+        matched.hits.truncate(count);
+    }
+    extracted.retain(|matched| !matched.hits.is_empty());
+    if truncated {
+        reply.coverage = LexicalCoverage::Truncated;
+        reply.diagnostics.truncated = true;
+    }
+}
+
+fn merge_extracted_items(
+    result: &mut ContextResult,
+    extracted_items: Vec<ContextItem>,
+    extracted_truncated: bool,
+) {
+    result.items.extend(extracted_items);
+    result.items.sort_by(|left, right| {
+        left.relative_path.cmp(&right.relative_path).then(
+            left.range
+                .start_byte_offset()
+                .cmp(&right.range.start_byte_offset()),
+        )
+    });
+    let truncated = extracted_truncated || result.coverage == ContextCoverage::RgTruncated;
+    for (i, item) in result.items.iter_mut().enumerate() {
+        item.rank = i + 1;
+    }
+    result.coverage = if truncated {
+        ContextCoverage::RgTruncated
+    } else {
+        ContextCoverage::RgExhaustive
+    };
+    if let Some(rg) = &mut result.diagnostics.rg {
+        rg.truncated = truncated;
+    }
+    if !result.items.is_empty() {
+        result.diagnostics.empty_reason = None;
     }
 }
 
@@ -236,10 +400,13 @@ fn context_from_lexical(
         workspace_index: None,
         items,
         group_results: Vec::new(),
+        stage_traces: Vec::new(),
         diagnostics: ContextDiagnostics {
             empty_reason,
             index: None,
             rg: Some(RgDiagnostics {
+                unindexed_files: Vec::new(),
+                index_warnings: Vec::new(),
                 backend: reply.diagnostics.backend,
                 command: reply.diagnostics.command,
                 args: reply.diagnostics.args,
@@ -280,6 +447,8 @@ fn context_item(enriched: EnrichedLexicalMatch, use_entity_ranges: bool) -> Cont
         match_ranges,
         content,
         outline: None,
+        content_windows: Vec::new(),
+        pdf_boxes: Vec::new(),
         content_role: Some(ContextContentRole::Source),
         status: ContextItemStatus::Fresh,
         score: None,

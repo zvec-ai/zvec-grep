@@ -51,6 +51,7 @@ function Require-Import {
 
 $requiredPatterns = @(
     "zvec_c_api.dll",
+    "pdfium.dll",
     "llama.dll",
     "ggml.dll",
     "ggml-base.dll",

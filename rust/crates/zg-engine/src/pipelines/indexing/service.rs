@@ -16,7 +16,9 @@ use crate::{
         index::{
             IndexOptions, IndexResult,
             options::EmbeddingModelSpec,
-            progress::{DETAIL_SAVING_INDEX, IndexProgress},
+            progress::{
+                DETAIL_SAVING_INDEX, IndexProgress, IndexProgressPhase, IndexProgressReporter,
+            },
         },
         info::{
             InfoOptions, InfoResult,
@@ -25,11 +27,11 @@ use crate::{
     },
     domain::{
         IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
-        model::{Device, EncryptedApiKey, ModelConfig},
+        model::{Device, EncryptedApiKey, HttpAuth, HttpEmbeddingConfig, ModelConfig},
     },
     models::{
         ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest,
-        ResolveEmbeddingReferenceOptions, resolve_embedding_reference, resolve_index_concurrency,
+        resolve_index_concurrency,
     },
     storage::{IndexStore, types::WorkspaceIndexStorageOptions},
     utils::{directory_exists, resolve_directory},
@@ -49,11 +51,13 @@ use crate::{
     },
 };
 
-use super::pipeline::{
-    IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
+use super::{
+    embedding_policy,
+    input_budget::embedding_input_budget,
+    pipeline::{
+        IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
+    },
 };
-
-const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceIndexService {
@@ -61,6 +65,10 @@ pub(crate) struct WorkspaceIndexService {
     scanner: NativeScanner,
     #[cfg(test)]
     fail_index_completion: bool,
+    #[cfg(test)]
+    fragment_count_reads: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    fail_fragment_count: bool,
 }
 
 impl WorkspaceIndexService {
@@ -70,6 +78,10 @@ impl WorkspaceIndexService {
             scanner: NativeScanner::default(),
             #[cfg(test)]
             fail_index_completion: false,
+            #[cfg(test)]
+            fragment_count_reads: Arc::default(),
+            #[cfg(test)]
+            fail_fragment_count: false,
         }
     }
 
@@ -127,12 +139,47 @@ impl WorkspaceIndexService {
             // A changed selection can admit files outside a watcher's narrow change scope.
             options.changes.clear();
         }
+        let selection =
+            embedding_policy::select(&requested_root, &scan, existing.as_ref(), &options).await?;
+        if options.embedding.is_none() {
+            if let Some(reporter) = options.on_progress.take() {
+                let explanation = selection.clone();
+                // Daemon clients consume coalesced snapshots. Keep the decision on
+                // every event, including completion, rather than a lossy one-off event.
+                let reporter = IndexProgressReporter::new(move |mut progress| {
+                    progress.embedding.get_or_insert_default().selection =
+                        Some(explanation.clone());
+                    reporter.report(progress);
+                });
+                reporter.report(IndexProgress {
+                    phase: IndexProgressPhase::Scanning,
+                    files_total: None,
+                    files_indexed: None,
+                    files_failed: None,
+                    detail: None,
+                    embedding: None,
+                });
+                options.on_progress = Some(reporter);
+            }
+            // Freeze this operation's choice before acquiring models. Auto device
+            // and absent runtime overrides preserve the saved workspace settings.
+            options.embedding = Some(EmbeddingModelSpec {
+                reference: selection.model,
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: Device::Auto,
+            });
+        }
         // Resolve only at the shared index boundary; query runtimes never read these overrides.
         options.embedding_concurrency = resolve_index_concurrency(
-            &embedding_reference(existing.as_ref(), options.embedding.as_ref())?,
+            &embedding_reference(existing.as_ref(), &options)?,
             options.embedding_concurrency,
         )
         .map_err(ModelError::into_engine_error)?;
+        // Extraction models are local even when embeddings use an HTTP backend.
+        let extraction_cache =
+            index_model_cache(&crate::config::read()?, existing.as_ref(), &options);
         let IndexModels {
             runtimes: acquired,
             descriptor,
@@ -145,7 +192,11 @@ impl WorkspaceIndexService {
             previous
                 .ensure_index_compatible(&descriptor)
                 .map_err(|error| {
-                    error.with_help("Rebuild the index with `zg --index --rebuild`.")
+                    error.with_help(if descriptor.graph_indexing() {
+                        "Rebuild the index with `zg --index --rebuild --graph`."
+                    } else {
+                        "Rebuild the index with `zg --index --rebuild`."
+                    })
                 })?;
         }
         let mut workspace = index_workspace_state(
@@ -162,11 +213,13 @@ impl WorkspaceIndexService {
             options.changes.clear();
             prepare_build(&workspace)?;
         }
+        let extractor = crate::extraction::ExtractionService::new(models.clone(), extraction_cache);
         let result = self
             .run_index(
                 &workspace,
                 rebuilding,
                 acquired,
+                extractor,
                 &options,
                 Arc::clone(&home_lock),
             )
@@ -197,6 +250,7 @@ impl WorkspaceIndexService {
         workspace: &Workspace,
         rebuilding: bool,
         models: Vec<ModelRuntimeLease>,
+        extractor: crate::extraction::ExtractionService,
         options: &IndexOptions,
         home_lock: Arc<LockGuard>,
     ) -> Result<(IndexResult, Option<IndexProgress>), EngineError> {
@@ -212,6 +266,16 @@ impl WorkspaceIndexService {
                 .is_some_and(IndexDescriptor::graph_indexing),
             storage_path: storage_path.to_path_buf(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
+        })
+        .map_err(|mut error| {
+            if let Some(help) = error.help() {
+                let help = format!(
+                    "{help} Run this command in workspace '{}'.",
+                    workspace.source_root().display()
+                );
+                error = error.with_help(help);
+            }
+            error.with_workspace_root(workspace.source_root())
         })?;
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(
@@ -246,6 +310,7 @@ impl WorkspaceIndexService {
             workspace,
             storage: &writer.session.storage,
             scanner: &self.scanner,
+            extractor: &extractor,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
             on_progress: pipeline_progress,
@@ -275,6 +340,7 @@ impl WorkspaceIndexService {
             }
             match super::graph_resolver::resolve_pending(
                 &writer.session.storage,
+                Some(workspace.source_root()),
                 options.signal.as_ref(),
             ) {
                 Ok(sweep) => tracing::debug!(sweep = ?sweep, "graph resolution sweep"),
@@ -416,7 +482,24 @@ impl WorkspaceIndexService {
                 storage_path: workspace.layout().index_dir().to_path_buf(),
             })?;
             let status =
-                get_workspace_index_status(&workspace, &storage, &self.scanner, None, true).await;
+                get_workspace_index_status(&workspace, &storage, &self.scanner, None, true)
+                    .await
+                    .and_then(|mut status| {
+                        if options.include_counts {
+                            #[cfg(test)]
+                            {
+                                self.fragment_count_reads
+                                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                                if self.fail_fragment_count {
+                                    return Err(EngineError::storage_failure(
+                                        "injected fragment count failure",
+                                    ));
+                                }
+                            }
+                            status.fragments_indexed = Some(storage.count_fragments()?);
+                        }
+                        Ok(status)
+                    });
             let close = storage.close();
             let status = status?;
             close?;
@@ -443,7 +526,7 @@ impl WorkspaceIndexService {
             } else {
                 InfoSource::Unindexed
             },
-            workspace_index: Some(WorkspaceIndexInfo::from_workspace(&workspace)),
+            workspace_index: Some(workspace_index_info(&workspace, &options, indexed)),
             status,
             suggestion: workspace_suggestion(&workspace, indexed),
         })
@@ -467,6 +550,18 @@ impl WorkspaceIndexService {
         }
         Ok(has_data)
     }
+}
+
+pub(crate) async fn resolve_index_embedding(
+    mut options: IndexOptions,
+) -> Result<crate::api::index::embedding::EmbeddingSelection, EngineError> {
+    let root = resolve_directory(options.root.as_deref())?;
+    let layout = WorkspaceLayout::new(root.join(".zvec-grep"))?;
+    let existing = load_index_workspace(&root, &layout, &options)?;
+    options.scan.normalize_ignore_paths(&root)?;
+    let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
+    crate::file_selection::ScanPolicy::new(&root, &scan)?;
+    embedding_policy::select(&root, &scan, existing.as_ref(), &options).await
 }
 
 fn load_index_workspace(
@@ -535,16 +630,17 @@ fn index_workspace_state(
         descriptor.graph_indexing(),
         descriptor.fts(),
     )?;
-    Workspace::new(
+    let workspace = Workspace::new(
         source_root,
         layout.clone(),
         scan,
-        Some(CURRENT_INDEX_VERSION),
+        CURRENT_INDEX_VERSION,
         Some(generation),
         active.map_or(now, Workspace::created_epoch_ms),
         now,
         IndexState::Enabled(Box::new(descriptor)),
-    )
+    )?;
+    Ok(workspace.with_model_cache_dir(saved_model_cache(active, options)))
 }
 
 impl Default for WorkspaceIndexService {
@@ -601,6 +697,40 @@ struct IndexModels {
     descriptor: IndexDescriptor,
 }
 
+fn index_model_cache(
+    config: &serde_json::Value,
+    existing: Option<&Workspace>,
+    options: &IndexOptions,
+) -> Option<std::path::PathBuf> {
+    let saved = existing
+        .and_then(Workspace::model_cache_dir)
+        .map(Path::to_path_buf);
+    crate::config::model_cache(
+        config,
+        options
+            .runtime_model_cache
+            .clone()
+            .or_else(|| options.model_cache.clone())
+            .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
+        saved,
+    )
+}
+
+fn saved_model_cache(
+    existing: Option<&Workspace>,
+    options: &IndexOptions,
+) -> Option<std::path::PathBuf> {
+    options
+        .model_cache
+        .clone()
+        .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone()))
+        .or_else(|| {
+            existing
+                .and_then(Workspace::model_cache_dir)
+                .map(Path::to_path_buf)
+        })
+}
+
 fn acquire_index_models(
     models: &ModelRuntimeManager,
     existing: Option<&Workspace>,
@@ -608,10 +738,24 @@ fn acquire_index_models(
     graph_indexing: bool,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
+    let configs = model
+        .configured_http()
+        .map(|http| {
+            (
+                model.info().model().reference(),
+                ModelConfig {
+                    http: Some(http.clone()),
+                    endpoint: model.configured_endpoint().map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+        })
+        .into_iter()
+        .collect();
     let descriptor = IndexDescriptor::new(
         model.info().clone(),
         std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
+        configs,
         graph_indexing,
         crate::domain::FTS_CONFIG,
     )?;
@@ -630,6 +774,10 @@ fn acquire_index_models(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep model resolution, saved configuration, and consent in execution order"
+)]
 fn acquire_model(
     models: &ModelRuntimeManager,
     existing: Option<&Workspace>,
@@ -642,7 +790,7 @@ fn acquire_model(
             "embedding revision overrides are not supported by the catalog-backed runtime",
         ));
     }
-    let reference = embedding_reference(existing, options.embedding.as_ref())?;
+    let reference = embedding_reference(existing, options)?;
     let config = crate::config::read()?;
     let provider = reference.split('/').next().unwrap_or_default();
     let local = provider == "local";
@@ -654,41 +802,21 @@ fn acquire_model(
     let existing_index = existing.and_then(|workspace| workspace.index().descriptor());
     let existing_runtime =
         existing_index.and_then(|index| index.embedding_configs().get(&reference));
-    let requested_key = options
-        .runtime_api_key
-        .as_ref()
-        .or(options.api_key.as_ref());
-    let saved_key = if local || requested_key.is_some() {
-        None
-    } else if let (Some(workspace), Some(runtime)) = (existing, existing_runtime) {
-        runtime
-            .api_key
-            .as_ref()
-            .map(|key| decrypt_api_key(key, workspace.layout(), &reference))
-            .transpose()?
-    } else {
-        None
-    };
-    let api_key = if local {
-        None
-    } else {
-        requested_key
-            .cloned()
-            .or(saved_key)
-            .or_else(|| crate::config::string(&config, &["providers", provider, "apiKey"]))
-            .or_else(environment_api_key)
-    };
-    let endpoint = options.endpoint.clone().or_else(|| {
+    let explicit_endpoint = options.endpoint.as_deref().or_else(|| {
         options
             .embedding
             .as_ref()
-            .and_then(|embedding| embedding.endpoint.clone())
-            .or_else(|| existing_runtime.and_then(|runtime| runtime.endpoint.clone()))
+            .and_then(|embedding| embedding.endpoint.as_deref())
     });
-    let endpoint = if local {
-        endpoint
-    } else {
-        let endpoint = crate::authorization::remote_endpoint(&reference, endpoint.as_deref())?;
+    let http = crate::config::resolve_http_model(
+        &config,
+        &reference,
+        existing_runtime,
+        explicit_endpoint,
+        options.rebuild,
+    )?;
+    let (http_descriptor, endpoint) = if let Some(http) = http {
+        let endpoint = http.endpoint.expect("resolved HTTP endpoint");
         let root = resolve_directory(options.root.as_deref())?;
         crate::authorization::require_with_targets(
             &root,
@@ -697,8 +825,43 @@ fn acquire_model(
             options.allow_remote,
             &options.authorized_remote,
         )?;
-        Some(endpoint)
+        (http.http, Some(endpoint))
+    } else {
+        let endpoint = options.endpoint.clone().or_else(|| {
+            options
+                .embedding
+                .as_ref()
+                .and_then(|embedding| embedding.endpoint.clone())
+                .or_else(|| existing_runtime.and_then(|runtime| runtime.endpoint.clone()))
+        });
+        let endpoint = if local {
+            endpoint
+        } else {
+            let endpoint = crate::authorization::remote_endpoint(&reference, endpoint.as_deref())?;
+            let root = resolve_directory(options.root.as_deref())?;
+            crate::authorization::require_with_targets(
+                &root,
+                &reference,
+                &endpoint,
+                options.allow_remote,
+                &options.authorized_remote,
+            )?;
+            Some(endpoint)
+        };
+        (None, endpoint)
     };
+    let requested_key = options
+        .runtime_api_key
+        .as_deref()
+        .or(options.api_key.as_deref());
+    let api_key = resolve_remote_api_key(
+        &config,
+        &reference,
+        http_descriptor.as_ref(),
+        existing,
+        existing_runtime,
+        requested_key,
+    )?;
     let device = if local {
         crate::config::runtime_device(
             &config,
@@ -715,21 +878,19 @@ fn acquire_model(
     } else {
         None
     };
+    let cache_dir = if http_descriptor.is_some() {
+        None
+    } else {
+        index_model_cache(&config, existing, options)
+    };
     models
         .acquire(ModelRuntimeRequest::new(
-            reference.clone(),
+            reference,
             ModelConfig {
+                http: http_descriptor,
                 api_key,
                 endpoint,
-                cache_dir: crate::config::model_cache(
-                    &config,
-                    options
-                        .runtime_model_cache
-                        .clone()
-                        .or_else(|| options.model_cache.clone())
-                        .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
-                    existing_runtime.and_then(|runtime| runtime.cache_dir.clone()),
-                ),
+                cache_dir,
                 device,
             },
             options.embedding_concurrency,
@@ -737,38 +898,73 @@ fn acquire_model(
         .map_err(ModelError::into_engine_error)
 }
 
-pub(crate) fn embedding_reference(
+fn embedding_reference(
     existing: Option<&Workspace>,
-    requested: Option<&EmbeddingModelSpec>,
+    options: &IndexOptions,
 ) -> Result<String, EngineError> {
-    let config = crate::config::read()?;
-    resolve_embedding_reference(ResolveEmbeddingReferenceOptions {
-        explicit: requested.map(|embedding| embedding.reference.clone()),
-        existing: existing
-            .and_then(|workspace| {
-                workspace
-                    .index()
-                    .descriptor()
-                    .map(IndexDescriptor::default_embedding_model)
-            })
-            .map(|embedding| embedding.model().reference()),
-        global_default: crate::config::string(&config, &["defaults", "embedding"]),
-        fallback: Some(DEFAULT_LOCAL_EMBEDDING.to_owned()),
-        ..ResolveEmbeddingReferenceOptions::default()
-    })
-    .map_err(ModelError::into_engine_error)?
-    .ok_or_else(|| EngineError::internal("default embedding model is not configured"))
+    embedding_policy::configured_selection(existing, options)?
+        .map(|selection| selection.model)
+        .ok_or_else(|| {
+            EngineError::internal("index embedding selection must precede model acquisition")
+        })
+}
+
+pub(in crate::pipelines) fn resolve_remote_api_key(
+    config: &serde_json::Value,
+    reference: &str,
+    http: Option<&HttpEmbeddingConfig>,
+    workspace: Option<&Workspace>,
+    saved_runtime: Option<&ModelConfig<EncryptedApiKey>>,
+    explicit_key: Option<&str>,
+) -> Result<Option<String>, EngineError> {
+    let provider = reference.split('/').next().unwrap_or_default();
+    if provider == "local" {
+        return Ok(None);
+    }
+    if let Some(http) = http {
+        return match http.auth {
+            HttpAuth::None => Ok(None),
+            HttpAuth::Bearer => {
+                if let Some(key) = explicit_key {
+                    return Ok(Some(key.to_owned()));
+                }
+                if let (Some(workspace), Some(runtime)) = (workspace, saved_runtime)
+                    && let Some(encrypted) = runtime.api_key.as_ref()
+                {
+                    return decrypt_api_key(encrypted, workspace.layout(), reference).map(Some);
+                }
+                Ok(http.api_key_env.as_deref().and_then(non_empty_env_var))
+            }
+        };
+    }
+    if let Some(key) = explicit_key {
+        return Ok(Some(key.to_owned()));
+    }
+    let saved_key = if let (Some(workspace), Some(runtime)) = (workspace, saved_runtime) {
+        runtime
+            .api_key
+            .as_ref()
+            .map(|key| decrypt_api_key(key, workspace.layout(), reference))
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(saved_key
+        .or_else(|| crate::config::string(config, &["providers", provider, "apiKey"]))
+        .or_else(environment_api_key))
+}
+
+fn non_empty_env_var(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 pub(in crate::pipelines) fn environment_api_key() -> Option<String> {
     ["ZVEC_GREP_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_KEY"]
         .into_iter()
-        .find_map(|name| {
-            env::var(name)
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-        })
+        .find_map(non_empty_env_var)
 }
 
 pub(in crate::pipelines) fn assert_embedding_compatible(
@@ -820,7 +1016,22 @@ fn saved_embedding_config(
                 .cloned()
         })
         .unwrap_or_default();
-    if model.info().model().provider() == "local" {
+    if let Some(http) = model.configured_http() {
+        let mut config = ModelConfig {
+            http: Some(http.clone()),
+            endpoint: model.configured_endpoint().map(str::to_owned),
+            api_key: (http.auth == HttpAuth::Bearer)
+                .then_some(stored.api_key)
+                .flatten(),
+            ..Default::default()
+        };
+        if http.auth == HttpAuth::Bearer
+            && let Some(key) = options.api_key.as_deref()
+        {
+            config.api_key = Some(encrypt_api_key(layout, &reference, key)?);
+        }
+        stored = config;
+    } else if model.info().model().provider() == "local" {
         stored.device = options
             .device
             .or_else(|| {
@@ -831,26 +1042,36 @@ fn saved_embedding_config(
                     .filter(|device| *device != Device::Auto)
             })
             .or(stored.device);
-        stored.cache_dir = options
-            .model_cache
-            .clone()
-            .or_else(|| {
-                options
-                    .embedding
-                    .as_ref()
-                    .and_then(|embedding| embedding.cache_dir.clone())
-            })
-            .or(stored.cache_dir);
-        return Ok(stored);
+    } else {
+        stored.endpoint = model
+            .configured_endpoint()
+            .map(str::to_owned)
+            .or(stored.endpoint);
+        if let Some(key) = options.api_key.as_deref() {
+            stored.api_key = Some(encrypt_api_key(layout, &reference, key)?);
+        }
     }
-    stored.endpoint = model
-        .configured_endpoint()
-        .map(str::to_owned)
-        .or(stored.endpoint);
-    if let Some(key) = options.api_key.as_deref() {
-        stored.api_key = Some(encrypt_api_key(layout, &reference, key)?);
-    }
+    // Artifact caches are shared workspace settings, not per-model settings.
+    stored.cache_dir = None;
     Ok(stored)
+}
+
+fn workspace_index_info(
+    workspace: &Workspace,
+    options: &InfoOptions,
+    indexed: bool,
+) -> WorkspaceIndexInfo {
+    let mut info = WorkspaceIndexInfo::from_workspace(workspace);
+    if options.include_status
+        && options.include_counts
+        && indexed
+        && let (Some(embedding), Some(descriptor)) =
+            (&mut info.embedding, workspace.index().descriptor())
+    {
+        embedding.input_budget =
+            embedding_input_budget(descriptor.default_embedding_model().max_input_tokens());
+    }
+    info
 }
 
 fn unindexed_info(
@@ -908,6 +1129,48 @@ mod tests {
     };
 
     use super::{ModelRuntimeManager, WorkspaceIndexService};
+
+    #[test]
+    fn extraction_model_cache_is_independent_of_embedding_backend() {
+        let directory = tempdir().expect("cache preferences");
+        let runtime = directory.path().join("runtime");
+        let explicit = directory.path().join("explicit");
+        let embedding = directory.path().join("embedding");
+        let global = directory.path().join("global");
+        let config = serde_json::json!({"defaults": {"modelCacheDir": global}});
+        for reference in [
+            "local/potion-code-16m-v2",
+            "http/fixture",
+            "qwen/text-embedding-v4",
+        ] {
+            let mut options = IndexOptions {
+                runtime_model_cache: Some(runtime.clone()),
+                model_cache: Some(explicit.clone()),
+                embedding: Some(EmbeddingModelSpec {
+                    reference: reference.into(),
+                    revision: None,
+                    cache_dir: Some(embedding.clone()),
+                    endpoint: None,
+                    device: Device::Auto,
+                }),
+                ..Default::default()
+            };
+            let resolve = |options: &IndexOptions| super::index_model_cache(&config, None, options);
+            assert_eq!(resolve(&options), Some(runtime.clone()), "{reference}");
+            options.runtime_model_cache = None;
+            assert_eq!(resolve(&options), Some(explicit.clone()), "{reference}");
+            options.model_cache = None;
+            assert_eq!(resolve(&options), Some(embedding.clone()), "{reference}");
+            options.embedding.as_mut().expect("embedding").cache_dir = None;
+            assert_eq!(
+                resolve(&options),
+                std::env::var_os("ZVEC_GREP_MODEL_CACHE")
+                    .map(PathBuf::from)
+                    .or_else(|| Some(global.clone())),
+                "{reference}",
+            );
+        }
+    }
 
     #[test]
     fn normalizes_selected_model_cache_paths() {
@@ -1021,18 +1284,22 @@ mod tests {
     }
 
     fn write_previous_index_version(home: &std::path::Path, manifest: &crate::domain::Workspace) {
-        let mut previous = manifest.clone();
-        previous = crate::domain::Workspace::new(
-            previous.source_root(),
-            previous.layout().clone(),
-            previous.scan().clone(),
-            Some(super::CURRENT_INDEX_VERSION - 1),
-            previous.storage_generation().map(str::to_owned),
-            previous.created_epoch_ms(),
-            previous.updated_epoch_ms(),
-            previous.index().clone(),
-        )
-        .expect("workspace");
+        let mut previous = serde_json::to_value(manifest).expect("manifest JSON");
+        previous["indexVersion"] = serde_json::json!(super::CURRENT_INDEX_VERSION - 1);
+        if let Some(cache) = previous
+            .as_object_mut()
+            .expect("manifest")
+            .remove("modelCacheDir")
+        {
+            let reference = manifest
+                .index()
+                .descriptor()
+                .expect("index")
+                .default_embedding_model()
+                .model()
+                .reference();
+            previous["index"]["descriptor"]["embeddingConfigs"][reference]["cacheDir"] = cache;
+        }
         std::fs::write(
             home.join("manifest.json"),
             serde_json::to_vec(&previous).expect("previous manifest JSON"),
@@ -1116,24 +1383,248 @@ mod tests {
     }
 
     #[test]
+    fn every_embedding_provider_persists_model_cache_without_temporary_overrides() {
+        let models = ModelRuntimeManager::new();
+        for entry in crate::models::list_embedding_models() {
+            let config = if matches!(entry, crate::models::EmbeddingCatalogEntry::Qwen(_)) {
+                super::ModelConfig {
+                    api_key: Some("fixture-token".into()),
+                    endpoint: Some("http://127.0.0.1:9/v1/embeddings".into()),
+                    ..Default::default()
+                }
+            } else {
+                super::ModelConfig::default()
+            };
+            let model = models
+                .acquire(super::ModelRuntimeRequest::new(
+                    entry.reference(),
+                    config,
+                    None,
+                ))
+                .expect("catalog metadata without loading models");
+            assert_model_cache_persistence(&model);
+        }
+        for auth in ["none", "bearer"] {
+            let http = serde_json::from_value(serde_json::json!({
+                "model": "served-model", "dimension": 4, "maxInputTokens": 128, "auth": auth
+            }))
+            .expect("HTTP descriptor");
+            let model = models
+                .acquire(super::ModelRuntimeRequest::new(
+                    "http/fixture",
+                    super::ModelConfig {
+                        http: Some(http),
+                        api_key: (auth == "bearer").then(|| "fixture-token".into()),
+                        endpoint: Some("http://127.0.0.1:9/v1/embeddings".into()),
+                        ..Default::default()
+                    },
+                    None,
+                ))
+                .expect("HTTP metadata without loading models");
+            assert_model_cache_persistence(&model);
+        }
+        models.close();
+    }
+
+    fn assert_model_cache_persistence(model: &super::ModelRuntimeLease) {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let reference = model.info().model().reference();
+        let cache = directory.path().join("models");
+        let replacement = directory.path().join("replacement-models");
+        let mut workspace = None;
+        for (options, expected) in [
+            (IndexOptions::default(), None),
+            (
+                IndexOptions {
+                    runtime_model_cache: Some(directory.path().join("temporary-models")),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                IndexOptions {
+                    model_cache: Some(cache.clone()),
+                    ..Default::default()
+                },
+                Some(&cache),
+            ),
+            (IndexOptions::default(), Some(&cache)),
+            (
+                IndexOptions {
+                    runtime_model_cache: Some(directory.path().join("temporary-models")),
+                    ..Default::default()
+                },
+                Some(&cache),
+            ),
+            (
+                IndexOptions {
+                    model_cache: Some(replacement.clone()),
+                    ..Default::default()
+                },
+                Some(&replacement),
+            ),
+            (IndexOptions::default(), Some(&replacement)),
+        ] {
+            let descriptor = IndexDescriptor::new(
+                model.info().clone(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::from([(
+                    reference.clone(),
+                    super::ModelConfig {
+                        http: model.configured_http().cloned(),
+                        endpoint: model.configured_endpoint().map(str::to_owned),
+                        ..Default::default()
+                    },
+                )]),
+                false,
+                crate::domain::FTS_CONFIG,
+            )
+            .expect("index descriptor");
+            let updated = super::index_workspace_state(
+                directory.path(),
+                &layout,
+                workspace.as_ref(),
+                &options,
+                std::slice::from_ref(model),
+                &descriptor,
+                crate::domain::ScanRules::default(),
+                true,
+            )
+            .expect("workspace");
+            assert_eq!(
+                updated.model_cache_dir(),
+                expected.map(PathBuf::as_path),
+                "{reference}"
+            );
+            let saved = &updated
+                .index()
+                .descriptor()
+                .expect("index")
+                .embedding_configs()[&reference];
+            assert_eq!(saved.cache_dir, None, "cache is shared, not per model");
+            super::write_workspace_manifest(layout.manifest_path(), &updated).expect("write");
+            workspace = super::read_workspace_manifest(directory.path(), &layout).expect("read");
+            assert_eq!(workspace.as_ref(), Some(&updated));
+        }
+    }
+
+    #[test]
+    fn http_bearer_key_precedence_and_workspace_persistence_follow_qwen_policy() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        std::fs::create_dir(layout.storage_dir()).expect("storage directory");
+        let http: super::HttpEmbeddingConfig = serde_json::from_value(serde_json::json!({
+            "model": "served-model", "dimension": 4, "maxInputTokens": 128,
+            "auth": "bearer", "apiKeyEnv": "ZG_TEST_UNUSED_ENV"
+        }))
+        .expect("HTTP descriptor");
+        let model_info = http.model_info("http/private").expect("model info");
+        let encrypted =
+            super::encrypt_api_key(&layout, "http/private", "saved-http-token").expect("encrypt");
+        let saved_config = super::ModelConfig {
+            api_key: Some(encrypted.clone()),
+            endpoint: Some("https://example.test/v1/embeddings".into()),
+            http: Some(http.clone()),
+            ..Default::default()
+        };
+        let descriptor = IndexDescriptor::new(
+            model_info.clone(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([("http/private".into(), saved_config.clone())]),
+            false,
+            crate::domain::FTS_CONFIG,
+        )
+        .expect("bearer HTTP index may store encrypted API key");
+        let workspace = Workspace::new(
+            directory.path(),
+            layout.clone(),
+            crate::domain::ScanRules::default(),
+            crate::workspace::CURRENT_INDEX_VERSION,
+            Some(uuid::Uuid::new_v4().to_string()),
+            1,
+            1,
+            IndexState::Enabled(Box::new(descriptor)),
+        )
+        .expect("workspace");
+
+        // Global provider keys must never be applied to http/ models.
+        let global = serde_json::json!({"providers": {"http": {"apiKey": "provider-key"}}});
+        let resolve = |ws, saved, explicit| {
+            super::resolve_remote_api_key(&global, "http/private", Some(&http), ws, saved, explicit)
+                .expect("resolve bearer key")
+        };
+        assert_eq!(
+            resolve(Some(&workspace), Some(&saved_config), Some("override")),
+            Some("override".into())
+        );
+        assert_eq!(
+            resolve(Some(&workspace), Some(&saved_config), None),
+            Some("saved-http-token".into())
+        );
+        assert_eq!(resolve(None, None, None), None);
+
+        // runtime_api_key overrides without altering the saved encrypted key.
+        let models = ModelRuntimeManager::new();
+        let mut request = IndexOptions {
+            root: Some(directory.path().to_path_buf()),
+            runtime_api_key: Some("temporary-runtime-key".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        };
+        let lease = super::acquire_model(&models, Some(&workspace), &request).expect("lease");
+        let preserved = super::saved_embedding_config(&layout, Some(&workspace), &request, &lease)
+            .expect("runtime key preserves saved key");
+        assert_eq!(preserved.api_key, Some(encrypted.clone()));
+        request.api_key = Some("rotated-saved-key".into());
+        let rotated = super::saved_embedding_config(&layout, Some(&workspace), &request, &lease)
+            .expect("explicit index api_key rotates saved key");
+        assert_eq!(
+            super::decrypt_api_key(
+                rotated.api_key.as_ref().expect("rotated"),
+                &layout,
+                "http/private"
+            )
+            .expect("decrypt"),
+            "rotated-saved-key"
+        );
+
+        // auth: none rejects persisted API keys in index metadata.
+        let mut none_http = http;
+        none_http.auth = super::HttpAuth::None;
+        none_http.api_key_env = None;
+        let none_config = super::ModelConfig {
+            api_key: Some(encrypted),
+            endpoint: Some("https://example.test/v1/embeddings".into()),
+            http: Some(none_http),
+            ..Default::default()
+        };
+        assert!(
+            IndexDescriptor::new(
+                model_info,
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::from([("http/private".into(), none_config)]),
+                false,
+                crate::domain::FTS_CONFIG,
+            )
+            .is_err()
+        );
+        models.close();
+    }
+
+    #[test]
     fn rejects_incompatible_index_versions() {
-        crate::workspace::manifest::require_current_index_version(Some(
-            super::CURRENT_INDEX_VERSION,
-        ))
-        .expect("current index");
+        crate::workspace::manifest::require_current_index_version(super::CURRENT_INDEX_VERSION)
+            .expect("current index");
         for version in [
-            None,
-            Some(0),
-            Some(1),
-            Some(2),
-            Some(3),
-            Some(4),
-            Some(6),
-            Some(u32::MAX),
+            0,
+            super::CURRENT_INDEX_VERSION - 1,
+            super::CURRENT_INDEX_VERSION + 1,
+            u32::MAX,
         ] {
             assert_ne!(
                 version,
-                Some(super::CURRENT_INDEX_VERSION),
+                super::CURRENT_INDEX_VERSION,
                 "samples must stay incompatible with the current version"
             );
             let error = crate::workspace::manifest::require_current_index_version(version)
@@ -1162,7 +1653,7 @@ mod tests {
             }
             .apply(&crate::domain::ScanRules::default())
             .expect("scan rules"),
-            None,
+            super::CURRENT_INDEX_VERSION,
             None,
             0,
             0,
@@ -1335,6 +1826,7 @@ mod tests {
             .info(InfoOptions {
                 root: Some(moved.clone()),
                 include_status: true,
+                include_counts: false,
             })
             .await
             .expect("moved workspace info");
@@ -1382,6 +1874,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("missing index should be an idempotent no-op")
@@ -1407,6 +1900,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect_err("reject storage alias");
@@ -1430,6 +1924,7 @@ mod tests {
         let options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: false,
+            include_counts: false,
         };
         assert!(!home.join("manifest.json").exists());
         assert!(!layout.has_build_record().expect("build record"));
@@ -1527,6 +2022,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_cache_survives_switching_embedding_models() {
+        for legacy in [false, true] {
+            let directory = tempdir().expect("workspace");
+            let cache = directory.path().join("shared-models");
+            std::fs::create_dir(&cache).expect("cached models");
+            let service = WorkspaceIndexService::new();
+            let models = ModelRuntimeManager::new();
+            let mut options = empty_index_options(directory.path());
+            options.model_cache = Some(cache.clone());
+            service
+                .index(&models, options.clone())
+                .await
+                .expect("model A");
+            let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+            let mut active = super::read_workspace_manifest(directory.path(), &layout)
+                .expect("read")
+                .expect("workspace");
+            if legacy {
+                write_previous_index_version(layout.storage_dir(), &active);
+                active = crate::workspace::manifest::inspect_workspace_manifest(
+                    directory.path(),
+                    &layout,
+                )
+                .expect("legacy manifest")
+                .into_workspace(true)
+                .expect("rebuild settings")
+                .expect("workspace");
+            }
+            options.rebuild = true;
+            options.model_cache = None;
+            options.embedding.as_mut().expect("model B").reference =
+                "local/all-minilm-l6-v2".into();
+            let expected = std::env::var_os("ZVEC_GREP_MODEL_CACHE")
+                .map_or_else(|| cache.clone(), PathBuf::from);
+            assert_eq!(
+                super::index_model_cache(&serde_json::json!({}), Some(&active), &options),
+                Some(expected.clone()),
+            );
+            service
+                .index(&models, options)
+                .await
+                .expect("rebuild with model B");
+            let rebuilt = super::read_workspace_manifest(directory.path(), &layout)
+                .expect("read")
+                .expect("workspace");
+            assert_eq!(
+                super::index_model_cache(
+                    &serde_json::json!({}),
+                    Some(&rebuilt),
+                    &IndexOptions::default()
+                ),
+                Some(expected),
+            );
+            assert_eq!(rebuilt.model_cache_dir(), Some(cache.as_path()));
+            let serialized = serde_json::to_value(&rebuilt).expect("manifest");
+            assert_eq!(serialized["modelCacheDir"], serde_json::json!(cache));
+            assert!(!serialized.to_string().contains("\"cacheDir\""));
+            let cached_runtimes = models.snapshot().cached_runtimes;
+            let query = crate::pipelines::indexed_search::service::acquire_search_model(
+                &models,
+                &rebuilt,
+                &crate::api::context::ContextOptions::default(),
+            )
+            .expect("query uses shared cache");
+            assert_eq!(models.snapshot().cached_runtimes, cached_runtimes);
+            drop(query);
+            models.close();
+        }
+    }
+
+    #[tokio::test]
     async fn model_preferences_save_index_changes_but_not_query_overrides() {
         let directory = tempdir().expect("workspace");
         let service = WorkspaceIndexService::new();
@@ -1564,6 +2130,7 @@ mod tests {
                 .expect("indexed workspace")
                 .embedding_configs()
         );
+        assert_eq!(refreshed.model_cache_dir(), manifest.model_cache_dir());
         service
             .index(
                 &models,
@@ -1584,16 +2151,17 @@ mod tests {
             manifest.storage_generation()
         );
         let saved = serde_json::to_value(&configured).expect("manifest serialization");
+        assert_eq!(
+            saved["modelCacheDir"],
+            serde_json::json!(directory.path().join("saved-models"))
+        );
         for runtime in saved["index"]["descriptor"]["embeddingConfigs"]
             .as_object()
             .expect("runtimes")
             .values()
         {
             assert_eq!(runtime["device"], "auto");
-            assert_eq!(
-                runtime["cacheDir"],
-                serde_json::json!(directory.path().join("saved-models"))
-            );
+            assert!(runtime.get("cacheDir").is_none());
         }
         let replacement = directory.path().join("replacement-models");
         service
@@ -1614,15 +2182,7 @@ mod tests {
             replaced.storage_generation(),
             configured.storage_generation()
         );
-        for config in replaced
-            .index()
-            .descriptor()
-            .expect("index")
-            .embedding_configs()
-            .values()
-        {
-            assert_eq!(config.cache_dir.as_ref(), Some(&replacement));
-        }
+        assert_eq!(replaced.model_cache_dir(), Some(replacement.as_path()));
         models.close();
     }
 
@@ -1831,7 +2391,8 @@ mod tests {
             service
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
-                    include_status: false
+                    include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("drop incomplete build")
@@ -1942,11 +2503,16 @@ mod tests {
                         )
                         .await;
                     if graph_enabled {
-                        assert!(result.expect("enabled graph read").matches.is_empty());
+                        let result = result.expect("enabled graph read");
+                        assert!(result.matches.is_empty());
+                        assert!(result.suggestions.is_empty());
                     } else {
-                        assert_eq!(
-                            result.expect_err("disabled graph read").code(),
-                            crate::EngineError::UNSUPPORTED
+                        let error = result.expect_err("disabled graph read");
+                        assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+                        assert!(
+                            error
+                                .help()
+                                .is_some_and(|help| help.contains("zg --index --rebuild --graph"))
                         );
                     }
                 }
@@ -2030,6 +2596,7 @@ mod tests {
                 .info(InfoOptions {
                     root: Some(root.clone()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("workspace info");
@@ -2069,7 +2636,8 @@ mod tests {
             service
                 .info(InfoOptions {
                     root: Some(child.clone()),
-                    include_status: false
+                    include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("ancestor info")
@@ -2121,7 +2689,8 @@ mod tests {
             service
                 .info(InfoOptions {
                     root: Some(child.clone()),
-                    include_status: true
+                    include_status: true,
+                    include_counts: false,
                 })
                 .await
                 .expect("child info")
@@ -2175,6 +2744,7 @@ mod tests {
         let options = InfoOptions {
             root: Some(deleted.clone()),
             include_status: false,
+            include_counts: false,
         };
         for _ in 0..2 {
             let error = service
@@ -2211,6 +2781,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(moved.clone()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("drop moved workspace")
@@ -2414,12 +2985,9 @@ mod tests {
             "{}",
             error.message()
         );
-        assert!(
-            error
-                .help()
-                .is_some_and(|help| help.contains("zg --index --rebuild")),
-            "{:?}",
-            error.help()
+        assert_eq!(
+            error.help(),
+            Some("Rebuild the index with `zg --index --rebuild --graph`.")
         );
         let rejected = published(&layout);
         assert!(
@@ -2470,6 +3038,10 @@ mod tests {
             error.message().contains("stores the code graph"),
             "{}",
             error.message()
+        );
+        assert_eq!(
+            error.help(),
+            Some("Rebuild the index with `zg --index --rebuild`.")
         );
         let still_enabled = published(&layout);
         assert!(
@@ -2612,6 +3184,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("no index to drop")
@@ -2755,6 +3328,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn input_budget_diagnostics_use_saved_limits_without_loading_models_or_changing_metadata()
+    {
+        let directory = tempdir().expect("workspace");
+        let root = directory.path();
+        let cache = root.join("model-cache");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        let mut options = empty_index_options(root);
+        options.embedding.as_mut().expect("model").cache_dir = Some(cache.clone());
+        service.index(&models, options).await.expect("empty index");
+        models.close();
+        assert!(!cache.exists(), "empty indexing must not prepare a model");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let original = std::fs::read(layout.manifest_path()).expect("saved manifest");
+
+        // A saved limit that differs from the catalog proves that diagnostics
+        // describe this index rather than constructing a new model runtime.
+        for saved_limit in [Some(17), None] {
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&original).expect("manifest JSON");
+            manifest["index"]["descriptor"]["defaultEmbeddingModel"]["maxInputTokens"] =
+                serde_json::json!(saved_limit);
+            let bytes = serde_json::to_vec(&manifest).expect("updated metadata");
+            std::fs::write(layout.manifest_path(), &bytes).expect("save test limit");
+            for (include_status, include_counts) in
+                [(true, false), (false, true), (true, true), (true, false)]
+            {
+                let info = service
+                    .info(InfoOptions {
+                        root: Some(root.to_path_buf()),
+                        include_status,
+                        include_counts,
+                    })
+                    .await
+                    .expect("read-only inspection");
+                let budget = info
+                    .workspace_index
+                    .expect("workspace")
+                    .embedding
+                    .expect("embedding")
+                    .input_budget;
+                assert_eq!(
+                    budget,
+                    if include_status && include_counts {
+                        super::embedding_input_budget(saved_limit)
+                    } else {
+                        None
+                    }
+                );
+                if let Some(budget) = budget {
+                    assert_eq!(budget.max_input_tokens, 17);
+                    assert_eq!(budget.normal.max_length, 31);
+                    assert_eq!(budget.normal.overlap, 4);
+                }
+                assert_eq!(
+                    std::fs::read(layout.manifest_path()).expect("manifest"),
+                    bytes
+                );
+                assert!(!cache.exists(), "inspection must not prepare a model");
+            }
+        }
+        std::fs::write(layout.manifest_path(), &original).expect("restore model metadata");
+        std::fs::remove_dir_all(layout.index_dir()).expect("remove test index");
+        let missing = service
+            .info(InfoOptions {
+                root: Some(root.to_path_buf()),
+                include_status: true,
+                include_counts: true,
+            })
+            .await
+            .expect("missing index inspection");
+        assert!(!missing.indexed);
+        assert_eq!(
+            missing
+                .workspace_index
+                .expect("workspace")
+                .embedding
+                .expect("model")
+                .input_budget,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn only_explicit_info_counts_fragments_once_and_isolates_count_failures() {
+        use std::sync::atomic::Ordering;
+
+        let directory = tempdir().expect("workspace");
+        let root = directory.path();
+        let mut service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        service
+            .index(&models, empty_index_options(root))
+            .await
+            .expect("empty index");
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 0);
+        let options = InfoOptions {
+            root: Some(root.to_path_buf()),
+            include_status: true,
+            include_counts: false,
+        };
+        for expected in 1..=2 {
+            let plain = service
+                .info(options.clone())
+                .await
+                .expect("ordinary status");
+            assert_eq!(plain.status.expect("status").fragments_indexed, None);
+            assert_eq!(
+                service.fragment_count_reads.load(Ordering::Acquire),
+                expected - 1
+            );
+            let diagnostic = service
+                .info(InfoOptions {
+                    include_counts: true,
+                    ..options.clone()
+                })
+                .await
+                .expect("explicit counts");
+            assert_eq!(
+                diagnostic.status.expect("status").fragments_indexed,
+                Some(0)
+            );
+            assert_eq!(
+                service.fragment_count_reads.load(Ordering::Acquire),
+                expected
+            );
+        }
+
+        service.fail_fragment_count = true;
+        service
+            .info(options.clone())
+            .await
+            .expect("ordinary status skips failed count");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let wait = super::LockWait::new(None, None).expect("lock wait");
+        assert!(
+            !service
+                .workspace_needs_refresh(root, &layout, &wait, None)
+                .await
+                .expect("freshness skips failed count")
+        );
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 2);
+        let error = service
+            .info(InfoOptions {
+                include_counts: true,
+                ..options.clone()
+            })
+            .await
+            .expect_err("explicit count failure");
+        assert!(error.message().contains("injected fragment count failure"));
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 3);
+        let plain = service
+            .info(options)
+            .await
+            .expect("ordinary status after failure");
+        assert_eq!(plain.status.expect("status").fragments_indexed, None);
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 3);
+        models.close();
+    }
+
+    #[tokio::test]
     async fn composes_workspace_lifecycle_around_the_indexing_pipeline() {
         let directory = tempdir().expect("temporary directory");
         let sources = directory.path().join("sources");
@@ -2764,6 +3498,7 @@ mod tests {
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.scan.globs = Some(vec!["sources/**".into()]);
+        options.graph_indexing = Some(true);
         options.embedding.as_mut().expect("local model").cache_dir =
             Some(directory.path().join("model-cache"));
         let result = service
@@ -2775,6 +3510,7 @@ mod tests {
         let info_options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: true,
+            include_counts: false,
         };
         let info = service
             .info(info_options.clone())
@@ -2792,7 +3528,7 @@ mod tests {
         .expect("manifest");
         let serialized = serde_json::to_value(&manifest).expect("manifest serialization");
         assert_eq!(
-            serialized["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"]["cacheDir"],
+            serialized["modelCacheDir"],
             serde_json::json!(directory.path().join("model-cache"))
         );
         let lease = crate::pipelines::indexed_search::service::acquire_search_model(
@@ -2832,21 +3568,23 @@ mod tests {
             .index(
                 &models,
                 IndexOptions {
+                    root: options.root.clone(),
                     rebuild: true,
-                    ..options
+                    ..IndexOptions::default()
                 },
             )
             .await
-            .expect("rebuild uses explicitly supplied configuration");
+            .expect("v2 rebuild inherits saved configuration without overrides");
         let rebuilt = super::read_workspace_manifest(
             layout.storage_dir().parent().expect("source root"),
             &layout,
         )
         .expect("manifest read")
         .expect("manifest");
-        assert_eq!(rebuilt.index_version(), Some(super::CURRENT_INDEX_VERSION));
+        assert_eq!(rebuilt.index_version(), super::CURRENT_INDEX_VERSION);
         assert_eq!(rebuilt.source_root(), manifest.source_root());
         assert_eq!(rebuilt.scan(), manifest.scan());
+        assert!(graph_indexing_enabled(&rebuilt));
         assert_eq!(
             rebuilt
                 .index()

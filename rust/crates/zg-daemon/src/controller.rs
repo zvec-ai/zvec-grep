@@ -30,7 +30,7 @@ const STARTUP_FILE: &str = "startup.lock";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
-const DAEMON_PROTOCOL_VERSION: u32 = 2;
+const DAEMON_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StopMode {
@@ -93,6 +93,8 @@ struct DaemonInstanceRecord {
     mcp_toolset: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     daemon_protocol_version: Option<u32>,
+    #[serde(default)]
+    compact_claude_instructions: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -102,6 +104,7 @@ pub struct DaemonStatus {
     pub pid: Option<u32>,
     pub server_url: Option<String>,
     pub mcp_toolset: Option<String>,
+    pub compact_claude_instructions: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -116,6 +119,224 @@ struct StartupLock {
     path: PathBuf,
     record: StartupRecord,
     _held: HeldToken,
+}
+
+/// Non-secret startup settings observed from an external daemon record.
+#[derive(Clone, Debug)]
+pub struct ExternalDaemon {
+    pub executable: PathBuf,
+    pub listen: String,
+    pub mcp_toolset: String,
+}
+
+/// Holds the startup claim across an installation so bridges cannot restart the
+/// old executable between graceful shutdown and activation of the new bundle.
+pub struct InstallationDaemon {
+    _lock: StartupLock,
+    home: PathBuf,
+    executables: Vec<PathBuf>,
+    token_file: Option<PathBuf>,
+    config: Option<ServerConfig>,
+    original_executable: Option<PathBuf>,
+    authentication_required: bool,
+    external: Option<ExternalDaemon>,
+}
+
+impl InstallationDaemon {
+    /// Claims a local home and distinguishes owned daemons from external installations.
+    /// External daemons are observed without probing their credentials or stopping them.
+    ///
+    /// # Errors
+    /// Returns ownership, locking, instance-record or configuration errors.
+    pub async fn acquire(
+        home: &Path,
+        executables: &[PathBuf],
+        token_file: Option<&Path>,
+    ) -> Result<Self, DaemonError> {
+        let lock = StartupLock::acquire(home).await?;
+        let environment_file = std::env::var_os("ZVEC_GREP_SERVER_TOKEN_FILE").map(PathBuf::from);
+        let token_file = token_file.or(environment_file.as_deref());
+        let mut guard = Self {
+            _lock: lock,
+            home: home.to_owned(),
+            executables: executables.to_vec(),
+            token_file: token_file.map(std::path::absolute).transpose()?,
+            config: None,
+            original_executable: None,
+            authentication_required: false,
+            external: None,
+        };
+        if let Some(record) = read_running_instance(home).await? {
+            let executable = Self::process_executable(&record)?;
+            if !guard.owns_executable(&executable) {
+                guard.external = Some(ExternalDaemon {
+                    executable,
+                    listen: if record.listen.is_empty() {
+                        record
+                            .server_url
+                            .strip_prefix("http://")
+                            .and_then(|url| url.strip_suffix("/mcp"))
+                            .unwrap_or_default()
+                            .to_owned()
+                    } else {
+                        record.listen.clone()
+                    },
+                    mcp_toolset: record.mcp_toolset.clone(),
+                });
+                return Ok(guard);
+            }
+            let mut config =
+                ServerConfig::new(record_address(&record, home).await?, home.to_owned());
+            // GET cannot shut down the service, but still crosses its authentication middleware.
+            let status = http_request(
+                &config.listen,
+                "GET",
+                "/control/shutdown",
+                HTTP_TIMEOUT,
+                None,
+            )
+            .await?;
+            guard.authentication_required = match status {
+                401 => true,
+                405 => false,
+                _ => {
+                    return Err(DaemonError::McpBridge(format!(
+                        "unexpected daemon authentication response: {status}"
+                    )));
+                }
+            };
+            if guard.authentication_required
+                && crate::resolve_token(guard.token_file.as_deref())?.is_none()
+            {
+                return Err(DaemonError::McpBridge(
+                    "the installed daemon requires its existing authentication token".into(),
+                ));
+            }
+            config.token_file.clone_from(&guard.token_file);
+            config.mcp_toolset = Some(match record.mcp_toolset.as_str() {
+                "full" => crate::McpToolset::Full,
+                _ => crate::McpToolset::Agent,
+            });
+            guard.config = Some(config);
+            guard.original_executable = Some(executable);
+        }
+        Ok(guard)
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> Option<&ServerConfig> {
+        self.config.as_ref()
+    }
+
+    /// Executable verified when the installation claim was acquired.
+    #[must_use]
+    pub fn original_executable(&self) -> Option<&Path> {
+        self.original_executable.as_deref()
+    }
+
+    /// Whether restarting this installation must preserve authentication.
+    #[must_use]
+    pub const fn authentication_required(&self) -> bool {
+        self.authentication_required
+    }
+
+    #[must_use]
+    pub fn external_executable(&self) -> Option<&Path> {
+        self.external
+            .as_ref()
+            .map(|external| external.executable.as_path())
+    }
+
+    /// Observed startup settings, read without contacting the external service.
+    #[must_use]
+    pub const fn external_daemon(&self) -> Option<&ExternalDaemon> {
+        self.external.as_ref()
+    }
+
+    /// Rejects a restart or recovery that would take over an external daemon.
+    ///
+    /// # Errors
+    /// Returns an installation conflict when the active daemon belongs elsewhere.
+    pub fn require_owned(&self) -> Result<(), DaemonError> {
+        if let Some(executable) = self.external_executable() {
+            return Err(DaemonError::InstallationConflict {
+                executable: executable.display().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn process_executable(record: &DaemonInstanceRecord) -> Result<PathBuf, DaemonError> {
+        let actual =
+            with_process(record.pid, |process| process.exe().map(Path::to_owned)).flatten();
+        actual
+            .as_ref()
+            .and_then(|path| path.canonicalize().ok())
+            .ok_or_else(|| DaemonError::InstallationConflict {
+                executable: actual
+                    .map_or_else(|| "unknown".to_owned(), |path| path.display().to_string()),
+            })
+    }
+
+    fn owns_executable(&self, actual: &Path) -> bool {
+        self.executables
+            .iter()
+            .any(|expected| expected.canonicalize().ok().as_deref() == Some(actual))
+    }
+
+    fn verify_executable(&self, record: &DaemonInstanceRecord) -> Result<(), DaemonError> {
+        let actual = Self::process_executable(record)?;
+        if !self.owns_executable(&actual) {
+            return Err(DaemonError::InstallationConflict {
+                executable: actual.display().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Stops only this installation's verified process, without signal escalation.
+    /// External daemons are left running.
+    ///
+    /// # Errors
+    /// Returns identity, authentication, shutdown or timeout errors.
+    pub async fn stop(&self) -> Result<(), DaemonError> {
+        if self.external.is_some() {
+            return Ok(());
+        }
+        if let Some(record) = read_running_instance(&self.home).await? {
+            self.verify_executable(&record)?;
+            let token = crate::resolve_token(self.token_file.as_deref())?;
+            stop_recorded_server(
+                &self.home,
+                &record,
+                crate::default_stop_timeout(),
+                token.as_deref(),
+                StopMode::Graceful,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Restarts the previously active configuration while retaining the startup claim.
+    ///
+    /// # Errors
+    /// Returns startup, readiness or executable-identity errors.
+    pub async fn restart(
+        &self,
+        executable: &Path,
+        config: Option<&ServerConfig>,
+    ) -> Result<(), DaemonError> {
+        if let Some(config) = config {
+            self.require_owned()?;
+            start_server_with_lock(executable, config).await?;
+            let record = read_running_instance(&self.home)
+                .await?
+                .ok_or(DaemonError::Timeout { action: "start" })?;
+            self.verify_executable(&record)?;
+        }
+        Ok(())
+    }
 }
 
 impl StartupLock {
@@ -237,6 +458,7 @@ impl InstanceLock {
             ready: false,
             mcp_toolset: config.mcp_toolset.unwrap_or_default().to_string(),
             daemon_protocol_version: Some(DAEMON_PROTOCOL_VERSION),
+            compact_claude_instructions: true,
         };
         // Register before publishing so a contender in this process never
         // sees our record without its token; dropping the guard on failure
@@ -474,8 +696,15 @@ async fn start_server_with_lock(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let child = command.spawn()?;
-    wait_until_ready(&config.home, Some((child, log_path))).await
+    let mut child = (command.spawn()?, log_path);
+    let result = wait_until_ready(&config.home, Some(&mut child)).await;
+    // Installation recovery can stop this daemon again before the parent exits.
+    // Reap it even after readiness or startup failure, so zombies cannot look alive.
+    #[cfg(unix)]
+    std::thread::spawn(move || {
+        let _ = child.0.wait();
+    });
+    result
 }
 
 /// Requests graceful shutdown using an explicitly selected token file and falls
@@ -588,6 +817,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
         pid: Some(record.pid),
         server_url: Some(record.server_url),
         mcp_toolset: Some(record.mcp_toolset),
+        compact_claude_instructions: record.compact_claude_instructions,
     })
 }
 
@@ -661,7 +891,7 @@ async fn remove_startup_record_if_same(
 
 async fn wait_until_ready(
     home: &Path,
-    mut child: Option<(DaemonChild, PathBuf)>,
+    mut child: Option<&mut (DaemonChild, PathBuf)>,
 ) -> Result<DaemonStatus, DaemonError> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
@@ -919,15 +1149,70 @@ async fn remove_file_if_exists(path: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{future::Future, sync::mpsc, time::Duration};
 
     use tempfile::TempDir;
 
     use super::{
         DaemonInstanceRecord, InstanceLock, STARTUP_FILE, StartupLock, StartupRecord, daemon_dir,
-        hostname, instance_path, read_instance_record,
+        hostname, instance_path, read_instance_record, record_owner_alive,
     };
     use crate::{DaemonError, ServerConfig};
+
+    #[tokio::test]
+    async fn incompatible_protocol_is_rejected_before_health_or_pdf_responses() {
+        let home = TempDir::new().expect("valid test fixture");
+        let config = ServerConfig::new(
+            "127.0.0.1:7999".parse().expect("valid test fixture"),
+            home.path().into(),
+        );
+        let _lock = InstanceLock::acquire(&config)
+            .await
+            .expect("valid test fixture");
+        let path = instance_path(home.path());
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("valid test fixture"))
+                .expect("valid test fixture");
+        assert_eq!(record["daemonProtocolVersion"], 3);
+        for actual in [2, 4] {
+            record["daemonProtocolVersion"] = serde_json::json!(actual);
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&record).expect("valid test fixture"),
+            )
+            .expect("valid test fixture");
+            let error = super::server_status(home.path())
+                .await
+                .expect_err("expected failure");
+            assert!(
+                matches!(error, DaemonError::ProtocolMismatch { actual: found, expected: 3, .. } if found == actual)
+            );
+            assert!(error.to_string().contains("compatible client"));
+        }
+    }
+
+    /// Occupy Tokio's only blocking worker until the test drops `resume`.
+    /// Publication uses synchronous file I/O; temporary-file cleanup cannot
+    /// complete until this gate is released. No scheduler timing is assumed.
+    fn with_paused_file_io<F: Future<Output = ()>>(test: impl FnOnce(mpsc::Sender<()>) -> F) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let (resume, wait) = mpsc::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let worker = tokio::task::spawn_blocking(move || {
+                started.send(()).expect("test waits for the worker");
+                // Dropping the sender also unblocks this worker if the test panics.
+                let _ = wait.recv();
+            });
+            ready.await.expect("blocking worker is occupied");
+            test(resume).await;
+            worker.await.expect("blocking worker exits");
+        });
+    }
 
     #[tokio::test]
     async fn instance_lock_replaces_an_incomplete_record_with_complete_states() {
@@ -1005,6 +1290,7 @@ mod tests {
             ready: true,
             mcp_toolset: "full".to_owned(),
             daemon_protocol_version: None,
+            compact_claude_instructions: false,
         };
         std::fs::write(&path, serde_json::to_vec(&stale).expect("stale record"))
             .expect("write stale record");
@@ -1063,62 +1349,87 @@ mod tests {
         lock.release().await.expect("release instance lock");
     }
 
-    #[tokio::test]
-    async fn interleaved_instance_lock_acquisitions_admit_one_owner() {
-        let home = TempDir::new().expect("temp home");
-        let config = ServerConfig::new(
-            "127.0.0.1:7999".parse().expect("listen address"),
-            home.path().to_owned(),
-        );
+    #[test]
+    fn interleaved_instance_lock_acquisitions_admit_one_owner() {
+        with_paused_file_io(|resume| async move {
+            let home = TempDir::new().expect("temp home");
+            let config = ServerConfig::new(
+                "127.0.0.1:7999".parse().expect("listen address"),
+                home.path().to_owned(),
+            );
 
-        // Poll the first acquisition once so it publishes the lock file and
-        // parks on its temporary-file cleanup, then let the second one run.
-        let mut first = Box::pin(InstanceLock::acquire(&config));
-        let first_ready =
-            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx).is_ready()))
-                .await;
-        assert!(
-            !first_ready,
-            "first acquisition should park after publishing"
-        );
-        assert!(instance_path(home.path()).exists());
+            let mut first = Box::pin(InstanceLock::acquire(&config));
+            let first_poll =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx))).await;
+            assert!(
+                first_poll.is_pending(),
+                "acquisition must wait for the paused cleanup: {:?}",
+                first_poll.map(|result| result.map(|_| ()))
+            );
+            assert!(instance_path(home.path()).exists());
 
-        let second = InstanceLock::acquire(&config).await;
-        assert!(
-            matches!(second, Err(DaemonError::AlreadyRunning { pid }) if pid == std::process::id())
-        );
-        let mut lock = first.await.expect("first owner keeps the lock");
-        lock.mark_ready().await.expect("owner keeps its lock");
+            // Allow file I/O, but leave the first acquisition unpolled. Its
+            // token must protect the published record before it returns a lock.
+            drop(resume);
+            let published = read_instance_record(home.path())
+                .await
+                .expect("published record")
+                .expect("published owner exists");
+            let second = InstanceLock::acquire(&config).await;
+            assert!(
+                matches!(second, Err(DaemonError::AlreadyRunning { pid }) if pid == std::process::id())
+            );
+            let mut lock = first.await.expect("first owner keeps the lock");
+            assert_eq!(lock.record.instance_token, published.instance_token);
+            lock.mark_ready().await.expect("owner keeps its lock");
 
-        lock.release().await.expect("release instance lock");
+            lock.release().await.expect("release instance lock");
+        });
     }
 
-    #[tokio::test]
-    async fn cancelled_instance_lock_acquisition_releases_its_token() {
-        let home = TempDir::new().expect("temp home");
-        let config = ServerConfig::new(
-            "127.0.0.1:7999".parse().expect("listen address"),
-            home.path().to_owned(),
-        );
+    #[test]
+    fn cancelled_instance_lock_acquisition_releases_its_token() {
+        with_paused_file_io(|resume| async move {
+            let home = TempDir::new().expect("temp home");
+            let config = ServerConfig::new(
+                "127.0.0.1:7999".parse().expect("listen address"),
+                home.path().to_owned(),
+            );
 
-        // Cancel an acquisition after it publishes the lock file. Its record
-        // stays behind under this PID, but the token must not stay held.
-        let mut cancelled = Box::pin(InstanceLock::acquire(&config));
-        let cancelled_ready = std::future::poll_fn(|cx| {
-            std::task::Poll::Ready(cancelled.as_mut().poll(cx).is_ready())
-        })
-        .await;
-        assert!(!cancelled_ready, "acquisition should park after publishing");
-        drop(cancelled);
-        let leftover = read_instance_record(home.path())
-            .await
-            .expect("leftover record")
-            .expect("leftover record exists");
+            let mut cancelled = Box::pin(InstanceLock::acquire(&config));
+            let first_poll =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx)))
+                    .await;
+            assert!(
+                first_poll.is_pending(),
+                "acquisition must wait for the paused cleanup: {:?}",
+                first_poll.map(|result| result.map(|_| ()))
+            );
+            assert!(instance_path(home.path()).exists());
+            drop(resume);
+            let leftover = read_instance_record(home.path())
+                .await
+                .expect("published record")
+                .expect("published record exists");
+            assert!(record_owner_alive(
+                &leftover.hostname,
+                leftover.pid,
+                leftover.instance_token
+            ));
+            // Leave the acquisition unpolled. Cancellation must unregister
+            // its token even if cleanup has already completed.
+            drop(cancelled);
+            assert!(!record_owner_alive(
+                &leftover.hostname,
+                leftover.pid,
+                leftover.instance_token
+            ));
 
-        let lock = InstanceLock::acquire(&config).await.expect("instance lock");
-        assert_ne!(lock.record.instance_token, leftover.instance_token);
+            let lock = InstanceLock::acquire(&config).await.expect("instance lock");
+            assert_ne!(lock.record.instance_token, leftover.instance_token);
 
-        lock.release().await.expect("release instance lock");
+            lock.release().await.expect("release instance lock");
+        });
     }
 
     #[tokio::test]

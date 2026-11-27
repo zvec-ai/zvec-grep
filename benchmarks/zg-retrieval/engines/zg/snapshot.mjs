@@ -5,6 +5,10 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { fileHash, objectHash, run, writeJson } from "../../core/lib.mjs";
+import {
+  summarizeIndexSettings,
+  validateInputBudget,
+} from "../../core/index-settings.mjs";
 
 function required(pattern, text, label) {
   const match = pattern.exec(text);
@@ -203,6 +207,12 @@ function parseStatusDiagnostics(stderr) {
     "native diagnostics omitted embedding",
   );
   const stats = info.status;
+  if (stats?.fragments_indexed != null)
+    assert.ok(
+      Number.isSafeInteger(stats.fragments_indexed) &&
+        stats.fragments_indexed >= 0,
+      "invalid fragments_indexed",
+    );
   for (const name of [
     "files_scanned",
     "files_indexed",
@@ -235,11 +245,15 @@ function parseStatusDiagnostics(stderr) {
     root: info.root,
     index_path: info.index_path,
     embedding: `${embedding.provider}/${embedding.model}`,
+    input_budget: validateInputBudget(embedding.input_budget ?? null),
     files_scanned: stats.files_scanned,
     files_indexed: stats.files_indexed,
     files_pending: stats.files_pending,
     files_failed: stats.files_failed,
     entities_indexed: stats.entities_indexed,
+    ...(stats.fragments_indexed != null
+      ? { fragments_indexed: stats.fragments_indexed }
+      : {}),
     indexed_source_bytes: stats.indexed_size_bytes,
   };
 }
@@ -254,6 +268,14 @@ export function parseNativeStatus(
     (/^Workspace index: /m.test(text)
       ? parseLegacyStatus(text)
       : parseGroupedStatus(text, home));
+  status.input_budget ??= null;
+  summarizeIndexSettings([
+    {
+      id: status.root,
+      model: status.embedding,
+      input_budget: status.input_budget,
+    },
+  ]);
   for (const [name, value] of Object.entries(status))
     if (typeof value === "number")
       assert.ok(Number.isSafeInteger(value) && value >= 0, `invalid ${name}`);
@@ -308,20 +330,29 @@ export async function snapshotIndex({
   );
   const identity = {
     embedding: status.embedding,
+    input_budget: status.input_budget,
     files_scanned: status.files_scanned,
     files_indexed: status.files_indexed,
     files_pending: status.files_pending,
     files_failed: status.files_failed,
     entities_indexed: status.entities_indexed,
+    ...(status.fragments_indexed != null
+      ? { fragments_indexed: status.fragments_indexed }
+      : {}),
     indexed_source_bytes: status.indexed_source_bytes,
   };
   await writeJson(join(output, "status.json"), status);
   const summary = {
-    schema_version: 2,
+    schema_version: 3,
     kind: "rust-public-status",
     logical_content_sha256: objectHash(identity),
     files: status.files_indexed,
-    fragments: status.entities_indexed,
+    entities: status.entities_indexed,
+    fragments: status.fragments_indexed ?? null,
+    index_settings: {
+      model: status.embedding,
+      input_budget: status.input_budget,
+    },
     failed_files: [],
     identity_excludes: [
       "index storage layout",

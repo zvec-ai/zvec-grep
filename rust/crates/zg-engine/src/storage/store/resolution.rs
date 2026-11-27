@@ -6,18 +6,19 @@
 //!
 //! Entity names, ownership and paths are read from zvec, the canonical store;
 //! graph.sqlite holds edges alone. One sweep reads them into
-//! [`ResolutionSnapshot`] instead of maintaining duplicate SQLite tables.
+//! [`ResolutionSnapshot`] instead of maintaining duplicate SQLite tables, and
+//! answers every writeback visibility check from that same snapshot: the
+//! caller's workspace write lock freezes visibility for the whole sweep, so
+//! re-reading endpoints from zvec per page would only repeat the snapshot.
 
 use std::collections::{HashMap, HashSet};
 
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    IndexStore, StoreState, graph_disabled, graph_error, read_view::visible_endpoint_files,
-};
+use super::{IndexStore, StoreState, graph_disabled, graph_error};
 use crate::{
     EngineError, EngineResult,
-    domain::{EntityId, FileId},
+    domain::FileId,
     storage::{
         graph::{
             DeclaredBinding, EntityRecord, ImportReference, NameIndexEntry, PendingRefPage,
@@ -34,9 +35,17 @@ use crate::{
 /// consistent view. Visibility keeps its contract: a name whose candidates
 /// include an unfinished file stays hidden rather than resolving against a
 /// partial snapshot.
+#[derive(Default)]
 pub(crate) struct ResolutionSnapshot {
     names: HashMap<String, Vec<NameIndexEntry>>,
+    /// Names with any hidden candidate. The workspace writer freezes file
+    /// visibility for this snapshot; checking every candidate on every lookup
+    /// makes common names cost references × definitions instead of one check.
+    hidden_names: HashSet<String>,
     records: HashMap<String, EntityRecord>,
+    /// Owning file of every entity, metadata-bearing or not: writeback
+    /// visibility must answer for any endpoint, not only named symbols.
+    owners: HashMap<String, u32>,
     paths: PathIndex,
     imports: HashMap<u32, Vec<u32>>,
 }
@@ -51,10 +60,7 @@ impl ResolutionSnapshot {
         let Some(candidates) = self.names.get(name) else {
             return Some(&[]);
         };
-        candidates
-            .iter()
-            .all(|candidate| self.paths.indexed.contains(&candidate.file_id))
-            .then_some(candidates.as_slice())
+        (!self.hidden_names.contains(name)).then_some(candidates.as_slice())
     }
 
     /// The name-index record of one entity, when it has a symbol name.
@@ -98,6 +104,52 @@ impl ResolutionSnapshot {
             return &[];
         }
         self.imports.get(&file_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The Indexed file owning one endpoint, or `None` when the endpoint is
+    /// absent or its file is hidden. File endpoints use only the canonical
+    /// `f{file_id}` spelling, including files without entities, matching the
+    /// zvec-backed visibility check this answers from the snapshot.
+    pub(crate) fn visible_file_id(&self, endpoint: &str) -> Option<u32> {
+        if let Some(file_id) = parse_file_endpoint(endpoint) {
+            // Canonical spelling rejects leading zeros the parse would fold
+            // away (`f01` is an entity ID, not file 1).
+            let digits = &endpoint[1..];
+            if digits == "0" || !digits.starts_with('0') {
+                return self.paths.indexed.contains(&file_id).then_some(file_id);
+            }
+        }
+        self.owners
+            .get(endpoint)
+            .copied()
+            .filter(|file_id| self.paths.indexed.contains(file_id))
+    }
+
+    /// Whether the workspace holds a Python module of this name anywhere: a
+    /// `name.py` at any depth, or a package directory named `name`. A module
+    /// root the path rules do not know (a `pyproject` extra path) still counts,
+    /// so this answers "does the name exist at all", not "can it be imported".
+    pub(crate) fn has_python_module(&self, name: &str) -> bool {
+        let file = format!("/{name}.py");
+        let package = format!("/{name}/");
+        self.paths.known.iter().any(|path| {
+            path == &file[1..]
+                || path.ends_with(&file)
+                || path == &package[1..]
+                || path.contains(&package)
+        })
+    }
+
+    /// Whether any known workspace path sits at `base` or under it: the file
+    /// itself with any extension, or a directory tree rooted there.
+    pub(crate) fn has_path_under(&self, base: &str) -> bool {
+        let directory = format!("{base}/");
+        self.paths.known.iter().any(|path| {
+            path == base
+                || path.starts_with(&directory)
+                // `./helper` names `helper.ts` as much as `helper/index.ts`.
+                || path.rsplit_once('.').is_some_and(|(stem, _)| stem == base)
+        })
     }
 }
 
@@ -150,7 +202,11 @@ impl SymbolIndex {
         for (entity_id, file_id, metadata) in state.entities.list_symbol_projection(signal)? {
             index.owners.insert(entity_id.clone(), file_id.get());
             // Unnamed entities cannot be referenced by name, so they stay out
-            // of both views, matching the file graph's name index.
+            // of both views, matching the file graph's name index. Entities
+            // without code metadata keep their ownership entry above.
+            let Some(metadata) = metadata else {
+                continue;
+            };
             let Some(name) = metadata.symbol_name else {
                 continue;
             };
@@ -159,21 +215,44 @@ impl SymbolIndex {
                 None => name.clone(),
             };
             let arity = metadata.arity.and_then(|arity| u32::try_from(arity).ok());
-            index
-                .names
-                .entry(name.clone())
-                .or_default()
-                .push(NameIndexEntry {
-                    entity_id: entity_id.clone(),
-                    file_id: file_id.get(),
-                    qualified_name: qualified_name.clone(),
-                    symbol_type: metadata.symbol_type,
-                    is_exported: metadata.is_exported,
-                    arity,
-                    is_declaration: metadata.is_declaration,
-                    parameters: parameter_evidence(metadata.signature.as_deref()),
-                    package: metadata.package.clone(),
-                });
+            let entry = NameIndexEntry {
+                entity_id: entity_id.clone(),
+                file_id: file_id.get(),
+                qualified_name: qualified_name.clone(),
+                symbol_type: metadata.symbol_type,
+                is_exported: metadata.is_exported,
+                arity,
+                is_declaration: metadata.is_declaration,
+                is_constructor: metadata
+                    .language
+                    .is_some_and(|language| language.as_str() == "java")
+                    && metadata
+                        .signature
+                        .as_deref()
+                        .is_some_and(|signature| java_constructor_signature(signature, &name)),
+                parameters: parameter_evidence(metadata.signature.as_deref()),
+                package: metadata.package.clone(),
+                has_internal_linkage: metadata.has_internal_linkage,
+                declares_type: metadata.declares_type,
+                alias_of: metadata.alias_of.clone(),
+                object_members: metadata.object_members.clone(),
+                overwritten_by: metadata.overwritten_by.clone(),
+            };
+            // An `export { local as exported }` clause publishes this
+            // declaration under another name without the declaration spelling
+            // it, so the index answers that name too: a call or import written
+            // through it reaches this one entity.
+            for exported in &metadata.exported_as {
+                index
+                    .names
+                    .entry(exported.clone())
+                    .or_default()
+                    .push(NameIndexEntry {
+                        is_exported: true,
+                        ..entry.clone()
+                    });
+            }
+            index.names.entry(name.clone()).or_default().push(entry);
             index.records.insert(
                 entity_id.clone(),
                 EntityRecord {
@@ -261,6 +340,57 @@ fn outer_parameter_group(signature: &str) -> Option<(usize, usize)> {
         }
     }
     group
+}
+
+/// Constructors have no return type. Skip annotations, visibility and generic
+/// parameters before the class name; `void X()` is a method, not X's constructor.
+fn java_constructor_signature(signature: &str, name: &str) -> bool {
+    let Some((start, _)) = outer_parameter_group(signature) else {
+        return false;
+    };
+    let Some(mut prefix) = signature[..start - 1].trim().strip_suffix(name) else {
+        return false;
+    };
+    loop {
+        prefix = prefix.trim();
+        if prefix.is_empty() {
+            return true;
+        }
+        if let Some(rest) = ["public", "protected", "private"]
+            .into_iter()
+            .find_map(|modifier| prefix.strip_prefix(modifier))
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            prefix = rest;
+            continue;
+        }
+        if let Some(annotation) = prefix.strip_prefix('@') {
+            prefix = annotation
+                .trim_start_matches(|c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.'));
+            if !prefix.starts_with('(') {
+                continue;
+            }
+        }
+        let (open, close) = match prefix.chars().next() {
+            Some('(') => ('(', ')'),
+            Some('<') => ('<', '>'),
+            _ => return false,
+        };
+        let mut depth = 0usize;
+        let end = prefix.char_indices().find_map(|(offset, c)| {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(offset + c.len_utf8());
+                }
+            }
+            None
+        });
+        let Some(end) = end else { return false };
+        prefix = &prefix[end..];
+    }
 }
 
 /// Whether the text before a parenthesis and its body spell a function
@@ -444,10 +574,10 @@ fn import_scopes(
 
 impl IndexStore {
     /// One consistent read of every resolver input that lives outside the
-    /// graph. Build it once per sweep; writeback revalidates visibility. The
-    /// entity projection dominates the read and honors `signal`, so a pass
-    /// cancelled while the snapshot builds returns the cancellation instead of
-    /// filling an index it will discard.
+    /// graph. Build it once per sweep; writeback revalidates visibility
+    /// against this same snapshot. The entity projection dominates the read
+    /// and honors `signal`, so a pass cancelled while the snapshot builds
+    /// returns the cancellation instead of filling an index it will discard.
     pub(crate) fn resolution_snapshot(
         &self,
         signal: Option<&CancellationToken>,
@@ -455,10 +585,22 @@ impl IndexStore {
         self.read(|state| {
             let paths = PathIndex::read(state)?;
             let symbols = SymbolIndex::read(state, signal)?;
+            let hidden_names = symbols
+                .names
+                .iter()
+                .filter(|(_, candidates)| {
+                    candidates
+                        .iter()
+                        .any(|candidate| !paths.indexed.contains(&candidate.file_id))
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
             let imports = import_scopes(state, &symbols.owners, &paths.indexed)?;
             Ok(ResolutionSnapshot {
                 names: symbols.names,
+                hidden_names,
                 records: symbols.records,
+                owners: symbols.owners,
                 paths,
                 imports,
             })
@@ -467,11 +609,14 @@ impl IndexStore {
 
     /// Read one bounded page, hiding refs whose source file is not Indexed.
     /// A filtered-out page may be empty while `next_cursor` still advances.
+    /// Visibility is answered from the sweep's snapshot: the caller's
+    /// workspace write lock keeps it current for the whole pass.
     /// Requires writable storage and the outer workspace write lock.
     pub(crate) fn list_pending_refs(
         &self,
         limit: usize,
         cursor: i64,
+        snapshot: &ResolutionSnapshot,
     ) -> EngineResult<PendingRefPage> {
         self.write(|state| {
             let mut page = state
@@ -480,17 +625,8 @@ impl IndexStore {
                 .map_err(|_| graph_disabled())?
                 .list_pending_refs(limit, cursor)
                 .map_err(graph_error)?;
-            let ids = page
-                .refs
-                .iter()
-                .map(|r| r.reference.owner_id.clone())
-                .collect::<Vec<_>>();
-            let visible = visible_endpoints(state, &ids)?;
-            page.refs.retain(|r| {
-                visible
-                    .get(&r.reference.owner_id)
-                    .is_some_and(|file| file.get() == r.file_id)
-            });
+            page.refs
+                .retain(|r| snapshot.visible_file_id(&r.reference.owner_id) == Some(r.file_id));
             Ok(page)
         })
     }
@@ -540,10 +676,12 @@ impl IndexStore {
 
     /// Recheck current pending rows and both endpoints before one atomic graph writeback.
     /// This catches missing/hidden endpoints, not changes to name uniqueness: callers
-    /// must retain the outer workspace write lock throughout lookup and computation.
+    /// must retain the outer workspace write lock throughout lookup and computation,
+    /// which also keeps the snapshot's visibility answers current.
     pub(crate) fn apply_resolutions(
         &self,
         resolutions: &[Resolution],
+        snapshot: &ResolutionSnapshot,
     ) -> EngineResult<ResolutionStats> {
         self.write(|state| {
             let ids = resolutions.iter().map(|r| r.ref_id).collect::<Vec<_>>();
@@ -553,24 +691,16 @@ impl IndexStore {
                 .map_err(|_| graph_disabled())?
                 .get_pending_refs(&ids)
                 .map_err(graph_error)?;
-            let endpoints = refs
-                .iter()
-                .map(|r| r.reference.owner_id.clone())
-                .chain(resolutions.iter().map(|r| r.target_id.clone()))
-                .collect::<Vec<_>>();
-            let visible = visible_endpoints(state, &endpoints)?;
             let eligible = refs
                 .iter()
-                .filter(|r| {
-                    visible
-                        .get(&r.reference.owner_id)
-                        .is_some_and(|file| file.get() == r.file_id)
-                })
+                .filter(|r| snapshot.visible_file_id(&r.reference.owner_id) == Some(r.file_id))
                 .map(|r| r.id)
                 .collect::<HashSet<_>>();
             let valid = resolutions
                 .iter()
-                .filter(|r| eligible.contains(&r.ref_id) && visible.contains_key(&r.target_id))
+                .filter(|r| {
+                    eligible.contains(&r.ref_id) && snapshot.visible_file_id(&r.target_id).is_some()
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             let mut stats = state
@@ -592,6 +722,34 @@ impl IndexStore {
             }
             graph(state)?
                 .import_references(file_id)
+                .map_err(graph_error)
+        })
+    }
+
+    /// The preprocessor directives of one Indexed file, in source order.
+    pub(crate) fn preprocessor_directives(
+        &self,
+        file_id: u32,
+    ) -> EngineResult<Vec<crate::domain::PreprocessorDirective>> {
+        self.read(|state| {
+            if !is_indexed(state, file_id)? {
+                return Ok(Vec::new());
+            }
+            graph(state)?
+                .preprocessor_directives(file_id)
+                .map_err(graph_error)
+        })
+    }
+
+    /// Names of the bare calls one file still leaves pending, the watch set of
+    /// the macro replay.
+    pub(crate) fn pending_call_names(&self, file_id: u32) -> EngineResult<Vec<String>> {
+        self.read(|state| {
+            if !is_indexed(state, file_id)? {
+                return Ok(Vec::new());
+            }
+            graph(state)?
+                .pending_call_names(file_id)
                 .map_err(graph_error)
         })
     }
@@ -622,9 +780,13 @@ impl IndexStore {
 
     /// Terminate pending references whose specifier addresses no workspace
     /// module. Only visible rows change, so hidden files stay queued.
-    pub(crate) fn apply_failures(&self, failures: &[i64]) -> EngineResult<usize> {
+    pub(crate) fn apply_failures(
+        &self,
+        failures: &[i64],
+        snapshot: &ResolutionSnapshot,
+    ) -> EngineResult<usize> {
         self.write(|state| {
-            let eligible = eligible_ref_ids(state, failures)?;
+            let eligible = eligible_ref_ids(state, failures, snapshot)?;
             let valid = failures
                 .iter()
                 .filter(|id| eligible.contains(id))
@@ -642,23 +804,24 @@ impl IndexStore {
     /// Record ambiguity candidates for still-pending visible rows. Entries
     /// whose candidates are hidden are dropped: they describe a workspace the
     /// resolver could not see completely.
-    pub(crate) fn record_candidates(&self, entries: &[(i64, Vec<String>)]) -> EngineResult<usize> {
+    pub(crate) fn record_candidates(
+        &self,
+        entries: &[(i64, Vec<String>)],
+        snapshot: &ResolutionSnapshot,
+    ) -> EngineResult<usize> {
         self.write(|state| {
             let ids = entries.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-            let eligible = eligible_ref_ids(state, &ids)?;
-            let targets = entries
-                .iter()
-                .flat_map(|(_, candidates)| candidates.iter().cloned())
-                .collect::<Vec<_>>();
-            let visible = visible_endpoints(state, &targets)?;
+            let eligible = eligible_ref_ids(state, &ids, snapshot)?;
             let valid = entries
                 .iter()
                 .filter(|(id, candidates)| {
                     eligible.contains(id)
                         && !candidates.is_empty()
-                        && candidates.iter().all(|id| visible.contains_key(id))
+                        && candidates
+                            .iter()
+                            .all(|id| snapshot.visible_file_id(id).is_some())
                 })
-                .cloned()
+                .map(|(id, candidates)| (*id, candidates.as_slice()))
                 .collect::<Vec<_>>();
             state
                 .graph
@@ -683,34 +846,48 @@ fn is_indexed(state: &StoreState, file_id: u32) -> EngineResult<bool> {
 }
 
 /// Pending rows that still exist and whose owning file is Indexed.
-fn eligible_ref_ids(state: &StoreState, ids: &[i64]) -> EngineResult<HashSet<i64>> {
+fn eligible_ref_ids(
+    state: &StoreState,
+    ids: &[i64],
+    snapshot: &ResolutionSnapshot,
+) -> EngineResult<HashSet<i64>> {
     let refs = graph(state)?.get_pending_refs(ids).map_err(graph_error)?;
-    let owners = refs
-        .iter()
-        .map(|r| r.reference.owner_id.clone())
-        .collect::<Vec<_>>();
-    let visible = visible_endpoints(state, &owners)?;
     Ok(refs
         .iter()
-        .filter(|r| {
-            visible
-                .get(&r.reference.owner_id)
-                .is_some_and(|file| file.get() == r.file_id)
-        })
+        .filter(|r| snapshot.visible_file_id(&r.reference.owner_id) == Some(r.file_id))
         .map(|r| r.id)
         .collect())
 }
 
-fn visible_endpoints(state: &StoreState, ids: &[String]) -> EngineResult<HashMap<String, FileId>> {
-    let entity_ids = ids
-        .iter()
-        .cloned()
-        .map(EntityId::from_string)
-        .collect::<Vec<_>>();
-    Ok(visible_endpoint_files(state, &entity_ids)?
-        .into_iter()
-        .map(|(id, file)| (id.as_str().to_owned(), file.id()))
-        .collect())
+#[cfg(test)]
+mod endpoint_visibility_tests {
+    use super::ResolutionSnapshot;
+
+    #[test]
+    fn canonical_file_endpoints_do_not_require_entity_owners() {
+        let mut snapshot = ResolutionSnapshot::default();
+        snapshot.paths.indexed.extend([0, 1]);
+        assert_eq!(snapshot.visible_file_id("f0"), Some(0));
+        assert_eq!(snapshot.visible_file_id("f1"), Some(1));
+        assert_eq!(snapshot.visible_file_id("f2"), None);
+        assert_eq!(snapshot.visible_file_id("f00"), None);
+        assert_eq!(snapshot.visible_file_id("f01"), None);
+    }
+
+    #[test]
+    fn leading_zero_endpoints_use_entity_ownership_not_the_parsed_file() {
+        let mut snapshot = ResolutionSnapshot::default();
+        snapshot.paths.indexed.extend([1, 2]);
+        assert_eq!(snapshot.visible_file_id("f01"), None);
+
+        snapshot.owners.insert("f01".into(), 2);
+        assert_eq!(snapshot.visible_file_id("f01"), Some(2));
+        assert_eq!(snapshot.visible_file_id("f1"), Some(1));
+
+        snapshot.paths.indexed.remove(&2);
+        assert_eq!(snapshot.visible_file_id("f01"), None);
+        assert_eq!(snapshot.visible_file_id("f1"), Some(1));
+    }
 }
 
 #[cfg(test)]

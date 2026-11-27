@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::domain::{EdgeProvenance, PendingRef, SymbolType};
+use crate::domain::{EdgeProvenance, MemberAlias, PendingRef, SymbolType};
 
 /// Extensible evidence attached to edges and unresolved references.
 pub(crate) type Metadata = BTreeMap<String, Value>;
@@ -26,6 +26,11 @@ pub(crate) struct StoredPendingRef {
 }
 
 /// One workspace name-index hit for a symbol name.
+// Each flag is one extracted fact a resolver rule reads on its own.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate extracted fact read by a different rule"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NameIndexEntry {
     pub entity_id: String,
@@ -39,6 +44,9 @@ pub(crate) struct NameIndexEntry {
     pub arity: Option<u32>,
     /// Pure declaration without a body (C/C++ prototypes).
     pub is_declaration: bool,
+    /// Java constructor signature, distinct from a method named after its class.
+    /// Derived for the in-memory snapshot; no extra persisted field.
+    pub is_constructor: bool,
     /// The parameter list the declared signature states, whitespace and
     /// pointer/reference spacing normalized; `None` when the signature carries
     /// no parameter list. An equal count can describe a different C++ overload,
@@ -49,6 +57,24 @@ pub(crate) struct NameIndexEntry {
     /// field existed. A Java name carries no package, so import binding reads
     /// the package from here rather than from the name.
     pub package: Option<String>,
+    /// Whether the declaring C/C++ entity has internal linkage (unnamed
+    /// namespace or file-scope `static`), so only its own translation unit can
+    /// address it by name.
+    pub has_internal_linkage: bool,
+    /// Whether this entity introduces a type's name rather than carrying it
+    /// over from the type it belongs to (`impl Target`, a Rust `impl` block).
+    pub declares_type: bool,
+    /// Name this entity is another spelling of, when its initializer is a bare
+    /// name (`export const dispatch = send`). A call bound to this entity
+    /// reaches the aliased one, so import binding follows the link instead of
+    /// settling on the alias.
+    pub alias_of: Option<String>,
+    /// Properties this entity's object literal initializer binds
+    /// (`{ run: right }`), a later property replacing an earlier one of its
+    /// key. A member call on the entity reaches the value its key last named.
+    pub object_members: Vec<MemberAlias>,
+    /// Value a later property of the same key replaces this declaration with.
+    pub overwritten_by: Option<String>,
 }
 
 /// Name-index record for one entity. Entities without a symbol name are
@@ -85,6 +111,15 @@ pub(crate) struct DeclaredBinding {
     /// One-based line of the declaring site; rebindings of the same name
     /// shadow earlier ones at later lines.
     pub line: u32,
+    /// One-based last line the binding holds for, when a statement scopes it
+    /// (`for (Widget w : ws)`). `None` keeps it until the body ends.
+    pub until: Option<u32>,
+    /// One-based column of the declaring site, so a declaration and a call on
+    /// the same line are still ordered by position.
+    pub column: u32,
+    /// One-based `(line, column)` just past the block that scopes the binding,
+    /// exclusive. `None` keeps it to the end of the owner.
+    pub scope_end: Option<(usize, usize)>,
 }
 
 /// Page over pending references. Restart pagination after file mutations.

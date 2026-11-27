@@ -334,10 +334,10 @@ fn live_sources_follow_each_models_configured_sources() {
         if model == "local/bekko-256-int8" {
             assert_eq!(
                 request.sources.len(),
-                1,
-                "Bekko only has a Hugging Face source"
+                2,
+                "Bekko includes a ModelScope fallback"
             );
-            assert!(!supports_source(download, ArtifactSourceKind::ModelScope));
+            assert!(supports_source(download, ArtifactSourceKind::ModelScope));
         }
         assert_eq!(std::fs::read_dir(root.path()).expect("cache").count(), 0);
     }
@@ -345,17 +345,19 @@ fn live_sources_follow_each_models_configured_sources() {
 
 #[tokio::test]
 async fn unconfigured_source_is_rejected_before_downloading() {
-    let (model, download) = local_models()
-        .into_iter()
-        .find(|(model, _)| *model == "local/bekko-256-int8")
-        .expect("Bekko is included in the live-source catalog");
-    let error = download_local_model_from(model, download, ArtifactSourceKind::ModelScope)
-        .await
-        .expect_err("Bekko has no ModelScope mirror");
-    assert_eq!(
-        error,
-        "modelscope is not configured for local/bekko-256-int8"
-    );
+    const HF_ONLY_DOWNLOAD: ArtifactDownloadConfig = ArtifactDownloadConfig {
+        hugging_face: super::HF,
+        model_scope: None,
+        artifacts: super::ARTIFACTS,
+    };
+    let error = download_local_model_from(
+        "local/test-model",
+        &HF_ONLY_DOWNLOAD,
+        ArtifactSourceKind::ModelScope,
+    )
+    .await
+    .expect_err("unconfigured ModelScope source must be rejected");
+    assert_eq!(error, "modelscope is not configured for local/test-model");
 }
 
 fn has_extension(path: &str, extension: &str) -> bool {

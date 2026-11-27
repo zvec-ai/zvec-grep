@@ -19,8 +19,8 @@ use super::{
         StorageSearchPath,
     },
     zvec::{
-        collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection, quote, scalar,
-        string_field, u32_field, write_docs,
+        WRITE_BATCH, collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection,
+        quote, scalar, string_field, u32_field, write_docs,
     },
 };
 use crate::{
@@ -168,6 +168,40 @@ impl Fragments {
             native(index.delete_by_filter(&filter), "delete source fragments")?;
         }
         Ok(())
+    }
+
+    /// Count live search projections without loading text or embedding vectors.
+    pub(super) fn count(&self) -> EngineResult<u64> {
+        let mut count = 0_u64;
+        for index in self.indexes.values() {
+            let iterator = native(
+                index.iter_with_options(Some(&["document_id"]), false),
+                "iterate fragment identities",
+            )?;
+            for doc in iterator {
+                native(doc, "read fragment identity")?;
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::storage_failure("fragment count exceeds u64"))?;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Read only the identities of live projections for a diagnostic's watched files.
+    pub(super) fn projected_fragments(&self, keys: &[&str]) -> EngineResult<HashSet<String>> {
+        let mut projected = HashSet::new();
+        for index in self.indexes.values() {
+            for batch in keys.chunks(WRITE_BATCH) {
+                for doc in native(
+                    index.fetch_with_options(batch, Some(&["document_id"]), false),
+                    "fetch diagnostic fragment identities",
+                )? {
+                    projected.insert(string_field(&doc, "document_id")?);
+                }
+            }
+        }
+        Ok(projected)
     }
 
     pub(super) fn flush(&self) -> EngineResult<()> {

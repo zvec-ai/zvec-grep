@@ -38,9 +38,10 @@ impl EngineService {
 
     #[must_use]
     pub(crate) fn new() -> Self {
+        let indexing = WorkspaceIndexService::new();
         Self {
-            direct_search: DirectSearchService::new(),
-            indexing: WorkspaceIndexService::new(),
+            direct_search: DirectSearchService::new().with_writers(indexing.writers.clone()),
+            indexing,
             models: ModelRuntimeManager::new(),
             read_sessions: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -119,6 +120,14 @@ impl EngineService {
     pub(crate) async fn index(&self, options: IndexOptions) -> Result<IndexResult, EngineError> {
         self.ensure_open()?;
         self.indexing.index(&self.models, options).await
+    }
+
+    pub(crate) async fn resolve_index_embedding(
+        &self,
+        options: IndexOptions,
+    ) -> Result<crate::api::index::embedding::EmbeddingSelection, EngineError> {
+        self.ensure_open()?;
+        crate::pipelines::indexing::service::resolve_index_embedding(options).await
     }
 
     pub(crate) async fn paths(

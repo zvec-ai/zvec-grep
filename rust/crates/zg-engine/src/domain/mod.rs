@@ -36,6 +36,7 @@ pub use metadata::EntityMetadata;
 pub(crate) use metadata::IndexField;
 pub use metadata::Language;
 pub use metadata::MarkdownMetadata;
+pub use metadata::MemberAlias;
 pub use metadata::SymbolType;
 // Visibility has no consumers yet.
 #[allow(unused_imports)]
@@ -50,6 +51,8 @@ pub(crate) use graph::FileGraphResult;
 pub use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
+pub(crate) use graph::PreprocessorDirective;
+pub(crate) use graph::PreprocessorKind;
 
 // Models.
 pub(crate) use model::EmbeddingMetric;
@@ -65,9 +68,11 @@ pub(crate) use source::FileId;
 pub(crate) use source::FileIndexStatus;
 pub(crate) use source::FileRecord;
 pub(crate) use source::FileSnapshot;
+pub use source::PdfRect;
 pub(crate) use source::Range;
 pub(crate) use source::SourcePath;
 pub(crate) use source::TextRange;
+pub(crate) use source::{PdfBlock, PdfRange, PdfSourceMap, PdfSourcePart};
 // Consumed by the cross-file reference resolver.
 pub(crate) use source::{formats_for_path, reference_compatible_with};
 
@@ -76,3 +81,6 @@ pub use workspace::ScanRules;
 pub(crate) use workspace::SourceRoot;
 pub(crate) use workspace::Workspace;
 pub(crate) use workspace::WorkspaceLayout;
+
+#[cfg(test)]
+pub(crate) use source::PdfPageLocation;

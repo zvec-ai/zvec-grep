@@ -23,6 +23,10 @@ on:
 
 permissions: {}
 
+env:
+  # Hosted jobs exercise CPU inference; do not fetch optional CUDA binaries.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true

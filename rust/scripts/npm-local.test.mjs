@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { chmod, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,15 +56,20 @@ test("includes model runtime libraries but excludes build files and other platfo
   const source = join(root, "sdk");
   await mkdir(source);
   const runtimeFiles = {
-    darwin: ["libzvec_c_api.dylib", "libonnxruntime.1.dylib"],
-    linux: ["libzvec_c_api.so", "libonnxruntime.so.1.24.2"],
-    win32: ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll"],
+    darwin: ["libzvec_c_api.dylib", "libonnxruntime.1.dylib", "libpdfium.dylib"],
+    linux: ["libzvec_c_api.so", "libonnxruntime.so.1.24.2", "libpdfium.so"],
+    win32: ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll", "pdfium.dll"],
   };
   for (const name of [
     ...Object.values(runtimeFiles).flat(),
     "zg",
     "zg.exe",
     "zvec_c_api.lib",
+    "libpdfium.a",
+    "pdfium.lib",
+    "libpdfium.dylib",
+    "libpdfium.so",
+    "pdfium.dll",
   ]) {
     await writeFile(join(source, name), name);
   }
@@ -81,22 +86,24 @@ test("includes model runtime libraries but excludes build files and other platfo
   }
 });
 
-test("CPU packages retain ORT and DirectML licenses without copying unrelated build files", async (t) => {
+test("CPU packages retain ORT, PDFium and DirectML licenses without copying unrelated build files", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "zg-ort-notices-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, "profile");
   await mkdir(join(source, "licenses"), { recursive: true });
-  for (const name of ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll"]) {
+  for (const name of ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll", "pdfium.dll"]) {
     await writeFile(join(source, name), name);
   }
   for (const name of ["onnxruntime-LICENSE", "onnxruntime-ThirdPartyNotices.txt",
-    "directml-LICENSE", "directml-LICENSE-CODE", "directml-ThirdPartyNotices.txt", "unrelated.txt"]) {
+    "directml-LICENSE", "directml-LICENSE-CODE", "directml-ThirdPartyNotices.txt", "pdfium-ThirdPartyNotices.txt", "unrelated.txt"]) {
     await writeFile(join(source, "licenses", name), name);
   }
   const destination = join(root, "package/lib");
   const files = await stageZvecRuntime(source, destination, "win32");
   assert.ok(files.includes("lib/licenses/onnxruntime-LICENSE"));
   assert.ok(files.includes("lib/licenses/directml-LICENSE"));
+  assert.ok(files.includes("lib/pdfium.dll"));
+  assert.ok(files.includes("lib/licenses/pdfium-ThirdPartyNotices.txt"));
   assert.equal(await readFile(join(destination, "licenses/directml-LICENSE-CODE"), "utf8"), "directml-LICENSE-CODE");
   await assert.rejects(readFile(join(destination, "licenses/unrelated.txt")), /ENOENT/);
 });
@@ -421,7 +428,7 @@ test("Linux artifact smoke loads packaged ORT and runs inference on both archite
     assert.equal(failedLoad.status, 73, failedLoad.stderr);
     assert.doesNotMatch(failedLoad.stdout, /unexpected inference/);
   }
-  assert.match(workflow, /name: Restore the real model cache\n\s+if:.*matrix\.target == 'linux-arm64-gnu'/);
+  assert.match(workflow, /name: Restore the real model cache\n\s+uses: actions\/cache@/);
 });
 
 test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", { skip: process.platform !== "linux" }, async (t) => {
@@ -492,6 +499,8 @@ test("CUDA fallback uses the primary Cargo source record, including cached build
     await writeFile(join(directory, "CMakeLists.txt"), "# source path fixture\n");
   }
   await mkdir(join(project, "src"));
+  // This temporary project is outside the repository's toolchain scope.
+  await copyFile(new URL("../rust-toolchain.toml", import.meta.url), join(project, "rust-toolchain.toml"));
   await writeFile(join(project, "Cargo.toml"),
     '[package]\nname = "llama-cpp-sys-2"\nversion = "0.0.0"\nedition = "2021"\nlinks = "llama"\n');
   await writeFile(join(project, "Cargo.lock"),
@@ -530,18 +539,34 @@ messages = pathlib.Path(sys.argv[2])
     const records = result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
     if (index === 1) assert.ok(records.some((r) => r.reason === "compiler-artifact" && r.fresh));
     inspect(String.raw`
-source, revision = fallback.source_build(messages)
-assert source == pathlib.Path(sys.argv[3]), (source, sys.argv[3])
-assert revision == sys.argv[4]
-command = fallback.configure(source, source / "build", source / "cuda", fallback.DEFAULT_ARCHITECTURES)
-assert command[command.index("-S") + 1] == str(source)
+build = next(r for r in fallback.cargo_records(messages) if r.get("reason") == "build-script-executed")
+directory = pathlib.Path(build["out_dir"]).parent
+outputs = [directory / "output", directory / "run" / "stdout"]
+actual = next(output for output in outputs if output.is_file())
+# Replay the real metadata in both Cargo layouts, restoring it before the next
+# build so Cargo's cache behavior is still exercised by Cargo itself.
+for output in outputs:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output != actual:
+        actual.rename(output)
+    try:
+        source, revision = fallback.source_build(messages)
+        assert source == pathlib.Path(sys.argv[3]), (source, sys.argv[3])
+        assert revision == sys.argv[4]
+        command = fallback.configure(source, source / "build", source / "cuda", fallback.DEFAULT_ARCHITECTURES)
+        assert command[command.index("-S") + 1] == str(source)
+    finally:
+        if output != actual:
+            output.rename(actual)
 `, source, revision);
   }
   inspect(String.raw`
 records = fallback.cargo_records(messages)
 build = next(r for r in records if r.get("reason") == "build-script-executed")
-output = pathlib.Path(build["out_dir"]).parent / "output"
-original = output.read_text(encoding="utf-8")
+directory = pathlib.Path(build["out_dir"]).parent
+outputs = [directory / "output", directory / "run" / "stdout"]
+actual = next(output for output in outputs if output.is_file())
+original = actual.read_text(encoding="utf-8")
 def reject(expected):
     try:
         fallback.source_build(messages)
@@ -549,16 +574,27 @@ def reject(expected):
         assert expected in str(error), str(error)
     else:
         raise AssertionError("invalid primary source accepted")
-for text, error in [
-    ("cargo:source_revision=" + "a" * 40, "source_dir"),
-    (original + "\ncargo:source_dir=/stale\n", "source_dir"),
-    (original.replace(sys.argv[3], "relative/source"), "source is unavailable"),
-    (original.replace(sys.argv[3], str(output.parent / "missing")), "source is unavailable"),
-    (original.replace(sys.argv[4], "not-a-revision"), "source_revision"),
-]:
-    output.write_text(text, encoding="utf-8")
-    reject(error)
-output.write_text(original, encoding="utf-8")
+actual.unlink()
+reject("Missing or ambiguous build-script stdout")
+for output in outputs:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    for text, error in [
+        ("cargo:source_revision=" + "a" * 40, "source_dir"),
+        (original + "\ncargo:source_dir=/stale\n", "source_dir"),
+        (original + "\ncargo:source_revision=" + "a" * 40, "source_revision"),
+        (original.replace(sys.argv[3], "relative/source"), "source is unavailable"),
+        (original.replace(sys.argv[3], str(directory / "missing")), "source is unavailable"),
+        (original.replace(sys.argv[4], "not-a-revision"), "source_revision"),
+    ]:
+        output.write_text(text, encoding="utf-8")
+        reject(error)
+    output.unlink()
+for output in outputs:
+    output.write_text(original, encoding="utf-8")
+reject("Missing or ambiguous build-script stdout")
+for output in outputs:
+    output.unlink()
+actual.write_text(original, encoding="utf-8")
 for changed, error in [
     (records[:-1], "finish successfully"),
     ([*records[:-1], {"reason": "build-finished", "success": False}], "finish successfully"),
@@ -588,7 +624,7 @@ with tempfile.TemporaryDirectory(prefix="zg-test-bundle-") as temporary:
     (backend.parent / "manifest.json").write_text(json.dumps({
         "files": {p.relative_to(backend.parent).as_posix(): runtime.digest(p)
                   for p in backend.rglob("*") if p.is_file()}}))
-    for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll"):
+    for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll", "pdfium.dll"):
         (profile / name).write_bytes(name.encode())
     (root / "zvec/zvec_c_api.dll").write_bytes(b"current zvec")
     (root / "stale/zvec_c_api.dll").write_bytes(b"must not be selected")

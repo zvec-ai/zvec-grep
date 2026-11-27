@@ -28,6 +28,18 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
+import { readStageTrace } from "../../core/gold-stage-capture.mjs";
+import { scoreGoldStages } from "../../metrics/gold-stages.mjs";
+import { writeGoldStages } from "../../reports/gold-stages.mjs";
+import { summarizeIndexCounts } from "../../core/index-counts.mjs";
+import { summarizeIndexSettings } from "../../core/index-settings.mjs";
+import {
+  publicQaItems,
+  qaEligibility,
+  scoreQaRetrieval,
+  summarizeRepeatedQaRetrieval,
+  summarizeQaRetrieval,
+} from "../../metrics/entities.mjs";
 
 async function findRuns(directory) {
   const runs = [];
@@ -59,7 +71,14 @@ function invalidate(score, reason) {
     file_retrieval: null,
     ndcg: null,
     quality_mean: null,
+    qa_retrieval: null,
+    qa_quality_mean: null,
   };
+}
+
+function goldStageQualification(pair) {
+  const { status } = qaEligibility(pair);
+  return status === "scored" ? "formal" : status;
 }
 
 export async function aggregate(directory, { expectedTasks } = {}) {
@@ -70,10 +89,15 @@ export async function aggregate(directory, { expectedTasks } = {}) {
   const errors = [],
     observations = [],
     manifests = [];
+  const goldStageCalls = new Map();
   const runDirectories = await findRuns(directory);
   const seen = new Set();
   for (const runDirectory of runDirectories) {
     const manifest = await readJson(join(runDirectory, "run.json"));
+    // Rebuild counts from hashed status evidence, not the historical snapshot's
+    // misleading `fragments` alias (schema 2 stored the Entity count there).
+    delete manifest.index_counts;
+    delete manifest.index_settings;
     manifests.push(manifest);
     const invalid = [...(manifest.invalid_reasons ?? [])];
     if (objectHash(manifest.suite) !== objectHash(suite.identity))
@@ -103,13 +127,14 @@ export async function aggregate(directory, { expectedTasks } = {}) {
           "verified",
           "post-run integrity not verified",
         );
+        let beforeCounts;
+        let beforeSettings;
         for (const phase of ["before", "after"]) {
           const snapshot = await readJson(
             join(runDirectory, `stages/${phase}/summary.json`),
           );
-          assert.equal(
-            snapshot.schema_version,
-            2,
+          assert.ok(
+            [2, 3].includes(snapshot.schema_version),
             "unsupported native snapshot",
           );
           assert.equal(snapshot.kind, "rust-public-status");
@@ -145,7 +170,53 @@ export async function aggregate(directory, { expectedTasks } = {}) {
               status.files_failed === 0,
             "native public status does not describe a ready index",
           );
+          const counts = summarizeIndexCounts([
+            {
+              id: `${manifest.repository}@${manifest.repository_commit}`,
+              entities: status.entities_indexed,
+              fragments: status.fragments_indexed ?? null,
+            },
+          ]);
+          const settings = summarizeIndexSettings([
+            {
+              id: `${manifest.repository}@${manifest.repository_commit}`,
+              model: status.embedding ?? null,
+              input_budget: status.input_budget ?? null,
+            },
+          ]);
+          if (settings.model !== null)
+            assert.equal(
+              settings.model,
+              suite.protocol.model,
+              "indexed model differs from the configured suite model",
+            );
+          if (snapshot.index_settings !== undefined)
+            assert.deepEqual(
+              snapshot.index_settings,
+              { model: settings.model, input_budget: settings.input_budget },
+              "snapshot index settings differ from status evidence",
+            );
+          if (phase === "before") beforeSettings = settings;
+          else
+            assert.deepEqual(
+              settings,
+              beforeSettings,
+              "index settings changed during retrieval",
+            );
+          if (phase === "before") beforeCounts = counts;
+          else
+            assert.deepEqual(
+              counts,
+              beforeCounts,
+              "index counts changed during retrieval",
+            );
+          if (snapshot.schema_version === 3) {
+            assert.equal(snapshot.entities, counts.entities);
+            assert.equal(snapshot.fragments, counts.fragments);
+          }
         }
+        manifest.index_counts = beforeCounts;
+        manifest.index_settings = beforeSettings;
         const selection = suite.protocol.index_selection;
         assert.deepEqual(
           manifest.index_selection_audit,
@@ -291,6 +362,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         callInvalid.push("incorrect quality repetition");
       if (call.harness_error) callInvalid.push(call.harness_error);
       let score;
+      let stageCapture = null;
       let visibleOutputBytes = null;
       try {
         assert.equal(
@@ -306,6 +378,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
           "raw response changed since capture",
         );
         const response = await readJson(path);
+        stageCapture = readStageTrace(response);
         if (
           Array.isArray(response?.content) &&
           response.content.every(
@@ -329,6 +402,23 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         callInvalid.push(error.message);
       }
       if (callInvalid.length) score = invalidate(score, callInvalid.join("; "));
+      if (manifest.gold_stages) {
+        const pair = suite.qa_pairs[call.task_id];
+        const capture =
+          score.execution_status === "success" ? stageCapture : null;
+        goldStageCalls.set(
+          `${call.task_id}/${call.mode}/${call.repetition}`,
+          scoreGoldStages({
+            capture,
+            pair,
+            items: score.items ?? [],
+            taskId: call.task_id,
+            mode: call.mode,
+            repetition: call.repetition,
+            qualification: goldStageQualification(pair),
+          }),
+        );
+      }
       observations.push({
         ...call,
         ...score,
@@ -400,7 +490,16 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     errors.push("mixed mode selections across repository shards");
   if (observations.some((row) => row.status === "harness_invalid"))
     errors.push("one or more observations are experimentally invalid");
-  for (const row of observations) row.file_retrieval = fileRetrievalForRow(row);
+  for (const row of observations) {
+    row.file_retrieval = fileRetrievalForRow(row);
+    row.qa_retrieval =
+      row.status === "harness_invalid"
+        ? null
+        : scoreQaRetrieval(row.items, suite.qa_pairs[row.task_id], {
+            executionStatus: row.execution_status,
+            status: row.status,
+          });
+  }
   const quality = observations
     .filter((row) => row.repetition === suite.protocol.quality_repetition)
     .map((row) => {
@@ -441,6 +540,13 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       return {
         ...qualityRow,
         quality_mean: qualityMean,
+        qa_quality_mean:
+          invalidRepeat || repeats.length !== suite.protocol.repetitions
+            ? null
+            : summarizeRepeatedQaRetrieval(
+                repeats,
+                suite.qa_pairs[row.task_id],
+              ),
         ranking_repeatable: valid
           ? (qualityMean?.ranking_repeatable ?? null)
           : null,
@@ -452,6 +558,12 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         quality_observations: repeats.map((item) => ({
           repetition: item.repetition,
           items: rankedLocations(item.items ?? []),
+        })),
+        qa_observations: repeats.map((item) => ({
+          repetition: item.repetition,
+          status: item.status,
+          execution_status: item.execution_status,
+          items: publicQaItems(item.items ?? []),
         })),
         measurement_observations: repeats.map((item) => ({
           repetition: item.repetition,
@@ -504,6 +616,9 @@ export async function aggregate(directory, { expectedTasks } = {}) {
               ? summarizeFileRetrieval(rows)
               : null,
           ndcg: partialScoreable && rows.length ? summarizeNdcg(rows) : null,
+          qa_retrieval: partialScoreable
+            ? summarizeQaRetrieval(quality.filter((row) => row.mode === mode))
+            : null,
           ranking_repeatable_tasks: rows.filter(
             (row) => row.ranking_repeatable === true,
           ).length,
@@ -522,6 +637,8 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     quality_aggregation: "mean_of_five",
     generated_at: new Date().toISOString(),
     suite: suite.identity,
+    qa_gold: suite.qa_gold,
+    qa_scoring: suite.qa_scoring,
     scope:
       expected.length === 20 ? "full-20-original-queries" : "explicit-subset",
     expected_task_ids: expected,
@@ -537,6 +654,34 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     repositories: manifests,
     tasks: quality,
   };
+  if (manifests.some(({ gold_stages }) => gold_stages)) {
+    const calls = [];
+    for (const taskId of expected) {
+      const pair = suite.qa_pairs[taskId];
+      const qualification = goldStageQualification(pair);
+      for (const mode of suite.protocol.modes) {
+        for (
+          let repetition = 1;
+          repetition <= suite.protocol.repetitions;
+          repetition++
+        ) {
+          calls.push(
+            goldStageCalls.get(`${taskId}/${mode}/${repetition}`) ??
+              scoreGoldStages({
+                capture: null,
+                pair,
+                items: [],
+                taskId,
+                mode,
+                repetition,
+                qualification,
+              }),
+          );
+        }
+      }
+    }
+    report.gold_stages = await writeGoldStages(directory, calls);
+  }
   await writeFile(
     join(directory, "scores.jsonl"),
     observations.map((row) => JSON.stringify(row)).join("\n") + "\n",

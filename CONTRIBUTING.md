@@ -29,7 +29,7 @@ branches; manual runs always run the selected workflow's full set of checks.
 ## Rust development setup
 
 The workspace pins its Rust toolchain. See the
-[native build prerequisites](rust/README.md#native-and-cuda-builds) before building.
+[native build prerequisites](rust/docs/development/building.md) before building.
 
 ```bash
 git clone https://github.com/zvec-ai/zvec-grep.git

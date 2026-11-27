@@ -74,6 +74,7 @@ pub fn write_path_lookup_with_terminals(
                 options,
                 diagnostics_terminal,
             )?;
+            crate::render::write_unindexed_warning(&mut diagnostics, result)?;
             write_current_text(&mut writer, result, options, stdout_terminal)?;
             if result.coverage == ContextCoverage::RgTruncated {
                 write_warning(
@@ -156,6 +157,12 @@ fn write_current_text(
             writeln!(writer, "{}", path_label(&group[0].relative_path))?;
         }
         for item in group {
+            if options.preview != crate::PreviewMode::Detail
+                && matches!(item.range, ContentRange::Pdf { .. })
+            {
+                crate::render::write_pdf_rg_preview(writer, item, theme.color)?;
+                continue;
+            }
             if options.preview == crate::PreviewMode::Detail {
                 write_detail_item(writer, item, theme)?;
                 writeln!(writer, "  {}", theme.metadata_label("Source:"))?;
@@ -207,11 +214,16 @@ fn write_detail_item(
         ContextItemStatus::Fresh => "fresh",
         ContextItemStatus::PossiblyStale => "possibly_stale",
     };
+    let range = if matches!(item.range, ContentRange::Pdf { .. }) {
+        item.excerpt_range.as_ref().unwrap_or(&item.range)
+    } else {
+        &item.range
+    };
     writeln!(
         writer,
         "  {} {}  {} {status}",
         theme.metadata_label("Range:"),
-        range_label(&item.range),
+        range_label(range),
         theme.metadata_label("Status:")
     )?;
     match &item.metadata {
@@ -266,22 +278,33 @@ fn write_source(
     color: bool,
 ) -> io::Result<()> {
     let matched = item.excerpt_range.as_ref().unwrap_or(&item.range);
-    for (offset, line) in item.content.lines().enumerate() {
-        let source = highlight(line, query, color);
-        if let Some(first) = item.content_range.start_line() {
-            let number = first + offset;
-            let marker = if matched
-                .start_line()
-                .zip(matched.last_line())
-                .is_none_or(|(first, last)| (first..=last).contains(&number))
-            {
-                ':'
+    for (index, (window, content)) in item.visible_content().enumerate() {
+        if index > 0 {
+            writeln!(writer, "{indent}…")?;
+        }
+        let first = item.content_range.start_line().map(|line| {
+            line + item.content[..window.start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+        });
+        for (offset, line) in content.lines().enumerate() {
+            let source = highlight(line, query, color);
+            if let Some(first) = first {
+                let number = first + offset;
+                let marker = if matched
+                    .start_line()
+                    .zip(matched.last_line())
+                    .is_none_or(|(first, last)| (first..=last).contains(&number))
+                {
+                    ':'
+                } else {
+                    '-'
+                };
+                writeln!(writer, "{indent}{number}{marker}\t{source}")?;
             } else {
-                '-'
-            };
-            writeln!(writer, "{indent}{number}{marker}\t{source}")?;
-        } else {
-            writeln!(writer, "{indent}{source}")?;
+                writeln!(writer, "{indent}{source}")?;
+            }
         }
     }
     Ok(())
@@ -345,6 +368,14 @@ fn range_label(range: &ContentRange) -> String {
             end_offset,
         } => format!("bytes:{start_offset}-{end_offset}"),
         ContentRange::File => "file".to_owned(),
+        ContentRange::Pdf { pages, .. } => format!(
+            "pages:{}",
+            pages
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     }
 }
 
@@ -428,6 +459,7 @@ mod tests {
         };
         ContextResult {
             query: "src/auth.ts".into(),
+            stage_traces: vec![],
             freshness: None,
             background_refresh: None,
             indexing: None,
@@ -453,6 +485,8 @@ mod tests {
                 match_ranges: Vec::new(),
                 content: content.into(),
                 outline: None,
+                content_windows: Vec::new(),
+                pdf_boxes: Vec::new(),
                 content_role: Some(ContextContentRole::Source),
                 status: ContextItemStatus::Fresh,
                 score: None,
@@ -614,6 +648,55 @@ mod tests {
             diagnostics,
             "Warning: no matching file paths; searching current file contents literally (rg).\n"
         );
+    }
+
+    #[test]
+    fn pdf_fallback_shows_selected_context_and_match_pages_in_both_layouts() {
+        let mut result = text_result();
+        result.query = "missing.go".into();
+        let first = "First context\n前文\nImport missing.go\nafter\nLast context\n";
+        let gap = "Unrelated page three\nUnrelated continuation\n";
+        let last = "Later context\nbefore\nSee missing.go\n后文\nFinal context\n";
+        let item = &mut result.items[0];
+        item.relative_path = "manual.pdf".into();
+        item.absolute_path = result.root.join("manual.pdf");
+        item.content = format!("{first}{gap}{last}");
+        let origin = 100;
+        let pdf_range = |pages, start, end| ContentRange::Pdf {
+            pages,
+            start_byte_offset: origin + start,
+            end_byte_offset: origin + end,
+        };
+        item.range = pdf_range(vec![2, 3, 4], 0, item.content.len());
+        item.content_range = item.range.clone();
+        let first_match = item.content.find("missing.go").expect("first match");
+        let last_match = item.content.rfind("missing.go").expect("last match");
+        item.excerpt_range = Some(pdf_range(vec![2, 4], first_match, last_match + 10));
+        item.match_ranges = vec![
+            pdf_range(vec![2], first_match, first_match + 10),
+            pdf_range(vec![4], last_match, last_match + 10),
+        ];
+        item.content_windows = vec![
+            pdf_range(vec![2], 0, first.len()),
+            pdf_range(vec![4], first.len() + gap.len(), item.content.len()),
+        ];
+        let result = PathLookupResult::Text(Box::new(result));
+        for detail in [false, true] {
+            let (output, _) = render(&result, detail);
+            assert!(output.contains("manual.pdf\n"), "{output}");
+            for line in first.lines().chain(last.lines()) {
+                assert!(output.contains(line), "{output}");
+            }
+            assert!(output.contains("\n    …\n"), "{output}");
+            assert!(!output.contains("Unrelated"), "{output}");
+            assert!(!output.contains("2,3,4"), "{output}");
+            let expected = if detail {
+                "Range: pages:2,4  Status: fresh"
+            } else {
+                "  pages: 2,4\n"
+            };
+            assert!(output.contains(expected), "{output}");
+        }
     }
 
     #[test]

@@ -14,6 +14,15 @@ use crate::{
 // Last commit that changed src/engine/models/catalog.ts when this fixture was refreshed.
 const MAIN_CATALOG_SOURCE_REVISION: &str = "8d0d5e277f37d897e83749cdaa0e9c07f5e92efe";
 
+// Models added to the Rust catalog after the TypeScript catalog was frozen. They have no
+// counterpart in the historical snapshot, so the oracle stays pinned to that revision.
+fn is_post_typescript_freeze(reference: &str) -> bool {
+    matches!(
+        reference,
+        "local/bekko-256-int8" | "qwen/qwen3.7-text-embedding-flash"
+    )
+}
+
 #[test]
 fn catalog_matches_main_typescript_field_for_field() {
     let expected: Value = serde_json::from_str(include_str!("fixtures/catalog-main-oracle.json"))
@@ -30,8 +39,7 @@ fn actual_catalog() -> Value {
     Value::Array(
         list_embedding_models()
             .into_iter()
-            // Bekko is a Rust-only addition; keep the historical TS oracle frozen.
-            .filter(|entry| entry.reference() != "local/bekko-256-int8")
+            .filter(|entry| !is_post_typescript_freeze(entry.reference()))
             .map(entry_value)
             .collect(),
     )

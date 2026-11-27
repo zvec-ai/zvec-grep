@@ -19,6 +19,7 @@ import {
   run,
   prepareCorpus,
   validateGoldSources,
+  validateQaGoldSources,
   corpusManifest,
   modelArtifactManifest,
   fileHash,
@@ -28,6 +29,7 @@ import {
   inside,
 } from "../../core/lib.mjs";
 import { embeddingRuntime } from "../../core/embedding.mjs";
+import { stageTraceEnvironment } from "../../core/gold-stage-capture.mjs";
 import { aggregate } from "./report.mjs";
 import { NativeIndexProductError, snapshotIndex } from "./snapshot.mjs";
 
@@ -37,9 +39,10 @@ export function requestArguments(task, root, mode, protocol) {
   assert.ok(protocol.modes.includes(mode), `unknown mode: ${mode}`);
   assert.equal(
     protocol.preview,
-    "mcp-default",
-    "the Rust benchmark requires the public MCP default presentation",
+    "full",
+    "the Rust benchmark requires the public MCP full presentation",
   );
+  assert.equal(protocol.request.preview, "full");
   return {
     root,
     ...(mode === "hybrid" ? { query: task.query } : { [mode]: [task.query] }),
@@ -50,7 +53,7 @@ export function requestArguments(task, root, mode, protocol) {
 
 export function callPlan(tasks, protocol) {
   assert.deepEqual(protocol.modes, ["hybrid", "fts", "vector"]);
-  assert.equal(protocol.preview, "mcp-default");
+  assert.equal(protocol.preview, "full");
   // Each mode receives every original question five times in the same session.
   // Fixed mode order is part of the protocol, not a controlled speed comparison.
   return protocol.modes.flatMap((mode) =>
@@ -224,6 +227,17 @@ export function schemaAllowsType(schema, type) {
     : schema?.type === type;
 }
 
+export function assertFullPreviewSchema(schema) {
+  assert.ok(
+    findSchemaVariant(
+      schema?.properties?.preview,
+      schema,
+      (entry) => entry.const === "full" || entry.enum?.includes("full"),
+    ),
+    'candidate search schema must support preview: "full"',
+  );
+}
+
 export function isProductPreparationFailure(phase, error) {
   return (
     ["installation", "index", "mcp"].includes(phase) ||
@@ -259,6 +273,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     modes,
     preview: protocol.preview,
     planned_calls: planned.length,
+    ...(options.goldStages ? { gold_stages: true } : {}),
     invalid_reasons: [],
     preparation_status: "pending",
     stage_availability: "pending",
@@ -278,6 +293,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       "artifacts/model cache must be outside the search root",
     );
     await validateGoldSources(root, tasks, gold);
+    await validateQaGoldSources(root, tasks, suite.qa_pairs);
     corpusBefore = await corpusManifest(root);
     manifest.corpus_sha256 = corpusBefore.sha256;
     await writeJson(join(output, "corpus.json"), corpusBefore);
@@ -424,7 +440,13 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       command: command[0],
       args: command.slice(1),
       cwd: root,
-      env,
+      env: {
+        ...env,
+        ...stageTraceEnvironment(
+          options.goldStages,
+          tasks.map((task) => suite.qa_pairs[task.task_id]),
+        ),
+      },
       stderr: "pipe",
     });
     let mcpStderr = "";
@@ -440,6 +462,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     assert.ok(search, "candidate lacks the required public search endpoint");
     const schema = search.inputSchema;
     const fields = schema?.properties;
+    assertFullPreviewSchema(schema);
     for (const field of [
       "root",
       "query",
@@ -496,10 +519,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
         );
       }
       const args = requestArguments(tasks[0], root, mode, protocol);
-      assert.ok(
-        !Object.hasOwn(args, "preview"),
-        "Rust MCP default presentation must not be overridden",
-      );
+      assert.equal(args.preview, "full", "Rust MCP full preview is required");
       assert.ok(
         (search.inputSchema.required ?? []).every((field) => field in args),
         "candidate requires an unsupported request field",
@@ -673,6 +693,7 @@ export async function main(args = process.argv.slice(2)) {
       repository: { type: "string" },
       tasks: { type: "string" },
       "model-cache": { type: "string" },
+      "gold-stages": { type: "boolean", default: false },
       "candidate-commit": { type: "string", default: "unrecorded" },
     },
   });
@@ -702,6 +723,7 @@ export async function main(args = process.argv.slice(2)) {
       values["model-cache"] ?? join(values.output, "model-cache"),
     ),
     candidateCommit: values["candidate-commit"],
+    goldStages: values["gold-stages"],
     runId: new Date().toISOString(),
   };
   await mkdir(options.output, { recursive: false }); // Never overwrite a prior run.

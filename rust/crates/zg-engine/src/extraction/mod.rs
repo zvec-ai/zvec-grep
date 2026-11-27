@@ -5,9 +5,17 @@ mod code;
 mod graph;
 mod image;
 mod markdown;
+pub(crate) mod pdf;
+mod preparation;
+mod sectioning;
 mod service;
+mod source_map;
 mod spi;
 mod text;
+
+pub(crate) use preparation::{
+    ExtractionOperation, ExtractionPort, ExtractionRequest, ExtractionService,
+};
 
 pub(crate) use code::code_outline;
 
@@ -21,8 +29,10 @@ pub(crate) use spi::ChunkOptions;
 pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment, ExtractionOutput};
 
 // Per-file graph support shared with the indexing pipeline.
+#[cfg(test)]
+pub(crate) use graph::Constructs;
 #[allow(unused_imports)]
-pub(crate) use graph::{FILE_SCOPE_INDEX, PartitionedGraph};
+pub(crate) use graph::{FILE_SCOPE_INDEX, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, PartitionedGraph};
 #[cfg(test)]
 pub(crate) use graph::{PendingNameRef, ResolvedNameEdge};
 

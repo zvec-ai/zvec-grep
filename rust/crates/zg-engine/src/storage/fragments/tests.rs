@@ -81,7 +81,7 @@ fn metadata_fragments(
     let content = Content::Text(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
-    let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
+    let id = EntityId::new(source.id(), &content, &source_range).expect("entity id");
     let owner = Entity::new(
         id.clone(),
         source.id(),
@@ -99,6 +99,12 @@ fn metadata_fragments(
             is_exported: false,
             is_declaration: false,
             package: None,
+            has_internal_linkage: false,
+            declares_type: false,
+            alias_of: None,
+            object_members: Vec::new(),
+            overwritten_by: None,
+            exported_as: Vec::new(),
         })),
         vec![
             EntityFragment {

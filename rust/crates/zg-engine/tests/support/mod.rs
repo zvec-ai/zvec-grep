@@ -80,6 +80,7 @@ pub fn info_options(root: &Path) -> InfoOptions {
     InfoOptions {
         root: Some(root.to_path_buf()),
         include_status: true,
+        include_counts: false,
     }
 }
 
@@ -93,7 +94,7 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
             "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
         },
         "scan": {},
-        "indexVersion": 5,
+        "indexVersion": 6,
         "storageGeneration": generation,
         "createdTime": 1,
         "updatedTime": 1,

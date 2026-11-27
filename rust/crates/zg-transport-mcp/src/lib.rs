@@ -26,8 +26,9 @@ use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        InitializeRequestParams, InitializeResult, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     tool, tool_router,
@@ -127,6 +128,29 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "- zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.\n",
     "- Use zvec_grep_index with drop: true, or zvec_grep_index_drop, only when index deletion is explicitly requested.\n",
     "- Call zvec_grep_server_status only for daemon diagnostics, not before ordinary searches.",
+);
+
+macro_rules! compact_workspace_rules {
+    ($exact:literal, $focused:literal) => {
+        concat!(
+            "Use zvec-grep for workspace evidence.\n",
+            "- Search local code, docs, config, or data when the request or prior context calls for local evidence, including questions about how this project works. Use external sources for unrelated questions.\n",
+            "- Use ", $exact, " for exact-only lookups. Use zvec_grep_search for unknown wording or locations and for architecture, relationships, or cross-file synthesis. For mixed tasks search the intent with known anchors, then verify with ", $focused, ".\n",
+            "- For questions about whether related local material exists without an exact anchor, try one focused semantic search. If irrelevant, report insufficient indexed evidence. For exact-only tasks, fall back to ", $exact, " if the index is missing or search fails.\n",
+            "- Use sufficient snippets as evidence. Open cited ranges for missing details, stop when evidence suffices, and avoid delegating solely to locate material.\n",
+            "- Pass an absolute root visible to the daemon. Read freshness and background_refresh without a status preflight. Use sufficient served_from_current_index results immediately.\n",
+            "- Use zvec_grep_callers or zvec_grep_callees for known symbols in graph-enabled indexes. Empty results are inconclusive. Enable with zg --index --graph (add --rebuild for an existing index).\n",
+            "- Combine hybrid query with supplemental fts or vector as needed. Groups rank separately unless fused. Example: {\"root\":\"/absolute/workspace\",\"query\":\"how are results ranked\",\"fts\":[\"RRF\"],\"fuse\":true}.\n",
+            "- Require explicit user authorization to create, rebuild, or drop an index. For missing-index setup, retry search after the approved build completes. Respect declined or cancelled setup."
+        )
+    };
+}
+
+const CLAUDE_AGENT_INSTRUCTIONS: &str =
+    compact_workspace_rules!("native Grep or rg", "Read, Grep, or rg");
+const CLAUDE_FULL_INSTRUCTIONS: &str = concat!(
+    compact_workspace_rules!("zvec_grep_rg", "Read or zvec_grep_rg"),
+    "\n- Use zvec_grep_index only for requested indexing or deletion. Use a user-selected embedding or a known default. wait defaults to false. Use zvec_grep_index_status for missing indexes, failures, or progress, and zvec_grep_server_status for daemon diagnostics.",
 );
 
 const MAX_QUERY_GROUPS: usize = 32;
@@ -395,6 +419,21 @@ impl ZvecGrepMcpServer {
     pub fn listed_tools(&self) -> Vec<rmcp::model::Tool> {
         self.router.list_all()
     }
+
+    fn server_info(&self, client_name: Option<&str>) -> ServerInfo {
+        let instructions = match (client_name == Some("claude-code"), self.toolset) {
+            (true, McpToolset::Agent) => CLAUDE_AGENT_INSTRUCTIONS,
+            (true, McpToolset::Full) => CLAUDE_FULL_INSTRUCTIONS,
+            (_, McpToolset::Agent) => AGENT_INSTRUCTIONS,
+            (_, McpToolset::Full) => FULL_INSTRUCTIONS,
+        };
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(rmcp::model::Implementation::new(
+                "zvec-grep",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(instructions.to_owned())
+    }
 }
 
 #[tool_router]
@@ -487,10 +526,7 @@ impl ZvecGrepMcpServer {
         .await;
 
         Ok(match result {
-            Ok(reply) => CallToolResult::success(vec![ContentBlock::text(
-                search_format::format_search_result(&reply, preview),
-            )])
-            .into(),
+            Ok(reply) => search_result_to_tool_result(&reply, preview).into(),
             Err(error) if error.code() == EngineError::NOT_FOUND => {
                 return self
                     .setup_state
@@ -579,6 +615,7 @@ impl ZvecGrepMcpServer {
         let request = InfoOptions {
             root: Some(root.clone()),
             include_status: false,
+            include_counts: false,
         };
         Ok(match self.index_operations.drop_index(request).await {
             Ok(removed) => drop_result_to_result(&root, removed),
@@ -657,6 +694,7 @@ impl ZvecGrepMcpServer {
         let request = InfoOptions {
             root: Some(root),
             include_status: true,
+            include_counts: false,
         };
         Ok(
             match self.index_operations.info(&self.engine, request).await {
@@ -696,18 +734,23 @@ impl ZvecGrepMcpServer {
 
 impl ServerHandler for ZvecGrepMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(rmcp::model::Implementation::new(
-                "zvec-grep",
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(
-                match self.toolset {
-                    McpToolset::Agent => AGENT_INSTRUCTIONS,
-                    McpToolset::Full => FULL_INSTRUCTIONS,
-                }
-                .to_owned(),
-            )
+        self.server_info(None)
+    }
+
+    fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<InitializeResult, ErrorData>> + Send {
+        let mut info = self.server_info(Some(&request.client_info.name));
+        if self
+            .supported_protocol_versions()
+            .contains(&request.protocol_version)
+        {
+            info.protocol_version = request.protocol_version.clone();
+        }
+        context.peer.set_peer_info(request);
+        std::future::ready(Ok(info))
     }
 
     async fn call_tool(
@@ -774,11 +817,12 @@ impl ServerHandler for ZvecGrepMcpServer {
 
     fn discover(
         &self,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<rmcp::model::DiscoverResult, ErrorData>> + Send {
+        let client = context.client_info();
         std::future::ready(Ok(rmcp::model::DiscoverResult::from_server_info(
             self.supported_protocol_versions().into_owned(),
-            self.get_info(),
+            self.server_info(client.as_ref().map(|info| info.name.as_str())),
         )
         .with_ttl_ms(3_600_000)
         .with_cache_scope(rmcp::model::CacheScope::Private)))
@@ -981,8 +1025,12 @@ pub struct IndexInput {
     #[serde(rename = "follow", alias = "followSymlinks")]
     #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
-    /// Index-only concurrency: ORT sessions, llama.cpp contexts, or remote requests. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity.
-    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget. llama.cpp is capped at eight.
+    /// Positive index-only concurrency: llama.cpp contexts, ORT sessions, or remote requests.
+    /// Direct mode sizes local pools from this value; ORT caps sessions to hardware concurrency.
+    /// Server requests are capped by startup capacity without resizing pools or changing threads.
+    /// llama.cpp server capacity: `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (default 1).
+    /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, then (llama.cpp only)
+    /// `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM`, then backend defaults; never persisted.
     #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.
@@ -1781,6 +1829,7 @@ impl IndexInput {
             return Ok(IndexToolRequest::Drop(InfoOptions {
                 root: Some(root),
                 include_status: false,
+                include_counts: false,
             }));
         }
         if let Some(api_key) = &self.api_key {
@@ -2529,6 +2578,23 @@ fn context_result_to_tool_result(reply: &ContextResult) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(rg_format::format(reply))])
 }
 
+fn search_result_to_tool_result(reply: &ContextResult, preview: SearchPreview) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(
+        search_format::format_search_result(reply, preview),
+    )]);
+    if !reply.stage_traces.is_empty() {
+        // Keep observations out of the agent-visible search text. The caller owns
+        // any aggregation and persistence; the stdio bridge forwards this metadata.
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "zg_stage_trace".to_owned(),
+            serde_json::json!(reply.stage_traces),
+        );
+        result.meta = Some(rmcp::model::MetaObject(metadata));
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3229,6 +3295,50 @@ mod tests {
                 Some(description.as_ref()),
                 expected[profile]["search_description"].as_str()
             );
+        }
+    }
+
+    #[test]
+    fn claude_instructions_fit_the_host_limit_for_both_toolsets() {
+        for (server, exact_tool) in [
+            (
+                ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new())),
+                "native Grep or rg",
+            ),
+            (
+                ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus)),
+                "zvec_grep_rg",
+            ),
+        ] {
+            let instructions = server
+                .server_info(Some("claude-code"))
+                .instructions
+                .expect("instructions");
+            let len = instructions.encode_utf16().count();
+            assert!(
+                len <= 2_048,
+                "{} instructions have {len} UTF-16 code units",
+                server.toolset
+            );
+            assert!(instructions.contains(&format!("Use {exact_tool} for exact-only lookups")));
+            assert!(instructions.contains("Require explicit user authorization"));
+            assert!(instructions.contains("Respect declined or cancelled setup."));
+            assert!(instructions.contains("Use sufficient served_from_current_index results"));
+            assert!(instructions.contains(r#""fuse":true"#));
+
+            for tool in server.listed_tools() {
+                let len = tool
+                    .description
+                    .as_deref()
+                    .unwrap_or_default()
+                    .encode_utf16()
+                    .count();
+                assert!(
+                    len <= 2_048,
+                    "{} description has {len} UTF-16 code units",
+                    tool.name
+                );
+            }
         }
     }
 
