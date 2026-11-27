@@ -119,11 +119,14 @@ impl SqliteGraphStorage {
         }
         if hierarchy_changed && !overflow {
             // `bind_nearest_member` stamps every hierarchy-bound member call
-            // `file_scoped`; a row without a receiver never read the chain, so
-            // it stays bound and out of this sweep.
+            // `file_scoped`, whether the call names a receiver or reads the
+            // inherited member through the enclosing instance: `Derived::run()`
+            // calling `save()` inherits it from `Mid` just as `d.save()` does,
+            // and a base swap moves both. Neither row records the chain, so the
+            // provenance is the only evidence that the walk decided it.
             requeued += tx.execute(
                 "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL, candidates = NULL
-                 WHERE status = 'resolved' AND provenance = 'file_scoped' AND receiver_name IS NOT NULL",
+                 WHERE status = 'resolved' AND provenance = 'file_scoped'",
                 [],
             )?;
         }

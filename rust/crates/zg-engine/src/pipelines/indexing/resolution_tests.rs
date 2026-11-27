@@ -1356,6 +1356,185 @@ fn incremental_requeue_revives_failed_import() {
 }
 
 #[test]
+fn sweep_keeps_a_std_member_call_pending_over_a_workspace_namesake() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let caller = index_source(
+        &store,
+        "db/db_iter.cc",
+        concat!(
+            "#include <string>\n",
+            "#include \"include/leveldb/slice.h\"\n",
+            "namespace leveldb {\n",
+            "class DBIter {\n",
+            " public:\n",
+            "  void Next();\n",
+            " private:\n",
+            "  std::string saved_key_;\n",
+            "};\n",
+            "void DBIter::Next() {\n",
+            "  saved_key_.clear();\n",
+            "}\n",
+            "}  // namespace leveldb\n",
+        ),
+    );
+    index_source(
+        &store,
+        "include/leveldb/slice.h",
+        concat!(
+            "namespace leveldb {\n",
+            "class Slice {\n",
+            " public:\n",
+            "  void clear() { size_ = 0; }\n",
+            " private:\n",
+            "  unsigned size_;\n",
+            "};\n",
+            "}\n",
+        ),
+    );
+
+    let owner = store
+        .list_pending_refs(1000, 0, &store.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue")
+        .refs
+        .iter()
+        .find(|reference| {
+            reference.file_id == caller.get()
+                && reference.reference.ref_kind == GraphEdgeKind::Calls
+                && reference.reference.ref_name == "clear"
+        })
+        .expect("queued member call")
+        .reference
+        .owner_id
+        .clone();
+    resolve_pending(&store, None, None).expect("sweep");
+    // `clear` is the workspace's only definition of that name, but the receiver
+    // is a `std::string`: nobody may declare inside `std`, so the member belongs
+    // to the library and the queue must not answer it with `leveldb::Slice`.
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "a std member call must not bind a workspace namesake"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|queued| queued.file_id == caller.get()
+                && queued.reference.ref_name == "clear"
+                && queued.reference.receiver_name.is_some()),
+        "the std member call stays queued"
+    );
+}
+
+#[test]
+fn sweep_binds_a_parameter_receiver_to_the_class_its_unit_includes() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "cache/cache_bench_tool.cc",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let header = index_source(
+        &store,
+        "db_stress_tool/db_stress_shared_state.h",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let caller = index_source(
+        &store,
+        "db_stress_tool/db_stress_common.cc",
+        concat!(
+            "#include \"db_stress_tool/db_stress_shared_state.h\"\n",
+            "namespace rocksdb {\n",
+            "void Lock(SharedState* shared) {\n",
+            "  shared->GetMutex();\n",
+            "}\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+
+    let owner = pending_receiver_call_owner(&store, caller, "shared");
+    resolve_pending(&store, None, None).expect("sweep");
+    // Two files declare `rocksdb::SharedState`, and the unit reads one of them:
+    // the namesake the `#include` never pulls in is a different class, so it
+    // must not compete for the member call.
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![header],
+        "the class the unit includes answers the member call"
+    );
+}
+
+#[test]
+fn sweep_binds_a_unit_variable_member_to_the_class_its_unit_includes() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "cache/cache_bench_tool.cc",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let header = index_source(
+        &store,
+        "db_stress_tool/db_stress_shared_state.h",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let caller = index_source(
+        &store,
+        "db_stress_tool/db_stress_common.cc",
+        concat!(
+            "#include \"db_stress_tool/db_stress_shared_state.h\"\n",
+            "namespace rocksdb {\n",
+            "SharedState* shared_state = nullptr;\n",
+            "void LockShared() {\n",
+            "  shared_state->GetMutex();\n",
+            "}\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+
+    let owner = pending_receiver_call_owner(&store, caller, "shared_state");
+    resolve_pending(&store, None, None).expect("sweep");
+    // A namespace-scope variable states its type for the whole unit, which is
+    // the same include boundary: the header's class is the one it holds.
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![header],
+        "the unit's own include decides which class the variable holds"
+    );
+}
+
+#[test]
 fn sweep_keeps_an_untyped_receiver_call_pending_when_the_member_name_is_unique() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
@@ -2178,5 +2357,93 @@ fn sweep_keeps_an_unsettled_conditional_from_defining_a_macro() {
         call_target_files(&store, &owner),
         vec![definition],
         "a macro that is only possibly defined cannot suppress the call"
+    );
+}
+
+/// Call-site line, qualified name and argument count of every call target one
+/// owner reaches, read from the persisted graph so a rule's choice is visible
+/// end to end.
+fn call_targets_of(store: &IndexStore, owner: &str) -> Vec<(Option<usize>, String, Option<u32>)> {
+    let snapshot = store.resolution_snapshot(None).expect("snapshot");
+    store
+        .read_snapshot(|view| {
+            view.neighborhood(
+                owner,
+                Direction::Out,
+                Some(&[GraphEdgeKind::Calls]),
+                |rows| {
+                    rows.map(|edge| edge.map(|edge| (edge.line, edge.target)))
+                        .collect::<crate::EngineResult<Vec<(Option<usize>, String)>>>()
+                },
+            )
+        })
+        .expect("call edges")
+        .into_iter()
+        .map(|(line, target)| {
+            let record = snapshot
+                .entity_record(&target)
+                .expect("call target has an entity record");
+            (line, record.qualified_name.clone(), record.arity)
+        })
+        .collect()
+}
+
+#[test]
+fn a_bare_call_in_a_class_body_reaches_the_class_own_members() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // The namespace's `Z0` answers both spellings: the bare `f(1)` written
+    // inside `u::Z1::h` reads the class's implicit `this`, and the two receiver
+    // calls read the base clause of `u::Z1`. The crate-root `Z0` is a decoy:
+    // matching the base clause by name tail would hand the calls to it. The
+    // using-declaration spells both `f`s and so leaves the choice to the
+    // argument count, exactly as the hierarchy rules do.
+    let file = index_source(
+        &store,
+        "src/methods.cc",
+        concat!(
+            "struct Z0 {\n",
+            "  void f(int) {}\n",
+            "};\n\n",
+            "namespace u {\n",
+            "struct Z0 {\n",
+            "  void f(int) {}\n",
+            "  void f(int, int) {}\n",
+            "};\n\n",
+            "struct Z1: Z0 {\n",
+            "  using Z0::f;\n",
+            "  void h() { f(1); }\n",
+            "};\n\n",
+            "void use(Z1 z1) {\n",
+            "  z1.f(1);\n",
+            "  z1.f(1, 2);\n",
+            "}\n",
+            "}\n",
+        ),
+    );
+    let calls = pending_call_owners(&store, file, "f");
+    assert_eq!(calls.len(), 3, "three calls queue: {calls:?}");
+
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "every call binds: {sweep:?}");
+    let bound = calls
+        .iter()
+        .map(|(line, owner)| {
+            let targets = call_targets_of(&store, owner)
+                .into_iter()
+                .filter(|(edge_line, ..)| *edge_line == Some(*line))
+                .map(|(_, name, arity)| (name, arity))
+                .collect::<Vec<_>>();
+            (*line, targets)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bound,
+        vec![
+            (13, vec![("u::Z0::f".to_owned(), Some(1))]),
+            (17, vec![("u::Z0::f".to_owned(), Some(1))]),
+            (18, vec![("u::Z0::f".to_owned(), Some(2))]),
+        ],
+        "the base in the class's own namespace answers, by argument count"
     );
 }

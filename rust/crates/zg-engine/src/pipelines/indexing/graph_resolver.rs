@@ -315,6 +315,55 @@ impl ResolutionSweep {
     }
 }
 
+/// Whether the body owning the reference binds `name` itself at that
+/// position: a parameter or a local the body declares before the call owns
+/// the spelling there, so a bare call reads that binding rather than the
+/// member or function the name also spells elsewhere.
+///
+/// The binding's scope end keeps the evidence local: a name declared in a
+/// sibling block that has already closed is not in scope at the call site.
+fn local_binding_shadows(
+    store: &IndexStore,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<bool> {
+    let reference = &stored.reference;
+    let bindings = match caches.declared_bindings.entry(reference.owner_id.clone()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(store.declared_bindings(&reference.owner_id)?),
+    };
+    Ok(bindings.iter().any(|binding| {
+        binding.name == stored.name_tail
+            && (binding.line as usize, binding.column as usize)
+                <= (reference.line, reference.column)
+            && binding
+                .scope_end
+                .is_none_or(|end| (reference.line, reference.column) < end)
+    }))
+}
+
+/// The outcome a bare C/C++ call has when the owning body binds its name: the
+/// call reads that binding, so every member rule below must leave it alone.
+///
+/// A binding is evidence only for a call that spells the bare name: a member
+/// call (`x.f()`) names the receiver's member, and a language without implicit
+/// members states its bindings explicitly at every use.
+fn binding_shadowed_outcome(
+    store: &IndexStore,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Outcome>> {
+    let reference = &stored.reference;
+    if reference.ref_kind != GraphEdgeKind::Calls
+        || reference.receiver_name.is_some()
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+        || !local_binding_shadows(store, stored, caches)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(Outcome::Deferred))
+}
+
 /// Runs the path and binding rules in precedence order, then hands the
 /// reference to the name rules.
 ///
@@ -361,26 +410,9 @@ fn classify(
     if stored.language == "go"
         && stored.reference.ref_kind == GraphEdgeKind::Calls
         && stored.reference.receiver_name.is_none()
+        && local_binding_shadows(store, stored, caches)?
     {
-        let bindings = match caches
-            .declared_bindings
-            .entry(stored.reference.owner_id.clone())
-        {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                entry.insert(store.declared_bindings(&stored.reference.owner_id)?)
-            }
-        };
-        if bindings.iter().any(|binding| {
-            binding.name == stored.name_tail
-                && (binding.line as usize, binding.column as usize)
-                    <= (stored.reference.line, stored.reference.column)
-                && binding
-                    .scope_end
-                    .is_none_or(|end| (stored.reference.line, stored.reference.column) < end)
-        }) {
-            return Ok(Outcome::Deferred);
-        }
+        return Ok(Outcome::Deferred);
     }
     if is_unresolvable_import(snapshot, stored, &mut caches.module_paths) {
         return Ok(Outcome::Failed);
@@ -487,7 +519,7 @@ fn name_hits<'s>(
     // A name a nearer scope also declares binds to that declaration: the
     // enclosing namespace is searched before the workspace.
     let visible = enclosing_scope_hits(snapshot, stored, callable);
-    Ok(Some(prefer_definitions(visible)))
+    Ok(Some(prefer_definitions(snapshot, visible)))
 }
 
 /// Runs the name-index rules: receivers, qualified names, uniqueness, and the
@@ -538,6 +570,13 @@ fn classify_names(
             rule: Rule::Receiver,
         });
     }
+    if let Some(outcome) = binding_shadowed_outcome(store, stored, caches)? {
+        // A body that binds the name itself owns every bare call of it: the
+        // parameter of `void run(std::function<void()> cb)` is what `cb()`
+        // calls, so neither the member the class imports with `using` nor the
+        // one it inherits may answer ahead of that binding.
+        return Ok(outcome);
+    }
     if let Some(resolution) = resolve_using_member(store, snapshot, stored, caches)? {
         // A using-declaration in the owner's class states which base member a
         // bare name reaches; the class's own scope answers before the
@@ -546,6 +585,12 @@ fn classify_names(
             resolution,
             rule: Rule::Receiver,
         });
+    }
+    if let Some(outcome) = resolve_implicit_this_member(store, snapshot, stored, caches)? {
+        // A bare call written in a class body reads the class's own members
+        // through the implicit `this` before the namespaces around it — unless
+        // the body binds that name itself, which leaves the call unresolved.
+        return Ok(outcome);
     }
     if let Some(resolution) = resolve_object_member(store, snapshot, stored, caches)? {
         // The receiver is an object literal whose own property table says
@@ -825,6 +870,69 @@ fn include_closure(
     Ok(reachable)
 }
 
+/// The candidates the translation unit of `file` can see: the file itself and
+/// everything its include chain reaches.
+///
+/// A C++ unit reads a class through the headers it includes, so two files
+/// declaring one qualified name are two classes: the one the unit never pulls
+/// in (a benchmark tool's namesake beside the header's class, say) is not what
+/// its calls reach.
+///
+/// # Errors
+/// Propagates graph storage failures of the include-chain read.
+fn unit_hits<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    language: &str,
+    file: u32,
+    hits: &[&'a NameIndexEntry],
+) -> crate::EngineResult<Vec<&'a NameIndexEntry>> {
+    if hits.len() < 2 {
+        return Ok(hits.to_vec());
+    }
+    if let Entry::Vacant(entry) = caches.include_closures.entry(file) {
+        entry.insert(include_closure(store, snapshot, language, file)?);
+    }
+    let Some(closure) = caches.include_closures.get(&file) else {
+        return Ok(hits.to_vec());
+    };
+    Ok(hits
+        .iter()
+        .filter(|hit| hit.file_id == file || closure.contains(&hit.file_id))
+        .copied()
+        .collect())
+}
+
+/// Whether the translation unit of `file` reads `declared`: itself always, any
+/// other file only through its include chain.
+///
+/// A body written out-of-line belongs to the class whose header its own unit
+/// includes, so this is the evidence that separates one target's implementation
+/// from the namesake class another target declares.
+///
+/// # Errors
+/// Propagates graph storage failures of the include-chain read.
+fn unit_includes(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    language: &str,
+    file: u32,
+    declared: u32,
+) -> crate::EngineResult<bool> {
+    if file == declared {
+        return Ok(true);
+    }
+    if let Entry::Vacant(entry) = caches.include_closures.entry(file) {
+        entry.insert(include_closure(store, snapshot, language, file)?);
+    }
+    Ok(caches
+        .include_closures
+        .get(&file)
+        .is_some_and(|closure| closure.contains(&declared)))
+}
+
 /// Narrows the candidates to the ones declared in a scope enclosing the
 /// reference, when any are.
 ///
@@ -1101,13 +1209,20 @@ fn language_compatible_formats(
 /// The pair therefore also needs agreement on the parameters themselves, and
 /// when that evidence is missing both candidates stay, leaving the reference
 /// ambiguous instead of pointing at the wrong implementation.
+/// Two files may also declare one class name, and their members are different
+/// members: a body in the namesake class supersedes nothing in the class the
+/// reference names, so the pair needs the same declaring class as well.
 /// Call this after the language gate, never on the whole name index: shrinking
 /// the shared set would let an unrelated language's definition erase the only
 /// candidate a reference can bind.
-fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
-    /// One definition's evidence: its counted parameters and the normalized
-    /// parameter list that tells its overload apart.
-    type Evidence = (Option<u32>, Option<String>);
+fn prefer_definitions<T: Borrow<NameIndexEntry>>(
+    snapshot: &ResolutionSnapshot,
+    hits: Vec<T>,
+) -> Vec<T> {
+    /// One definition's evidence: its counted parameters, the normalized
+    /// parameter list that tells its overload apart and the file declaring the
+    /// class it belongs to.
+    type Evidence = (Option<u32>, Option<String>, Option<u32>);
     // Without a bodyless declaration there is nothing to supersede. Most
     // names only have definitions; avoid rebuilding their parameter map for
     // every reference to the same name.
@@ -1121,7 +1236,11 @@ fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
             defined
                 .entry(hit.qualified_name.clone())
                 .or_default()
-                .push((hit.arity, hit.parameters.clone()));
+                .push((
+                    hit.arity,
+                    hit.parameters.clone(),
+                    member_class_file(snapshot, hit),
+                ));
         }
     }
     if defined.is_empty() {
@@ -1130,19 +1249,35 @@ fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
     hits.into_iter()
         .filter(|hit| {
             let hit: &NameIndexEntry = hit.borrow();
-            !hit.is_declaration
-                || !defined.get(&hit.qualified_name).is_some_and(|definitions| {
-                    definitions.iter().any(|(arity, parameters)| {
-                        same_symbol(
-                            hit.arity,
-                            hit.parameters.as_deref(),
-                            *arity,
-                            parameters.as_deref(),
-                        )
-                    })
-                })
+            if !hit.is_declaration {
+                return true;
+            }
+            let Some(definitions) = defined.get(&hit.qualified_name) else {
+                return true;
+            };
+            let declaring = member_class_file(snapshot, hit);
+            !definitions.iter().any(|(arity, parameters, defined_in)| {
+                same_symbol(
+                    hit.arity,
+                    hit.parameters.as_deref(),
+                    *arity,
+                    parameters.as_deref(),
+                ) && !matches!(
+                    (declaring, *defined_in),
+                    (Some(declared), Some(defined)) if declared != defined
+                )
+            })
         })
         .collect()
+}
+
+/// The file declaring the class a member's qualified name spells, when the
+/// workspace places one there. Two classes may share a qualified name, and the
+/// members of one are not the members of the other; a spelling with no class
+/// in it (`foo`, `ns::foo`) leaves the identity to the qualified name alone.
+fn member_class_file(snapshot: &ResolutionSnapshot, hit: &NameIndexEntry) -> Option<u32> {
+    let (scope, _) = hit.qualified_name.rsplit_once("::")?;
+    class_declaration_file(snapshot, scope, Some(hit.file_id))
 }
 
 /// Whether one qualified name's declaration and definition describe the same
@@ -1644,7 +1779,7 @@ fn bind_in_module(
     // A module may hold a prototype and the definition of one symbol; the
     // definition stands for both, so the uniqueness check below must not see
     // two candidates for it.
-    let scoped = prefer_definitions(scoped);
+    let scoped = prefer_definitions(snapshot, scoped);
     if let [hit] = scoped.as_slice() {
         return Some(Resolution {
             ref_id: stored.id,
@@ -1702,7 +1837,7 @@ fn follow_overwrite<'a>(
         .iter()
         .filter(|candidate| candidate.file_id == hit.file_id)
         .collect();
-    match prefer_definitions(scoped).as_slice() {
+    match prefer_definitions(snapshot, scoped).as_slice() {
         [target] => Some(*target),
         _ => None,
     }
@@ -1725,7 +1860,7 @@ fn follow_alias<'a>(
         .iter()
         .filter(|candidate| candidate.file_id == hit.file_id)
         .collect();
-    match prefer_definitions(scoped).as_slice() {
+    match prefer_definitions(snapshot, scoped).as_slice() {
         [target] => Some(*target),
         _ => None,
     }
@@ -2425,9 +2560,14 @@ fn member_resolution(stored: &StoredPendingRef, hit: &NameIndexEntry) -> Resolut
 /// caller orders by precedence: the receiver's own class first, then its
 /// bases by distance. The closest scope declaring the member decides, since
 /// an override hides the declaration its base would contribute — the one
-/// declaration there binds, while several (overloads this rule cannot
-/// separate) leave the call to the rules below rather than binding an
-/// ancestor the override replaced.
+/// member there binds, while several (overloads this rule cannot separate)
+/// leave the call to the rules below rather than binding an ancestor the
+/// override replaced.
+///
+/// A class read through a header and an implementation file offers both
+/// spellings of one member, and the pair is one symbol: it is settled before
+/// the overload count, which would otherwise see two members accepting the
+/// same call and decline.
 fn bind_nearest_member(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -2436,13 +2576,40 @@ fn bind_nearest_member(
 ) -> Option<Resolution> {
     for scope in scopes {
         let found = declarations_in(snapshot, hits, scope);
-        match found.as_slice() {
-            [] => {}
-            [hit] => return Some(member_resolution(stored, hit)),
-            _ => return None,
+        match found.len() {
+            0 => {}
+            1 => return Some(member_resolution(stored, found[0])),
+            _ => return choose_overload(stored, &prefer_definitions(snapshot, found)),
         }
     }
     None
+}
+
+/// Narrows several same-named members of one scope — a C++ overload set — to
+/// the one whose parameter count the call site matches.
+///
+/// The count is the only evidence this rule reads, so two overloads that both
+/// accept the call stay unbound rather than letting the walk pick one. A
+/// language without overloads keeps the conservative answer: several members
+/// of one name there are a rebinding, not a set to choose from.
+fn choose_overload(stored: &StoredPendingRef, found: &[&NameIndexEntry]) -> Option<Resolution> {
+    if stored.reference.ref_kind != GraphEdgeKind::Calls
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+    {
+        return None;
+    }
+    let arity = stored
+        .reference
+        .arity
+        .and_then(|arity| u32::try_from(arity).ok());
+    let mut matching = found
+        .iter()
+        .filter(|hit| compatible_arity(arity, hit.arity));
+    let hit = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    Some(member_resolution(stored, hit))
 }
 
 /// Binds a member call across the hierarchy `caller` heads, reading `scopes`
@@ -2679,6 +2846,73 @@ fn resolve_receiver_typed(
     ))
 }
 
+/// A bare call written inside a class body reaches that class's own member
+/// through the implicit `this`.
+///
+/// `v2()` in `S0::v1` is `this->v2()`: the enclosing class answers before its
+/// bases, and both answer before the namespaces around them. The rule reads
+/// the candidate list before the bare-name gates discard members, because a
+/// member is exactly what those gates cannot address; a name no class in the
+/// caller's hierarchy declares falls through to them unchanged.
+///
+/// The using-declaration rule runs first: a name one of those declarations
+/// brings in is a member of the class itself, which outranks anything the
+/// hierarchy walk would find under the same spelling.
+///
+/// A binding the body declares at the call site outranks the member, though:
+/// `S::run(std::function<void()> cb)` calling `cb()` calls the parameter, not
+/// `S::cb`. What such a binding holds is not in the graph, so the call stays
+/// unresolved instead of naming the member the spelling coincides with.
+///
+/// # Errors
+/// Propagates graph storage failures of the inheritance walk.
+fn resolve_implicit_this_member(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Outcome>> {
+    let reference = &stored.reference;
+    if reference.ref_kind != GraphEdgeKind::Calls
+        || reference.receiver_name.is_some()
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+    {
+        return Ok(None);
+    }
+    if local_binding_shadows(store, stored, caches)? {
+        return Ok(Some(Outcome::Deferred));
+    }
+    // A call site outside any class scope has no implicit `this`; one owned by
+    // a namespace function (`ns::helper`) has no class to read first either,
+    // which the hierarchy walk below answers by finding no scope.
+    if snapshot
+        .entity_record(&reference.owner_id)
+        .is_none_or(|owner| !owner.qualified_name.contains("::"))
+    {
+        return Ok(None);
+    }
+    let Some(candidates) = snapshot.lookup_candidates(&stored.name_tail) else {
+        return Ok(None);
+    };
+    let callable: Vec<&NameIndexEntry> = candidates
+        .iter()
+        .filter(|hit| is_callable_symbol(hit))
+        .collect();
+    if callable.is_empty() {
+        return Ok(None);
+    }
+    let resolution = bind_nearest_member(
+        snapshot,
+        stored,
+        &callable,
+        &owner_class_scopes(store, snapshot, stored)?,
+    );
+    Ok(resolution.map(|resolution| Outcome::Resolved {
+        resolution,
+        rule: Rule::Receiver,
+    }))
+}
+
 /// A bare call a using-declaration of the owner's class brings into scope.
 ///
 /// `using First<T>::Run;` states that a bare `Run()` written in the class's
@@ -2762,6 +2996,16 @@ fn resolve_undeclared_type_member(
         return None;
     }
     let head = type_head(&pointee_type(bound_type));
+    // Nobody may add declarations to `std`, so a member read through a
+    // standard-library type belongs to the library whatever the workspace
+    // happens to declare: `saved_key_.clear()` on a `std::string` is not
+    // `leveldb::Slice::clear`, and `Statistics::load` is not
+    // `std::atomic<bool>::load`. Generated types are the case this rule serves,
+    // and they never spell `std`.
+    let head = head.strip_prefix("::").unwrap_or(&head);
+    if head == "std" || head.starts_with("std::") {
+        return None;
+    }
     let tail = head.rsplit("::").next()?;
     // The index answers `Some([])` for a name nothing declares; `None` is a
     // snapshot that still hides some of it, which is not evidence of absence.
@@ -3242,6 +3486,44 @@ fn unit_spelled_hits<'a>(
     Ok(if visible.is_empty() { hits } else { visible })
 }
 
+/// The candidates the reference's translation unit can see.
+///
+/// A C++ unit sees a type through the headers it includes, so two files
+/// declaring one qualified name are two classes: the one the unit never pulls
+/// in (a benchmark tool's namesake beside the header's class, say) is not what
+/// its calls reach. Only the included files and the unit's own stay candidates;
+/// a unit that includes none of them — a header reached through a build-system
+/// path the index cannot follow — keeps the candidates whole rather than
+/// losing the answer.
+///
+/// # Errors
+/// Propagates graph storage failures of the include-chain read.
+fn unit_visible_hits<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: Vec<&'a NameIndexEntry>,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Vec<&'a NameIndexEntry>> {
+    if !matches!(stored.language.as_str(), "c" | "cpp") || hits.len() < 2 {
+        return Ok(hits);
+    }
+    let visible = unit_hits(
+        store,
+        snapshot,
+        caches,
+        &stored.language,
+        stored.file_id,
+        &hits,
+    )?;
+    // Narrowing to nothing states no evidence either way, and narrowing nothing
+    // is no narrowing at all.
+    if visible.is_empty() || visible.len() == hits.len() {
+        return Ok(hits);
+    }
+    Ok(visible)
+}
+
 /// The binding name extraction records for a `using namespace` directive.
 const USING_NAMESPACE_BINDING: &str = "[[cpp_using_namespace]]";
 
@@ -3558,8 +3840,19 @@ fn type_root_scope_in(
         .lookup_candidates(tail)
         .map(|hits| hits.iter().collect::<Vec<&NameIndexEntry>>())
     {
-        Some(hits) if global => Some(global_spelled_under(&hits, &head)),
-        Some(hits) if head.contains("::") => Some(spelled_under(&hits, &head)),
+        Some(hits) if global => {
+            // The spelling states the name exactly, but it still states no
+            // file: two classes may spell one qualified name, and only the one
+            // the unit's includes reach answers its calls.
+            let hits = global_spelled_under(&hits, &head);
+            Some(unit_visible_hits(store, snapshot, stored, hits, caches)?)
+        }
+        Some(hits) if head.contains("::") => {
+            // A qualified spelling names one class by scope alone, so the same
+            // visibility the bare name reads decides between namesakes.
+            let hits = spelled_under(&hits, &head);
+            Some(unit_visible_hits(store, snapshot, stored, hits, caches)?)
+        }
         Some(hits) => {
             // A class the call is written in answers the name before the
             // namespaces around it do; the enclosing-scope reading applies
@@ -3568,6 +3861,9 @@ fn type_root_scope_in(
                 Some(nested) => nested,
                 None => enclosing_scope_hits(snapshot, stored, hits),
             };
+            // Two files may spell one class name; the unit's own includes say
+            // which of them its calls reach.
+            let hits = unit_visible_hits(store, snapshot, stored, hits, caches)?;
             Some(unit_spelled_hits(
                 store, snapshot, stored, &head, hits, caches,
             )?)
@@ -4033,7 +4329,7 @@ fn resolve_object_member(
         .iter()
         .filter(|candidate| candidate.file_id == holder.file_id)
         .collect();
-    Ok(match prefer_definitions(scoped).as_slice() {
+    Ok(match prefer_definitions(snapshot, scoped).as_slice() {
         [target] => Some(Resolution {
             ref_id: stored.id,
             target_id: target.entity_id.clone(),
@@ -4073,7 +4369,7 @@ fn unique_receiver<'a>(
     receiver: &str,
 ) -> Option<&'a NameIndexEntry> {
     let receivers = snapshot.lookup_candidates(receiver)?;
-    let preferred = prefer_definitions(receivers.iter().collect());
+    let preferred = prefer_definitions(snapshot, receivers.iter().collect());
     match preferred.as_slice() {
         [holder] => Some(*holder),
         _ => None,
@@ -4130,10 +4426,32 @@ fn imported_binding_target<'a>(
         .iter()
         .filter(|hit| hit.file_id == target_file)
         .collect();
-    Ok(match prefer_definitions(scoped).as_slice() {
+    Ok(match prefer_definitions(snapshot, scoped).as_slice() {
         [hit] => Some(*hit),
         _ => None,
     })
+}
+
+/// The one candidate an unqualified base clause names inside `class_scope`:
+/// the class is read in the scope enclosing the derived class first, so
+/// `u::Z1: Z0` names `u::Z0` even while a `Z0` outside `u` shares the spelling.
+/// A qualified clause, or several classes in that scope, keeps the hierarchy
+/// unknown.
+fn enclosing_scope_hit<'a>(
+    class_scope: &str,
+    lookup: &str,
+    candidates: &[&'a NameIndexEntry],
+) -> Option<&'a NameIndexEntry> {
+    if lookup.contains("::") {
+        return None;
+    }
+    let (parent, _) = class_scope.rsplit_once("::")?;
+    let qualified = format!("{parent}::{lookup}");
+    let mut matching = candidates
+        .iter()
+        .filter(|hit| hit.qualified_name == qualified);
+    let hit = *matching.next()?;
+    matching.next().is_none().then_some(hit)
 }
 
 /// Appends every base class reachable from `root` through extends/implements
@@ -4187,13 +4505,22 @@ fn collect_base_scopes(
                 // Hidden candidates must not turn an ambiguous base name into
                 // a seemingly unique ancestor.
                 let candidates = prefer_definitions(
+                    snapshot,
                     snapshot
                         .lookup_candidates(&lookup)
                         .unwrap_or_default()
                         .iter()
                         .collect::<Vec<_>>(),
                 );
-                if let [hit] = candidates.as_slice() {
+                let hit = match candidates.as_slice() {
+                    [] => None,
+                    [hit] => Some(*hit),
+                    // A namesake elsewhere in the workspace must not hide the
+                    // base: an unqualified clause is read in the scope that
+                    // encloses the derived class.
+                    _ => enclosing_scope_hit(&scope.name, &lookup, &candidates),
+                };
+                if let Some(hit) = hit {
                     declared.push(hit.entity_id.clone());
                 }
             }
@@ -4261,7 +4588,7 @@ fn class_entity_in(
         .filter(|hit| file_hint == Some(hit.file_id))
         .collect();
     let matched = if in_file.is_empty() { matched } else { in_file };
-    let matched = prefer_definitions(matched);
+    let matched = prefer_definitions(snapshot, matched);
     if let [hit] = matched.as_slice() {
         return Some(hit.entity_id.clone());
     }

@@ -685,6 +685,40 @@ fn hierarchy_change_requeues_member_calls_bound_through_the_chain() {
 }
 
 #[test]
+fn hierarchy_change_requeues_the_receiver_less_member_call() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    // `Mid::run()` inherits `save()` and calls it through the enclosing
+    // instance: the call names no receiver, so only the hierarchy walk decided
+    // the member, and a base swap moves it just the same.
+    let mut call = reference("a", "target");
+    call.receiver_name = None;
+    call.metadata = Metadata::default();
+    db.write_file_graph(1, None, &graph(&["a"], vec![], vec![call]), &[], false)
+        .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+
+    db.write_file_graph(
+        2,
+        None,
+        &graph(&["Mid"], vec![], vec![hierarchy_reference("Mid", "B")]),
+        &[],
+        false,
+    )
+    .expect("hierarchy evidence");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    let pending = db.list_pending_refs(100, 0).expect("pending");
+    assert!(
+        pending
+            .refs
+            .iter()
+            .any(|stored| stored.reference.ref_name == "target"),
+        "the implicit member call returns to the queue: {pending:?}"
+    );
+}
+
+#[test]
 fn a_write_without_inheritance_keeps_hierarchy_bindings() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(

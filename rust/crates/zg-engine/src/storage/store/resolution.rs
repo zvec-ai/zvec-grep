@@ -285,7 +285,7 @@ impl SymbolIndex {
 /// `requires(...)` — are not the parameter list, and a list this function
 /// cannot place returns `None`, so an entity without that evidence never
 /// stands in for one that has it.
-fn parameter_evidence(signature: Option<&str>) -> Option<String> {
+pub(crate) fn parameter_evidence(signature: Option<&str>) -> Option<String> {
     let signature = signature?;
     let (start, end) = outer_parameter_group(signature)?;
     let mut parameters = Vec::new();
@@ -304,6 +304,46 @@ fn parameter_evidence(signature: Option<&str>) -> Option<String> {
     }
     parameters.push(normalize_parameter(&signature[begin..end]));
     Some(parameters.join(","))
+}
+
+/// The member qualifiers a signature states after its parameter list:
+/// `const`, `volatile`, `&` and `&&` are part of a member's identity, so
+/// `void f(int) const` and `void f(int)` are two members of one class and the
+/// body of one never overrides the other.
+///
+/// Spacing is not evidence, so `const&` and `const &` state the same qualifiers
+/// and `&&` stays distinct from `&`.
+///
+/// A signature whose parameter list cannot be placed yields `None`, which a
+/// comparison treats as absent evidence rather than as "unqualified".
+pub(crate) fn qualifier_evidence(signature: Option<&str>) -> Option<String> {
+    let signature = signature?;
+    let (_, end) = outer_parameter_group(signature)?;
+    let mut qualifiers = Vec::new();
+    for token in signature[end..].split(|character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '=' | ',' | ';' | ':'
+            )
+    }) {
+        // A token that carries the reference qualifier writes it joined to the
+        // word (`const&`) as often as apart (`const &`); each `&` is one
+        // qualifier of its own, so `&&` never collapses into `&`.
+        for part in token.split_inclusive('&') {
+            match part.strip_suffix('&') {
+                Some(word) => {
+                    if matches!(word, "const" | "volatile") {
+                        qualifiers.push(word);
+                    }
+                    qualifiers.push("&");
+                }
+                None if matches!(part, "const" | "volatile") => qualifiers.push(part),
+                None => {}
+            }
+        }
+    }
+    Some(qualifiers.join(" "))
 }
 
 /// The span between the parentheses of the function declarator's parameter
@@ -992,5 +1032,55 @@ mod parameter_evidence_tests {
         assert_eq!(evidence("void f(const Foo* bar);"), "const Foo*");
         assert_eq!(evidence("void f(std::string s);"), "std::string");
         assert_eq!(evidence("void f(Foo<Bar> baz);"), "Foo<Bar>");
+    }
+}
+
+#[cfg(test)]
+mod qualifier_evidence_tests {
+    use super::qualifier_evidence;
+
+    fn evidence(signature: &str) -> String {
+        qualifier_evidence(Some(signature)).expect("signature states a parameter list")
+    }
+
+    #[test]
+    fn the_same_qualifiers_pair_across_spellings() {
+        // The declaration and the body it pairs with may be formatted
+        // differently; the qualifiers are what they state together.
+        let plain = evidence("void f(int)");
+        assert_eq!(plain, "");
+        assert_eq!(evidence("void f(int) const;"), "const");
+        assert_eq!(evidence("void f(int) const {}"), "const");
+        assert_eq!(
+            evidence("void f(int) const&"),
+            evidence("void f(int) const &")
+        );
+        assert_eq!(evidence("void f(int) volatile"), "volatile");
+    }
+
+    #[test]
+    fn a_reference_qualifier_is_not_the_other() {
+        // `&` and `&&` select different overloads, so the two never pair.
+        assert_ne!(evidence("void f(int) &"), evidence("void f(int) &&"));
+        assert_eq!(evidence("void f(int) &&"), "& &");
+        assert_ne!(evidence("void f(int) const&"), evidence("void f(int) &"));
+        assert_ne!(evidence("void f(int) const"), evidence("void f(int)"));
+    }
+
+    #[test]
+    fn a_trailing_clause_is_not_a_qualifier() {
+        // `noexcept` and a return type follow the qualifiers; neither makes a
+        // plain member look qualified.
+        assert_eq!(evidence("void f(int) noexcept"), "");
+        assert_eq!(evidence("auto f(int) const -> int"), "const");
+        assert_eq!(evidence("void f(int) const noexcept(true)"), "const");
+    }
+
+    #[test]
+    fn an_unplaceable_parameter_list_states_nothing() {
+        // Absent evidence is not "unqualified": a signature the reader cannot
+        // place leaves the pair to the parameter count alone.
+        assert_eq!(qualifier_evidence(Some("no parameter list")), None);
+        assert_eq!(qualifier_evidence(None), None);
     }
 }

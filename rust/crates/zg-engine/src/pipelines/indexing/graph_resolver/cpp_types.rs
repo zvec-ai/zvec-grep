@@ -275,7 +275,16 @@ fn named_type(
         match hits.as_slice() {
             [] => {}
             [hit] => return Ok(Some(Type::Class((*hit).clone()))),
-            _ => return Ok(None),
+            _ => {
+                // One qualified name, two declarations: the reference reaches
+                // the class its translation unit includes, and only that one.
+                let visible =
+                    super::unit_hits(store, snapshot, caches, "cpp", context.file, &hits)?;
+                return match visible.as_slice() {
+                    [hit] => Ok(Some(Type::Class((*hit).clone()))),
+                    _ => Ok(None),
+                };
+            }
         }
     }
     if matches!(name, "std::unique_ptr" | "std::shared_ptr") && arguments.len() == 1 {
@@ -372,9 +381,17 @@ fn class_for_member(ty: &Type, arrow: bool) -> Option<&NameIndexEntry> {
     }
 }
 
+/// The member one class declares, spelled as the unit reads it.
+///
+/// A class read through a header declares its members there while their
+/// bodies are written out-of-line, so the two spellings are one symbol: the
+/// declaration the unit can see decides which member the call names, and the
+/// body of that class and signature stands for it.
 fn member(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    context: &Context,
     owner: &NameIndexEntry,
     name: &str,
     arity: Option<usize>,
@@ -382,13 +399,10 @@ fn member(
     let Some(hits) = snapshot.lookup_candidates(name) else {
         return Ok(None);
     };
-    let hits = prefer_definitions(
-        hits.iter()
-            .filter(|hit| {
-                compatible(snapshot, hit) && hit.symbol_type == Some(SymbolType::Function)
-            })
-            .collect::<Vec<_>>(),
-    );
+    let hits: Vec<&NameIndexEntry> = hits
+        .iter()
+        .filter(|hit| compatible(snapshot, hit) && hit.symbol_type == Some(SymbolType::Function))
+        .collect();
     let root = ClassScope {
         name: owner.qualified_name.clone(),
         declared_in: Some(owner.file_id),
@@ -399,19 +413,14 @@ fn member(
         collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
     let mut inherited = None;
     for scope in scopes {
-        let declarations = hits
-            .iter()
-            .copied()
-            .filter(|hit| {
-                hit.qualified_name
-                    .rsplit_once("::")
-                    .is_some_and(|(parent, _)| parent == scope.name)
-            })
-            .collect::<Vec<_>>();
-        let hit = match declarations.as_slice() {
+        // A member is written in the class body the unit reads, so only the
+        // spellings that class declares are its members: a namesake class in a
+        // file the unit never pulls in declares members of its own under the
+        // very same qualified name.
+        let members: Vec<&NameIndexEntry> = super::declarations_in(snapshot, &hits, &scope);
+        let hit = match members.as_slice() {
             [] => continue,
-            [hit] => Some(*hit),
-            _ => arity.and_then(|arity| unique_arity_match(declarations.into_iter(), arity)),
+            _ => member_spelling(store, snapshot, caches, context, &members, arity)?,
         };
         if scope.name == owner.qualified_name || !branched {
             return Ok(hit.cloned());
@@ -423,6 +432,101 @@ fn member(
         inherited = Some(hit.clone());
     }
     Ok(inherited)
+}
+
+/// The spelling of one member a class declares, paired with the body that
+/// implements it.
+///
+/// Visibility decides on the spellings before the pairing: the declaration
+/// written in the class body is what the unit reads, while the implementation
+/// it supersedes usually sits in a `.cc` file outside the include closure.
+/// Pairing first would drop the only spelling the unit can see and leave the
+/// call with nothing to bind. The body of the same signature is what the
+/// declaration stands for; two of them are two implementations this rule
+/// cannot tell apart, and the declaration answers for the member.
+fn member_spelling<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    context: &Context,
+    members: &[&'a NameIndexEntry],
+    arity: Option<usize>,
+) -> crate::EngineResult<Option<&'a NameIndexEntry>> {
+    // A member belongs to the class body the unit read, so a same-named member
+    // of a namesake class in a file the unit never pulls in is not what the
+    // call reaches.
+    let visible = super::unit_hits(store, snapshot, caches, "cpp", context.file, members)?;
+    let seen = if visible.is_empty() {
+        members
+    } else {
+        visible.as_slice()
+    };
+    // A class read through a header offers two spellings of one member — the
+    // declaration and the body implementing it — and the pair is one symbol.
+    // It is settled before the overload count, which would otherwise see two
+    // members accepting the same call and decline to choose.
+    let paired = super::prefer_definitions(snapshot, seen.to_vec());
+    let spelling = match paired.as_slice() {
+        [hit] => Some(*hit),
+        _ => arity.and_then(|arity| unique_arity_match(paired.iter().copied(), arity)),
+    };
+    let Some(spelling) = spelling else {
+        return Ok(None);
+    };
+    Ok(Some(paired_body(
+        store, snapshot, caches, members, spelling,
+    )?))
+}
+
+/// The body implementing one member spelling, when the class holds exactly one
+/// body of that signature in this translation unit.
+///
+/// The declaration the unit reads may sit in a header shared by two independent
+/// targets that both declare the class, while the only indexed body belongs to
+/// the other target: the body's own unit is what says which declaration it
+/// implements, so a body whose class cannot be placed pairs only when its unit
+/// includes the declaring file. Otherwise the declaration answers the call,
+/// because a namesake's implementation is not this class's member.
+fn paired_body<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    members: &[&'a NameIndexEntry],
+    spelling: &'a NameIndexEntry,
+) -> crate::EngineResult<&'a NameIndexEntry> {
+    if !spelling.is_declaration {
+        return Ok(spelling);
+    }
+    let declared = super::member_class_file(snapshot, spelling);
+    let mut bodies = Vec::new();
+    for hit in members {
+        if hit.is_declaration
+            || !super::same_symbol(
+                hit.arity,
+                hit.parameters.as_deref(),
+                spelling.arity,
+                spelling.parameters.as_deref(),
+            )
+        {
+            continue;
+        }
+        let pairs = match (declared, super::member_class_file(snapshot, hit)) {
+            (Some(declared), Some(body_class)) => declared == body_class,
+            (Some(declared), None) => {
+                super::unit_includes(store, snapshot, caches, "cpp", hit.file_id, declared)?
+            }
+            // A spelling whose class the workspace cannot place states nothing
+            // about where its body is written, so the body still stands for it.
+            (None, _) => true,
+        };
+        if pairs {
+            bodies.push(*hit);
+        }
+    }
+    Ok(match bodies.as_slice() {
+        [body] => body,
+        _ => spelling,
+    })
 }
 
 fn return_type(
@@ -519,7 +623,7 @@ fn expression_type(
                 let Some(name) = function.child_by_field_name("field") else {
                     return Ok(None);
                 };
-                return match member(store, snapshot, owner, text(name), arity)? {
+                return match member(store, snapshot, caches, context, owner, text(name), arity)? {
                     Some(function) => {
                         return_type(store, snapshot, caches, &function, remaining - 1)
                     }
@@ -571,6 +675,7 @@ fn call_type(
             format!("{scope}::{name}")
         };
         let hits = prefer_definitions(
+            snapshot,
             hits.iter()
                 .filter(|hit| {
                     hit.qualified_name == qualified
@@ -626,6 +731,8 @@ pub(super) fn resolve_receiver(
     let target = member(
         store,
         snapshot,
+        caches,
+        &context,
         owner,
         &stored.name_tail,
         stored.reference.arity,
@@ -683,6 +790,7 @@ pub(super) fn resolve_constructor(
         return Ok(Some(Outcome::Deferred));
     };
     let constructors = prefer_definitions(
+        snapshot,
         hits.iter()
             .filter(|hit| {
                 hit.qualified_name == qualified
