@@ -7,26 +7,39 @@ use crate::domain::FileFormat;
 /// How much of a file is searched for an in-band encoding declaration.
 const DECLARATION_WINDOW: usize = 1024;
 
+/// Why a sample carries no indexable text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DecodeFailure {
+    /// The bytes hold C0 control characters, so the sample is binary content.
+    Binary,
+    /// A BOM-marked sample does not decode as the encoding its BOM declares.
+    MalformedBom,
+}
+
 /// Decodes a known text format for indexing. Format sniffing remains strict.
+///
+/// # Errors
+/// Returns [`DecodeFailure`] when the bytes hold no text: binary content, or a
+/// BOM that does not match the encoding it declares.
 pub(crate) fn decode_index_text<'a>(
     formats: &[FileFormat],
     bytes: &'a [u8],
-) -> Option<Cow<'a, str>> {
+) -> Result<Cow<'a, str>, DecodeFailure> {
     if has_bom(bytes) {
-        return decode_text(bytes, true);
+        return decode_text(bytes, true).ok_or(DecodeFailure::MalformedBom);
     }
     let declared = declared_encoding(formats, bytes);
     // Python honours its cookie even when the bytes happen to be valid UTF-8.
     if formats.contains(&FileFormat::Python) && declared == Some(Declared::Latin1) {
-        return Some(Cow::Owned(decode_latin_one(bytes)));
+        return Ok(Cow::Owned(decode_latin_one(bytes)));
     }
     if let Some(text) = decode_text(bytes, true) {
-        return Some(text);
+        return Ok(text);
     }
     if looks_binary(bytes) {
-        return None;
+        return Err(DecodeFailure::Binary);
     }
-    Some(match declared {
+    Ok(match declared {
         Some(Declared::Latin1) => Cow::Owned(decode_latin_one(bytes)),
         Some(Declared::Other(encoding)) => encoding.decode_without_bom_handling(bytes).0,
         None => String::from_utf8_lossy(bytes),
@@ -412,7 +425,7 @@ fn decode_utf32(bytes: &[u8], little_endian: bool, complete: bool) -> Option<Str
 
 #[cfg(test)]
 mod tests {
-    use super::decode_index_text;
+    use super::{DecodeFailure, decode_index_text};
     use crate::domain::FileFormat;
 
     #[test]
@@ -470,13 +483,23 @@ mod tests {
     }
 
     #[test]
-    fn malformed_bom_and_binary_content_remain_errors() {
-        assert!(decode_index_text(&[FileFormat::Text], &[0xff, 0xfe, 0xff]).is_none());
+    fn malformed_bom_keeps_its_own_failure_reason() {
+        assert_eq!(
+            decode_index_text(&[FileFormat::Text], &[0xff, 0xfe, 0xff]),
+            Err(DecodeFailure::MalformedBom)
+        );
+    }
+
+    #[test]
+    fn binary_content_keeps_its_own_failure_reason() {
         let mut transport = vec![0xff; 188 * 3];
         for packet in transport.as_chunks_mut::<188>().0 {
             packet[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
         }
-        assert!(decode_index_text(&[FileFormat::TypeScript], &transport).is_none());
+        assert_eq!(
+            decode_index_text(&[FileFormat::TypeScript], &transport),
+            Err(DecodeFailure::Binary)
+        );
     }
 
     #[test]

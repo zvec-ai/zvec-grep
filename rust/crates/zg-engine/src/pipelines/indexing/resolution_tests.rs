@@ -71,17 +71,18 @@ fn index_source_with_graph(
         text: text.to_owned(),
     };
     let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extraction");
-    let entities = bind_entities(id, extracted.fragments).expect("bound entities");
+    let bound = bind_entities(id, extracted.fragments).expect("bound entities");
     let mut graph = extracted
         .graph
         .as_ref()
         .map(|graph| {
             let language = formats.first().copied().expect("code format");
-            assemble_file_graph(&id.get().to_string(), language, graph, &entities)
+            assemble_file_graph(&id.get().to_string(), language, graph, &bound)
         })
         .unwrap_or_default();
     adjust(&mut graph);
-    let entries: Vec<IndexedFragment> = entities
+    let entries: Vec<IndexedFragment> = bound
+        .entities
         .iter()
         .flat_map(|entity| {
             entity.fragments().iter().map(|fragment| IndexedFragment {
@@ -105,7 +106,7 @@ fn index_source_with_graph(
     )
     .expect("file record");
     store
-        .replace_file_with_graph(&file, &entities, &entries, &graph)
+        .replace_file_with_graph(&file, &bound.entities, &entries, &graph)
         .expect("store extraction output");
     id
 }

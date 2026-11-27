@@ -1102,6 +1102,60 @@ fn non_pending_reference_status_preserves_the_previous_snapshot() {
 }
 
 #[test]
+fn a_reference_without_a_name_leaves_the_snapshot_and_keeps_the_file() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let nameless = reference("a", " \t");
+    let snapshot = graph(&["a"], vec![], vec![reference("a", "kept"), nameless]);
+
+    db.write_file_graph(1, None, &snapshot, &[], false)
+        .expect("a nameless reference is not a file failure");
+
+    let pending = db.list_pending_refs(100, 0).expect("pending refs");
+    assert_eq!(pending.refs.len(), 1);
+    assert_eq!(pending.refs[0].reference.ref_name, "kept");
+}
+
+#[test]
+fn a_nameless_reference_still_answers_for_its_owner_and_line() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let original = reference("a", "target");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![original.clone()]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let before = db.list_pending_refs(100, 0).expect("pending refs");
+
+    // Leaving the row out of the snapshot is not a waiver of the contract: an
+    // owner in another file or a line no source has is the same corruption on a
+    // nameless reference as on a named one.
+    let mut foreign = original.clone();
+    foreign.ref_name = " \t".into();
+    foreign.owner_id = "elsewhere".into();
+    let mut unnumbered = original;
+    unnumbered.ref_name.clear();
+    unnumbered.line = 0;
+    for invalid in [foreign, unnumbered] {
+        assert!(matches!(
+            db.write_file_graph(
+                1,
+                None,
+                &graph(&["a"], vec![], vec![invalid]),
+                &["a".into()],
+                false,
+            ),
+            Err(Error::InvalidInput(
+                "pending refs require local ownership and one-based lines"
+            ))
+        ));
+        assert_eq!(db.list_pending_refs(100, 0).expect("unchanged"), before);
+    }
+}
+
+#[test]
 fn sql_failure_rolls_back_replacement_and_invalidation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");

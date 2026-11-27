@@ -438,15 +438,21 @@ fn visit_for_calls(
 /// The plain type a brace construction builds and where it is written:
 /// `X{}` names `X` at that spelling. A template or qualified spelling names a
 /// type the bare-name resolution cannot place, so it stays unreported.
+///
+/// An initializer that spells no type, `const Wallet& wallet = {}`, leaves a
+/// zero-width `type_identifier` behind in error recovery. Its text names
+/// nothing, and a reference spelled `""` fails the whole file's graph write,
+/// so the spelling must read non-empty.
 fn constructed_type_name(node: Node<'_>, source: &[u8]) -> Option<(String, tree_sitter::Point)> {
     let spelled = node.child_by_field_name("type")?;
     if spelled.kind() != "type_identifier" {
         return None;
     }
-    Some((
-        node_text(spelled, source).to_owned(),
-        spelled.start_position(),
-    ))
+    let name = node_text(spelled, source);
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some((name.to_owned(), spelled.start_position()))
 }
 
 /// Where a call node stands relative to building a value: a `new X()` site, a
@@ -2303,7 +2309,16 @@ fn peel_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             // A `typedef` spells its new name with the type grammar's own
             // identifier (`typedef Iter<Element> iterator`).
             "identifier" | "field_identifier" | "type_identifier" => {
-                return Some(node_text(current, source).to_owned());
+                let name = node_text(current, source);
+                // A declaration the parser recovered (`class MACRO Name { … }`
+                // keeps its body's statements in recovery) can leave a
+                // zero-width identifier where the declarator would be: it
+                // binds no name, and a reference spelled `""` fails the whole
+                // file's graph write.
+                if name.trim().is_empty() {
+                    return None;
+                }
+                return Some(name.to_owned());
             }
             "pointer_declarator"
             | "reference_declarator"

@@ -36,12 +36,12 @@ use crate::{
     domain::{
         Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata, FileCategory,
         FileFormat, FileGraphResult, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId,
-        IndexDescriptor, Range, SourcePath, Workspace,
+        IndexDescriptor, Range, SourcePath, Workspace, content_has_value,
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
-        ExtractedEntity, ExtractionOperation, ExtractionPort, ExtractionRequest, SourceKind,
-        source_kind, vector_content_for_fragment,
+        ExtractedEntity, ExtractionError, ExtractionOperation, ExtractionPort, ExtractionRequest,
+        SourceKind, source_kind, vector_content_for_fragment,
     },
     file_selection::ScanPolicy,
     models::{
@@ -49,7 +49,7 @@ use crate::{
         ModelRuntimeLease,
     },
     storage::types::IndexedFragment,
-    utils::{collapse_whitespace, sha256_hex},
+    utils::{DecodeFailure, collapse_whitespace, sha256_hex},
 };
 
 use super::{
@@ -262,9 +262,11 @@ pub(crate) async fn get_workspace_index_status(
         resolve_status_modifications(scanner, &control, &mut diff).await?;
     }
 
+    // A skipped path owes nothing: it was read, holds no text, and only its
+    // bytes changing brings it back.
     let pending_files = stored_files
         .iter()
-        .filter(|file| !file.index_status().is_indexed())
+        .filter(|file| file.index_status().needs_indexing())
         .collect::<Vec<_>>();
     let indexed_files = stored_files
         .iter()
@@ -328,6 +330,9 @@ struct IndexWriteStats {
     entities_created: usize,
     failed_files: Vec<PathBuf>,
     failed_reasons: Vec<String>,
+    /// Paths whose bytes held no indexable text, with bounded samples.
+    skipped: Vec<SkippedFile>,
+    skipped_counts: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Default)]
@@ -435,7 +440,8 @@ async fn run_index_pass(
         .map_err(map_host_error)?;
     let (scanned, classification_skips) =
         classify_files(context.workspace, snapshot.files, &all_stored, &control).await?;
-    let (skipped, skipped_counts) = collect_skips(&snapshot.diagnostics, classification_skips);
+    let (mut skipped, mut skipped_counts) =
+        collect_skips(&snapshot.diagnostics, classification_skips);
     let mut scanned = scope.filter_scanned(root, scanned);
     resolve_scanned_identities(context.storage, &mut scanned)?;
     timings.record("index_scan", scan_started.elapsed(), scanned.len());
@@ -468,7 +474,7 @@ async fn run_index_pass(
         diff.deleted.len(),
     );
 
-    let stats = index_candidates(
+    let mut stats = index_candidates(
         context,
         &control,
         &mut diff,
@@ -477,6 +483,13 @@ async fn run_index_pass(
         model_prepared,
     )
     .await?;
+    // Preparation-time skips join the samples the scan already collected:
+    // both describe paths that hold no indexable text.
+    skipped.append(&mut stats.skipped);
+    skipped.truncate(MAX_SKIPPED_FILE_SAMPLES);
+    for (reason, count) in &stats.skipped_counts {
+        *skipped_counts.entry(reason.clone()).or_default() += count;
+    }
     Ok(IndexPassResult {
         files_scanned: diff.files_scanned,
         diff,
@@ -545,7 +558,8 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
                 continue;
             }
             None => CandidateKind::Added,
-            Some(existing) if !existing.index_status().is_indexed() => CandidateKind::Pending,
+            // A skipped file answers for the bytes it read, exactly like a
+            // published one: identical bytes mean there is nothing to redo.
             Some(existing)
                 if scanned.detection_error.is_none()
                     && file_is_unchanged(existing, &scanned.discovered) =>
@@ -553,6 +567,7 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
                 plan.unchanged += 1;
                 continue;
             }
+            Some(existing) if existing.index_status().needs_indexing() => CandidateKind::Pending,
             Some(_) => CandidateKind::Modified,
         };
         plan.increment(kind);
@@ -569,7 +584,8 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
 }
 
 fn file_is_unchanged(existing: &FileRecord, discovered: &DiscoveredFile) -> bool {
-    existing.index_status().is_indexed()
+    let status = existing.index_status();
+    (status.is_indexed() || status.is_skipped())
         && existing.snapshot().modified_epoch_ms.is_some()
         && existing.snapshot().size_bytes == discovered.size_bytes
         && existing.snapshot().modified_epoch_ms == discovered.modified_epoch_ms
@@ -635,6 +651,12 @@ struct PreparedFile {
 enum PreparedCandidate {
     File(Box<PreparedFile>),
     Unchanged(FileRecord),
+    /// The bytes hold no indexable text. The file stays out of the index
+    /// instead of failing it.
+    Skipped {
+        file: FileRecord,
+        reason: SkippedFileReason,
+    },
 }
 
 type EmbeddingFuture<'context> =
@@ -724,6 +746,23 @@ async fn index_candidates_inner<'context>(
                 continue;
             }
             Ok(PreparedCandidate::File(prepared)) => *prepared,
+            Ok(PreparedCandidate::Skipped { file, reason }) => {
+                // The path keeps the snapshot its bytes produced but no
+                // content: entities it published before leave with the write,
+                // and status and diffs answer for it until its bytes change
+                // instead of counting it as a new file on every run.
+                record_file_skipped(context.storage, &file)?;
+                note_skipped(&mut stats, context.workspace, &file, reason);
+                report_indexing(
+                    context,
+                    &stats,
+                    diff,
+                    progress_base,
+                    Some(format!("skipped {}", file.relative_path().display())),
+                    None,
+                );
+                continue;
+            }
             Err(error) if error.code() == EngineError::CANCELLED => {
                 return Err(error);
             }
@@ -965,21 +1004,24 @@ fn commit_file(
     Ok(format!("indexed {}", file.file.relative_path().display()))
 }
 
+/// What preparing one candidate produced: the extraction to store, or the
+/// notice that its bytes are binary content, which no source index can carry.
+enum CandidateExtraction {
+    Extracted {
+        extracted: crate::extraction::ExtractionOutput,
+        chunk_options: crate::extraction::ChunkOptions,
+    },
+    Skipped,
+}
+
 async fn extract_candidate(
     context: &IndexingContext<'_>,
     control: &TaskControl,
     path: &SourcePath,
     formats: &[FileFormat],
     bytes: Vec<u8>,
-) -> Result<
-    (
-        crate::extraction::ExtractionOutput,
-        crate::extraction::ChunkOptions,
-    ),
-    EngineError,
-> {
-    let model = model_for_content(context, ContentKind::Text)?;
-    let source = context
+) -> Result<CandidateExtraction, EngineError> {
+    let source = match context
         .extractor
         .prepare(ExtractionRequest {
             path,
@@ -991,14 +1033,31 @@ async fn extract_candidate(
                 .clone()
                 .map(model_progress::for_extraction),
         })
-        .await?;
+        .await
+    {
+        Ok(source) => source,
+        // Binary content is not something a source index can carry, so a path
+        // holding only bytes is skipped instead of failing the workspace. A
+        // BOM that does not decode is malformed text, which stays a failure.
+        Err(ExtractionError::NoText {
+            failure: DecodeFailure::Binary,
+            ..
+        }) => return Ok(CandidateExtraction::Skipped),
+        Err(error) => return Err(error.into()),
+    };
+    // The model is read after preparation, so a path with no text leaves the
+    // index even when no embedding model is ready yet.
+    let model = model_for_content(context, ContentKind::Text)?;
     let options = index_chunk_options(model.info().max_input_tokens(), Some(source.text()));
     let graph = context
         .workspace
         .index()
         .descriptor()
         .is_some_and(IndexDescriptor::graph_indexing);
-    Ok((source.extract(options, graph)?, options))
+    Ok(CandidateExtraction::Extracted {
+        extracted: source.extract(options, graph)?,
+        chunk_options: options,
+    })
 }
 
 async fn prepare_candidate(
@@ -1037,16 +1096,26 @@ async fn prepare_candidate(
         .formats
         .as_ref()
         .ok_or_else(|| EngineError::internal("index candidate must have a detected format"))?;
-    let (extracted, chunk_options) = extract_candidate(
+    let (extracted, chunk_options) = match extract_candidate(
         context,
         control,
         file.relative_path(),
         formats,
         source.bytes,
     )
-    .await?;
-    let entities = bind_entities(file.id(), extracted.fragments)?;
-    let owners = entities
+    .await?
+    {
+        CandidateExtraction::Extracted {
+            extracted,
+            chunk_options,
+        } => (extracted, chunk_options),
+        CandidateExtraction::Skipped => {
+            return Ok(skipped_candidate(file));
+        }
+    };
+    let bound = bind_indexed_entities(&file, extracted.fragments)?;
+    let owners = bound
+        .entities
         .iter()
         .map(|entity| {
             Ok((
@@ -1058,7 +1127,7 @@ async fn prepare_candidate(
             ))
         })
         .collect::<Result<HashMap<_, _>, EngineError>>()?;
-    let mut fragments = prepare_fragments(&entities, chunk_options.max_chunk_chars)?;
+    let mut fragments = prepare_fragments(&bound.entities, chunk_options.max_chunk_chars)?;
     for fragment in &mut fragments {
         fragment.model = owners[&fragment.entity_id].clone();
     }
@@ -1073,7 +1142,7 @@ async fn prepare_candidate(
                     &file.id().get().to_string(),
                     graph_language(formats),
                     graph,
-                    &entities,
+                    &bound,
                 )
             })
             .unwrap_or_default()
@@ -1082,7 +1151,7 @@ async fn prepare_candidate(
     };
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
-        entities,
+        entities: bound.entities,
         fragments,
         graph,
     })))
@@ -1230,33 +1299,88 @@ fn append_contents(output: &mut String, contents: &[Content]) {
     }
 }
 
+/// Entities bound for one file, kept in extraction-ordinal space.
+///
+/// `ordinals[ordinal]` names the bound entity an extraction record produced.
+/// A record whose content names nothing indexable leaves `None` there, so the
+/// walk-time graph, which addresses entities by ordinal, still reaches its
+/// entity even after a neighbour left the file.
+pub(super) struct BoundEntities {
+    /// The entities the file carries, in extraction order minus empty records.
+    pub(super) entities: Vec<Entity>,
+    ordinals: Vec<Option<usize>>,
+}
+
+impl BoundEntities {
+    /// The entity an extraction ordinal bound, if binding kept it.
+    pub(super) fn get(&self, ordinal: usize) -> Option<&Entity> {
+        self.ordinals
+            .get(ordinal)?
+            .and_then(|index| self.entities.get(index))
+    }
+
+    /// Extraction records the file does not carry because they were empty.
+    fn dropped(&self) -> usize {
+        self.ordinals.iter().filter(|slot| slot.is_none()).count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_tests(entities: Vec<Entity>) -> Self {
+        let ordinals = (0..entities.len()).map(Some).collect();
+        Self { entities, ordinals }
+    }
+}
+
+fn bind_indexed_entities(
+    file: &FileRecord,
+    extracted: Vec<ExtractedEntity>,
+) -> Result<BoundEntities, EngineError> {
+    let bound = bind_entities(file.id(), extracted)?;
+    if bound.dropped() > 0 {
+        tracing::debug!(
+            path = %file.relative_path().display(),
+            dropped = bound.dropped(),
+            "entities without indexable content left the file"
+        );
+    }
+    Ok(bound)
+}
+
 pub(super) fn bind_entities(
     file_id: FileId,
     extracted: Vec<ExtractedEntity>,
-) -> Result<Vec<Entity>, EngineError> {
-    extracted
-        .into_iter()
-        .map(|entity| {
-            let id = EntityId::new_with_source_map(
-                file_id,
-                &entity.content,
-                &entity.source_range,
-                entity.source_map.as_deref(),
-            )?;
-            let fragments = entity
-                .fragments
-                .into_iter()
-                .enumerate()
-                .map(|(ordinal, fragment)| {
-                    let ordinal = u32::try_from(ordinal).map_err(|_| {
-                        EngineError::invalid_argument("fragment ordinal exceeds u32 limits")
-                    })?;
-                    Ok(EntityFragment {
-                        id: FragmentId::new(&id, ordinal),
-                        range: fragment.range,
-                    })
+) -> Result<BoundEntities, EngineError> {
+    let mut entities = Vec::with_capacity(extracted.len());
+    let mut ordinals = Vec::with_capacity(extracted.len());
+    for entity in extracted {
+        // Content with nothing to index cannot be an entity, and failing the
+        // whole file for it would hide every other entity. The hole keeps the
+        // ordinal of everything after it intact.
+        if !content_has_value(&entity.content) || entity.fragments.is_empty() {
+            ordinals.push(None);
+            continue;
+        }
+        let id = EntityId::new_with_source_map(
+            file_id,
+            &entity.content,
+            &entity.source_range,
+            entity.source_map.as_deref(),
+        )?;
+        let fragments = entity
+            .fragments
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, fragment)| {
+                let ordinal = u32::try_from(ordinal).map_err(|_| {
+                    EngineError::invalid_argument("fragment ordinal exceeds u32 limits")
+                })?;
+                Ok(EntityFragment {
+                    id: FragmentId::new(&id, ordinal),
+                    range: fragment.range,
                 })
-                .collect::<Result<Vec<_>, EngineError>>()?;
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        entities.push(
             Entity::new(
                 id,
                 file_id,
@@ -1265,9 +1389,11 @@ pub(super) fn bind_entities(
                 entity.metadata,
                 fragments,
             )?
-            .with_source_map(entity.source_map)
-        })
-        .collect()
+            .with_source_map(entity.source_map)?,
+        );
+        ordinals.push(Some(entities.len() - 1));
+    }
+    Ok(BoundEntities { entities, ordinals })
 }
 
 fn mark_file_failed(
@@ -1292,6 +1418,48 @@ fn record_file_failed(stats: &mut IndexWriteStats, file: &FileRecord, reason: &s
     stats.files_failed += 1;
     stats.failed_files.push(file.relative_path().to_path_buf());
     stats.failed_reasons.push(reason.to_owned());
+}
+
+/// A path whose bytes are binary content leaves the index instead of failing
+/// the workspace. Malformed text stays a failure, so it reaches `record_file_failed`.
+fn skipped_candidate(file: FileRecord) -> PreparedCandidate {
+    PreparedCandidate::Skipped {
+        file,
+        reason: SkippedFileReason::Binary,
+    }
+}
+
+/// Keeps a skipped path in the index as a record with no content, so the next
+/// status scan and diff see a file they already decided about.
+fn record_file_skipped(storage: &dyn IndexStorage, file: &FileRecord) -> Result<(), EngineError> {
+    storage.mark_file_skipped(file).map_err(|error| {
+        EngineError::storage_failure(format!(
+            "record skip for {}: {error}",
+            file.relative_path().display()
+        ))
+    })
+}
+
+/// Counts a path whose bytes carry no indexable text. Skipped paths never
+/// count as failures, so they leave the workspace ready.
+fn note_skipped(
+    stats: &mut IndexWriteStats,
+    workspace: &Workspace,
+    file: &FileRecord,
+    reason: SkippedFileReason,
+) {
+    *stats
+        .skipped_counts
+        .entry(skip_reason_key(reason).to_owned())
+        .or_default() += 1;
+    if stats.skipped.len() < MAX_SKIPPED_FILE_SAMPLES {
+        stats.skipped.push(SkippedFile {
+            path: workspace.source_root().join(file.relative_path().as_path()),
+            reason,
+            size_bytes: Some(file.snapshot().size_bytes),
+            limit_bytes: None,
+        });
+    }
 }
 
 struct EmbeddingBatchOutcome {
@@ -2148,15 +2316,20 @@ fn count_skips(
         ("binary".to_owned(), native.binary),
     ]);
     for file in classified {
-        let reason = match file.reason {
-            SkippedFileReason::Empty => "empty",
-            SkippedFileReason::TooLarge => "too_large",
-            SkippedFileReason::Unsupported => "unsupported",
-            SkippedFileReason::Binary => "binary",
-        };
-        *counts.entry(reason.to_owned()).or_default() += 1;
+        *counts
+            .entry(skip_reason_key(file.reason).to_owned())
+            .or_default() += 1;
     }
     counts
+}
+
+const fn skip_reason_key(reason: SkippedFileReason) -> &'static str {
+    match reason {
+        SkippedFileReason::Empty => "empty",
+        SkippedFileReason::TooLarge => "too_large",
+        SkippedFileReason::Unsupported => "unsupported",
+        SkippedFileReason::Binary => "binary",
+    }
 }
 
 fn collect_skips(
@@ -2349,6 +2522,7 @@ fn build_index_result(
 ) -> IndexResult {
     let first = &passes[0];
     let final_pass = passes.last().expect("an index pass is always present");
+    let (skipped, skipped_counts) = merge_skip_diagnostics(passes);
     IndexResult {
         files_scanned: first.files_scanned,
         files_added: passes.iter().map(|pass| pass.diff.added).sum(),
@@ -2371,9 +2545,29 @@ fn build_index_result(
         entities_created: passes.iter().map(|pass| pass.stats.entities_created).sum(),
         duration_micros: duration.as_micros().try_into().unwrap_or(u64::MAX),
         timings: timings.entries,
-        skipped: first.skipped.clone(),
-        skipped_counts: first.skipped_counts.clone(),
+        skipped,
+        skipped_counts,
     }
+}
+
+/// Folds the skip diagnostics of every pass into the final result. A retry
+/// pass reads the bytes a failed path holds *now*, so a file that turned
+/// binary after the first read is only reported there; dropping its pass would
+/// clear the failure without naming the skip. Each pass reports paths the other
+/// cannot: a skipped path keeps no stored record, so it is never retried.
+fn merge_skip_diagnostics(
+    passes: &[IndexPassResult],
+) -> (Vec<SkippedFile>, std::collections::BTreeMap<String, usize>) {
+    let mut skipped = Vec::new();
+    let mut skipped_counts = std::collections::BTreeMap::new();
+    for pass in passes {
+        skipped.extend(pass.skipped.iter().cloned());
+        for (reason, count) in &pass.skipped_counts {
+            *skipped_counts.entry(reason.clone()).or_default() += count;
+        }
+    }
+    skipped.truncate(MAX_SKIPPED_FILE_SAMPLES);
+    (skipped, skipped_counts)
 }
 
 #[derive(Default)]
@@ -2451,10 +2645,9 @@ mod tests {
             };
             let options = crate::extraction::ChunkOptions::default();
             let extracted = extract_for_indexing(&source, options).expect("extract code");
-            let entities =
-                bind_entities(FileId::new(42), extracted.fragments).expect("bind entities");
-            assert_eq!(entities.len(), 1, "{format:?}");
-            let entity = &entities[0];
+            let bound = bind_entities(FileId::new(42), extracted.fragments).expect("bind entities");
+            assert_eq!(bound.entities.len(), 1, "{format:?}");
+            let entity = &bound.entities[0];
             let Some(EntityMetadata::Code(metadata)) = entity.metadata() else {
                 panic!("code metadata expected");
             };
@@ -2470,7 +2663,7 @@ mod tests {
             };
             assert!(!content.contains("recallneedle"));
             let prepared =
-                prepare_fragments(&entities, options.max_chunk_chars).expect("index inputs");
+                prepare_fragments(&bound.entities, options.max_chunk_chars).expect("index inputs");
             assert!(!prepared.is_empty());
             for item in prepared {
                 assert!(item.fts_text.contains("recallneedle"), "{format:?}");
@@ -2497,17 +2690,17 @@ mod tests {
         };
         let extracted = extract_for_indexing(&source, options).expect("extract markdown");
         let file_id = FileId::new(42);
-        let entities = bind_entities(file_id, extracted.fragments.clone()).expect("bind entities");
+        let bound = bind_entities(file_id, extracted.fragments.clone()).expect("bind entities");
         let mut reordered = extracted.fragments;
         reordered.reverse();
         for (index, entity) in reordered.iter_mut().enumerate() {
             entity.index = index + 100;
         }
         let mut rebound = bind_entities(file_id, reordered).expect("bind reordered entities");
-        rebound.reverse();
-        assert_eq!(entities, rebound);
+        rebound.entities.reverse();
+        assert_eq!(bound.entities, rebound.entities);
         let mut ids = HashSet::new();
-        for entity in &entities {
+        for entity in &bound.entities {
             assert!(ids.insert(entity.id().as_str()));
             for (ordinal, fragment) in entity.fragments().iter().enumerate() {
                 assert!(ids.insert(fragment.id.as_str()));
@@ -2532,15 +2725,17 @@ mod tests {
             }
         }
         let prepared =
-            prepare_fragments(&entities, options.max_chunk_chars).expect("embedding inputs");
+            prepare_fragments(&bound.entities, options.max_chunk_chars).expect("embedding inputs");
         assert_eq!(
             prepared.len(),
-            entities
+            bound
+                .entities
                 .iter()
                 .map(|entity| entity.fragments().len())
                 .sum::<usize>()
         );
-        let section = entities
+        let section = bound
+            .entities
             .iter()
             .find(|entity| entity.fragments().len() > 1)
             .expect("long section");
@@ -2554,6 +2749,192 @@ mod tests {
             assert!(text.starts_with("heading: "));
             assert!(crate::utils::utf16_len(text) <= 64);
         }
+    }
+
+    #[test]
+    fn entities_without_indexable_content_leave_their_ordinal_behind() {
+        let file_id = FileId::new(42);
+        let fragment = || vec![crate::extraction::ExtractedEntityFragment { range: Range::Full }];
+        let blank = ExtractedEntity {
+            index: 0,
+            source_range: Range::Full,
+            content: Content::Code("  \n".into()),
+            metadata: None,
+            fragments: fragment(),
+            source_map: None,
+        };
+        let kept = ExtractedEntity {
+            index: 1,
+            source_range: Range::Full,
+            content: Content::Code("fn kept() {}".into()),
+            metadata: None,
+            fragments: fragment(),
+            source_map: None,
+        };
+        let bound = bind_entities(file_id, vec![blank, kept]).expect("blank entity is not fatal");
+        assert_eq!(bound.entities.len(), 1);
+        assert!(bound.get(0).is_none());
+        let kept_id = bound.get(1).expect("kept entity").id().as_str().to_owned();
+        // The graph addresses entities by extraction ordinal, so the surviving
+        // entity must still answer for ordinal 1 after ordinal 0 left.
+        let graph = crate::extraction::PartitionedGraph {
+            head_fragment_indices: vec![0, 1],
+            ..crate::extraction::PartitionedGraph::default()
+        };
+        let assembled = graph_assembly::assemble_file_graph(
+            &file_id.get().to_string(),
+            FileFormat::Rust,
+            &graph,
+            &bound,
+        );
+        assert_eq!(assembled.nodes.len(), 1);
+        assert_eq!(assembled.nodes[0].id, kept_id);
+    }
+
+    fn skipped_sample(path: &str, reason: SkippedFileReason) -> SkippedFile {
+        SkippedFile {
+            path: PathBuf::from(path),
+            reason,
+            size_bytes: Some(16),
+            limit_bytes: None,
+        }
+    }
+
+    #[test]
+    fn a_retry_pass_contributes_the_skips_it_discovers() {
+        // The path failed the first read, so the first pass named it as a
+        // failure and nothing else; by the retry its bytes hold binary content.
+        let first = IndexPassResult {
+            files_scanned: 2,
+            diff: DiffPlan::default(),
+            stats: IndexWriteStats {
+                files_failed: 1,
+                failed_files: vec![PathBuf::from("late.js")],
+                failed_reasons: vec!["read failed".to_owned()],
+                ..IndexWriteStats::default()
+            },
+            skipped: Vec::new(),
+            skipped_counts: std::collections::BTreeMap::default(),
+        };
+        let retry = IndexPassResult {
+            files_scanned: 1,
+            diff: DiffPlan::default(),
+            stats: IndexWriteStats::default(),
+            skipped: vec![skipped_sample(
+                "/workspace/late.js",
+                SkippedFileReason::Binary,
+            )],
+            skipped_counts: [("binary".to_owned(), 1)].into_iter().collect(),
+        };
+
+        let result =
+            build_index_result(&[first, retry], Duration::ZERO, TimingCollector::default());
+
+        assert_eq!(result.files_failed, 0, "the retry cleared the failure");
+        assert_eq!(result.skipped_counts.get("binary"), Some(&1), "{result:?}");
+        let samples = result
+            .skipped
+            .iter()
+            .map(|file| (file.path.clone(), file.reason))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples,
+            vec![(
+                PathBuf::from("/workspace/late.js"),
+                SkippedFileReason::Binary
+            )],
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn skip_diagnostics_accumulate_across_passes_within_the_sample_bound() {
+        let pass =
+            |reason: SkippedFileReason, count: usize, samples: Vec<SkippedFile>| IndexPassResult {
+                files_scanned: 0,
+                diff: DiffPlan::default(),
+                stats: IndexWriteStats::default(),
+                skipped: samples,
+                skipped_counts: [(skip_reason_key(reason).to_owned(), count)]
+                    .into_iter()
+                    .collect(),
+            };
+        let passes = vec![
+            pass(
+                SkippedFileReason::Binary,
+                3,
+                (0..MAX_SKIPPED_FILE_SAMPLES)
+                    .map(|index| {
+                        skipped_sample(
+                            &format!("/workspace/bin{index}.png"),
+                            SkippedFileReason::Binary,
+                        )
+                    })
+                    .collect(),
+            ),
+            pass(
+                SkippedFileReason::Empty,
+                1,
+                vec![skipped_sample(
+                    "/workspace/blank.rs",
+                    SkippedFileReason::Empty,
+                )],
+            ),
+        ];
+
+        let (skipped, counts) = merge_skip_diagnostics(&passes);
+
+        assert_eq!(counts.get("binary"), Some(&3));
+        assert_eq!(counts.get("empty"), Some(&1));
+        assert_eq!(skipped.len(), MAX_SKIPPED_FILE_SAMPLES);
+    }
+
+    fn scanned_bytes(path: &str, size_bytes: u64) -> ScannedFile {
+        ScannedFile {
+            id: Some(FileId::new(7)),
+            relative_path: SourcePath::new(path).expect("source path"),
+            formats: Some(vec![FileFormat::JavaScript]),
+            discovered: DiscoveredFile {
+                root: PathBuf::from("/workspace"),
+                relative_path: PathBuf::from(path),
+                size_bytes,
+                modified_epoch_ms: Some(1_000),
+                source_fingerprint: "fingerprint".to_owned(),
+            },
+            detection_error: None,
+        }
+    }
+
+    fn skipped_record(path: &str, size_bytes: u64) -> FileRecord {
+        FileRecord::new(
+            FileId::new(7),
+            SourcePath::new(path).expect("source path"),
+            FileSnapshot {
+                size_bytes,
+                modified_epoch_ms: Some(1_000),
+                content_hash: Some("content-hash".to_owned()),
+            },
+            FileIndexStatus::Skipped,
+        )
+        .expect("skipped record")
+    }
+
+    #[test]
+    fn a_skipped_record_answers_for_the_bytes_it_read() {
+        let stored = [skipped_record("binary.js", 16)];
+
+        let plan = compute_diff(vec![scanned_bytes("binary.js", 16)], &stored);
+        assert_eq!(plan.unchanged, 1);
+        assert_eq!(plan.added, 0);
+        assert!(plan.candidates.is_empty());
+
+        // New bytes mean the skip no longer describes the file, so the path
+        // comes back as work for the next pass.
+        let plan = compute_diff(vec![scanned_bytes("binary.js", 17)], &stored);
+        assert_eq!(plan.modified, 1);
+        assert_eq!(plan.unchanged, 0);
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].kind, CandidateKind::Modified);
     }
 
     #[derive(Default)]
@@ -3140,6 +3521,29 @@ mod tests {
             stored.set_index_status(FileIndexStatus::Failed {
                 error: error.to_owned(),
             })?;
+            let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(existing) = files
+                .iter_mut()
+                .find(|existing| existing.id() == stored.id())
+            {
+                *existing = stored;
+            } else {
+                files.push(stored);
+            }
+            Ok(())
+        }
+
+        fn mark_file_skipped(&self, file: &FileRecord) -> EngineResult<()> {
+            self.graphs
+                .lock()
+                .expect("stored graphs")
+                .remove(&file.id());
+            self.entries
+                .lock()
+                .expect("stored entries")
+                .remove(&file.id());
+            let mut stored = file.clone();
+            stored.set_index_status(FileIndexStatus::Skipped)?;
             let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(existing) = files
                 .iter_mut()

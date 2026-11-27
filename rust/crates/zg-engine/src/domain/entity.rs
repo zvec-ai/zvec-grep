@@ -213,7 +213,9 @@ fn validate_fragment_range(content: &Content, range: Range) -> EngineResult<()> 
     }
 }
 
-fn content_has_value(content: &Content) -> bool {
+/// Whether content names something a search can return: text with no
+/// non-whitespace character and images with no bytes are not indexable.
+pub(crate) fn content_has_value(content: &Content) -> bool {
     match content {
         Content::Text(text) | Content::Code(text) => !text.trim().is_empty(),
         Content::Image(image) => !image.data().is_empty(),

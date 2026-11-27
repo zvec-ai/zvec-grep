@@ -373,6 +373,62 @@ fn failed_files_retain_queryable_paths_and_directory_ownership() {
 }
 
 #[test]
+fn a_skipped_file_keeps_its_snapshot_and_drops_its_content() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let storage = open(temporary.path(), false);
+    let (file, entry) = file_at(&storage, "assets/logo.js");
+    storage
+        .replace_fixture_file(&file, std::slice::from_ref(&entry))
+        .expect("index file");
+    assert_eq!(
+        storage
+            .search_fts("orchard", 10, None)
+            .expect("search")
+            .len(),
+        1
+    );
+
+    let indexed = storage.list_files().expect("files").remove(0);
+    storage.mark_file_skipped(&indexed).expect("record skip");
+    let skipped = storage.list_files().expect("files").remove(0);
+    assert!(skipped.index_status().is_skipped());
+    assert_eq!(skipped.snapshot(), indexed.snapshot());
+    assert!(
+        storage
+            .search_fts("orchard", 10, None)
+            .expect("search")
+            .is_empty(),
+        "skipped content must not stay queryable"
+    );
+
+    // The pass refreshes the snapshot of an unchanged skipped file, so the
+    // record has to accept that write instead of demanding a published file.
+    let mut refreshed = skipped.clone();
+    refreshed
+        .set_snapshot(FileSnapshot {
+            modified_epoch_ms: Some(321),
+            ..refreshed.snapshot().clone()
+        })
+        .expect("snapshot");
+    storage
+        .update_file_snapshot(&refreshed)
+        .expect("refresh skip snapshot");
+    assert_eq!(storage.list_files().expect("files"), [refreshed]);
+    storage.close().expect("close storage");
+
+    let reopened = open(temporary.path(), false);
+    assert!(
+        reopened
+            .list_files()
+            .expect("files")
+            .remove(0)
+            .index_status()
+            .is_skipped()
+    );
+    reopened.close().expect("close");
+}
+
+#[test]
 fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
     let temporary = tempfile::tempdir().expect("workspace");
     let storage = open(temporary.path(), false);

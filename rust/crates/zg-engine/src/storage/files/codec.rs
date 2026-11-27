@@ -42,6 +42,7 @@ enum IndexStatusRecord<'a> {
         indexed_epoch_ms: u64,
         entity_count: u64,
     },
+    Skipped {},
     Deleting {},
     Failed {
         error: Cow<'a, str>,
@@ -59,6 +60,7 @@ impl<'a> From<&'a FileIndexStatus> for IndexStatusRecord<'a> {
                 indexed_epoch_ms: *indexed_epoch_ms,
                 entity_count: *entity_count,
             },
+            FileIndexStatus::Skipped => Self::Skipped {},
             FileIndexStatus::Deleting => Self::Deleting {},
             FileIndexStatus::Failed { error } => Self::Failed {
                 error: error.as_str().into(),
@@ -78,6 +80,7 @@ impl From<IndexStatusRecord<'_>> for FileIndexStatus {
                 indexed_epoch_ms,
                 entity_count,
             },
+            IndexStatusRecord::Skipped {} => Self::Skipped,
             IndexStatusRecord::Deleting {} => Self::Deleting,
             IndexStatusRecord::Failed { error } => Self::Failed {
                 error: error.into_owned(),
@@ -221,6 +224,7 @@ mod tests {
                 indexed_epoch_ms: 789,
                 entity_count: u64::MAX,
             },
+            FileIndexStatus::Skipped,
             FileIndexStatus::Deleting,
             FileIndexStatus::Failed {
                 error: "extraction failed".into(),
@@ -245,8 +249,15 @@ mod tests {
             record["index_status"] = invalid;
             assert!(decode_file(&record.to_string()).is_err());
         }
-        record["index_status"] = json!({"kind":"indexed", "indexed_epoch_ms":1, "entity_count":0});
         record["snapshot"]["content_hash"] = Value::Null;
-        assert!(decode_file(&record.to_string()).is_err());
+        // A skipped record answers for the bytes it read, so it needs the hash
+        // that lets a later scan recognise them.
+        for status in [
+            json!({"kind":"indexed", "indexed_epoch_ms":1, "entity_count":0}),
+            json!({"kind":"skipped"}),
+        ] {
+            record["index_status"] = status;
+            assert!(decode_file(&record.to_string()).is_err());
+        }
     }
 }

@@ -65,11 +65,13 @@ impl SqliteGraphStorage {
             })?)
     }
 
+    /// Checks a snapshot before the write path recomputes it under the store
+    /// lock; nameless references are dropped by the write itself.
     pub(crate) fn validate_snapshot(
         file_id: u32,
         graph: &crate::domain::FileGraphResult,
     ) -> Result<()> {
-        writer::validate(&format!("f{file_id}"), graph, &[])
+        writer::validate(&format!("f{file_id}"), graph, &[]).map(|_| ())
     }
 
     /// Opens an existing database, or initializes one in creation mode.
