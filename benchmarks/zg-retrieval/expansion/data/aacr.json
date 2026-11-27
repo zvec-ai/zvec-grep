@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "suite": "aacr6",
+  "suite": "aacr7",
   "model": "local/potion-code-16m-v2",
   "source": "Natural code-review searches from AACR; selected development diagnostics.",
   "repositories": [
@@ -21,6 +21,12 @@
       "commit": "f84194cb231ad14a2f03b5ead75e99d64826972f",
       "tree_oid": "60853dfebddcf8f060eaf85437bfbef15c86217b",
       "pr": "https://github.com/timescale/timescaledb/pull/8138"
+    },
+    {
+      "repository": "elastic/elasticsearch",
+      "commit": "e355340162f24705db5e48ea2cf0a867490ae001",
+      "tree_oid": "5a882feb92dc191127acbb7dc2bcf5fdd8f56b70",
+      "pr": "https://github.com/elastic/elasticsearch/pull/124403"
     }
   ],
   "index_selection": {
@@ -461,6 +467,37 @@
           "unit_key": "Q09/payload-timestamp",
           "path": "lib/beacon-api-types/src/execution_payload.rs",
           "revision": "d840723278f1d4cecc02ac540385725a1c54ca84"
+        }
+      ]
+    },
+    {
+      "id": "E01",
+      "repository": "elastic/elasticsearch",
+      "revision": "e355340162f24705db5e48ea2cf0a867490ae001",
+      "language": "Java",
+      "evaluation_role": "semantic",
+      "query": "ListenableFuture addListener implementation already completed",
+      "query_sha256": "0db1b349b9157e459ee00ed608a132554054ca9e9537b9425e4cae5fdc05118b",
+      "positive_units": [
+        {
+          "unit_key": "E01-F1",
+          "path": "server/src/main/java/org/elasticsearch/common/util/concurrent/ListenableFuture.java",
+          "revision": "e355340162f24705db5e48ea2cf0a867490ae001"
+        },
+        {
+          "unit_key": "E01-F2",
+          "path": "server/src/main/java/org/elasticsearch/action/support/SubscribableListener.java",
+          "revision": "e355340162f24705db5e48ea2cf0a867490ae001"
+        },
+        {
+          "unit_key": "E01-F3",
+          "path": "server/src/main/java/org/elasticsearch/action/support/SubscribableListener.java",
+          "revision": "e355340162f24705db5e48ea2cf0a867490ae001"
+        },
+        {
+          "unit_key": "E01-F4",
+          "path": "server/src/main/java/org/elasticsearch/action/support/SubscribableListener.java",
+          "revision": "e355340162f24705db5e48ea2cf0a867490ae001"
         }
       ]
     }

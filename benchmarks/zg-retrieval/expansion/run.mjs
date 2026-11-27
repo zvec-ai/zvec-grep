@@ -258,7 +258,7 @@ export function markdownPilotReport(report) {
   const lines = [
     `## ${report.label} · ${report.status === "success" ? "✅ Complete" : "❌ Incomplete"}`,
     "",
-    `${planned} ${report.suite === "aacr6" ? "queries (five semantic diagnostics, one exact-lookup control)" : "original queries"} · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
+    `${planned} ${report.suite === "aacr7" ? "queries (six semantic diagnostics, one exact-lookup control)" : "original queries"} · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
     "",
     indexCountsMarkdown(report.index_counts),
     "",

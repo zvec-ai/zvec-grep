@@ -1,6 +1,6 @@
 # AACR code-review searches
 
-Six selected searches from OCR reviews of three public PRs. This is a small
+Seven selected queries from natural OCR searches over four public PRs. This is a small
 retrieval-only development suite, not a random sample or an OCR quality test.
 There is no reviewing agent, query rewrite, answer model or Judge.
 
@@ -12,23 +12,27 @@ There is no reviewing agent, query rewrite, answer model or Judge.
 | Q05 | Union #3414 | EthereumConsensusState timestamp field |
 | Q07 | [Timescale #8138](https://github.com/timescale/timescaledb/pull/8138) | compressed table schema creation column order |
 | Q09 | Union #3414 | ExecutionPayload timestamp |
+| E01 | [Elasticsearch #124403](https://github.com/elastic/elasticsearch/pull/124403) | ListenableFuture addListener implementation already completed |
 
 `data/aacr.json` pins queries, commits, Git trees and index selection. Q07 is
 the first phrase decoded from a JSON-shaped natural tool input; the original
 is preserved in the source-review archive. Keep queries from the same PR in the
-same development/test partition.
+same development/test partition. E01 likewise decodes its recorded one-element
+JSON-shaped string into an explicitly selected derived query. Both original
+inputs and transformations are retained in the review summary and archives;
+historical backend normalization is unknown.
 
 ## Gold and scope
 
-Q02–Q05 and Q07 have twelve File and seventeen Entity targets. Q09 is an
+Q02–Q05, Q07 and E01 have fourteen File and twenty-one Entity targets. Q09 is an
 exact-lookup control with one File and one Entity target, reported separately
-and excluded from semantic means. Operational counts include all six queries.
+and excluded from semantic means. Operational counts include all seven queries.
 
 Gold uses the [shared authoring and matching rules](../../docs/benchmark-gold-authoring-and-matching.md):
 source byte ranges, full containment and any complete accepted evidence set.
 Scores average five calls per query before averaging queries. Native ranks and
 duplicates remain unchanged. A File hit does not establish complete evidence.
-Stage diagnostics include all eighteen Entity targets; use task IDs to inspect
+Stage diagnostics include all twenty-two Entity targets; use task IDs to inspect
 semantic coverage alone. Known retrieval misses remain diagnostic results.
 
 `gold/aacr-review.json` records independent source-review scope and limitations.
@@ -37,7 +41,11 @@ process does not guarantee perfect blindness or exhaustive answers. Q02 covers
 the local timestamp read/type chain, Q04 the local Aptos conversion/import, and
 Q05 one Rust type/field declaration. External time-unit specifications and
 conditional ABI/protobuf representations are not mandatory answers. Q07 covers
-new physical compressed chunks, not every historical or ALTER layout.
+new physical compressed chunks, not every historical or ALTER layout. E01
+covers type identity, entry/fast path, terminal dispatch, and success/failure
+callback delivery. Each two-span evidence group requires both spans.
+Concurrent-completion retries, wrappers, docs and tests are supplementary,
+not substitutes for this implementation chain.
 
 The contributor retains the sealed review archive identified by filename and
 SHA-256 in that summary; obtain it to audit original findings and adjudications.
@@ -66,13 +74,13 @@ RETRIEVAL_EMBEDDING=local node benchmarks/zg-retrieval/expansion/run.mjs \
 ```
 
 The output directory must not exist. Preparation installs the package, fetches
-three pinned repositories and builds fresh indexes. It can download the CPU
+four pinned repositories and builds fresh indexes. It can download the CPU
 `local/potion-code-16m-v2` weights; no cloud embedding API is required. Record
 actual package, model and harness hashes from the output when sharing a run.
 Gold and review records remain outside searchable repositories.
 
-The shared protocol uses Hybrid, FTS and Vector, five calls each: **90 searches**
-(75 semantic, 15 control), Top 10 and full preview. Native ignore rules, frozen
+The shared protocol uses Hybrid, FTS and Vector, five calls each: **105 searches**
+(90 semantic, 15 control), Top 10 and full preview. Native ignore rules, frozen
 code extensions and the 1,000,000-byte limit remain. Index timeout is 60 minutes
 per repository; search timeout is 120 seconds per call. Missing calls and failed
 source/model/index identity checks are operational failures, not quality zeros.
@@ -80,4 +88,6 @@ source/model/index identity checks are operational failures, not quality zeros.
 CI runs this suite through the existing retrieval workflow, report aggregation
 and PR publication. Reports and raw evidence artifacts are retained for 14 days;
 archive them separately for longer retention. Never relabel historical runs
-with a new input or Gold identity.
+with a new input or Gold identity. The seven-query lock uses suite ID `aacr7`;
+older `aacr6` results retain their original identity and are not pooled with it.
+The earlier six queries and all their Gold targets are unchanged.

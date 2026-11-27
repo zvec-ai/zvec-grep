@@ -497,7 +497,7 @@ test("the publisher requires every frozen corpus ID while retaining unknown coun
   };
   assert.deepEqual(
     Object.values(corpusIds).map((ids) => ids.length),
-    [11, 6, 1, 20, 3],
+    [11, 6, 1, 20, 4],
   );
   for (const suite of Object.keys(models)) {
     for (const side of ["baseline", "candidate"]) {

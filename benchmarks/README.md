@@ -12,7 +12,7 @@ resource use. Setup, frozen inputs and scoring details live with each suite.
 
 | Benchmark           | Scope                                                                                                                       | Local instructions                                                                                                    |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Retrieval-only      | SWE-QA20, BEIR, DuRetrieval, Quarry and AACR traces (five semantic diagnostics; one lookup control); hybrid, fts and vector | [SWE-QA20 runner](zg-retrieval/README.md#run-swe-qa20-locally), [expansion runners](zg-retrieval/expansion/README.md) |
+| Retrieval-only      | SWE-QA20, BEIR, DuRetrieval, Quarry and AACR traces (six semantic diagnostics; one lookup control); hybrid, fts and vector | [SWE-QA20 runner](zg-retrieval/README.md#run-swe-qa20-locally), [expansion runners](zg-retrieval/expansion/README.md) |
 | SWE-QA e2e          | 20 software-engineering questions; baseline vs zvec-grep agent profiles                                                     | [Setup and smoke runs](swe-qa-bench/README.md#local-setup)                                                            |
 | BrowseComp-Plus e2e | 100 questions over a fixed document corpus                                                                                  | [Setup and execution](browse-comp-plus/README.md)                                                                     |
 

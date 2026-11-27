@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "suite": "aacr6",
-  "source_lock_sha256": "55df60ae988919b81371cf1fc103fc1e45f96bb75c32f255ebc140d5a1f62ff0",
+  "suite": "aacr7",
+  "source_lock_sha256": "ec95677604d99c8d02a9fa415037b5fa5f272682993c2ffb9e095001d2db7381",
   "tasks": {
     "Q02": {
       "files": [
@@ -435,6 +435,109 @@
                   "source_text": "    pub timestamp: u64,",
                   "sha256": "1842fc9df615fcbc583064911c3fce2dcf9a12022463b8d96038895543cce1d4",
                   "relevance_reason": "字面目标的 timestamp 字段类型为 u64。"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "unresolved": []
+    },
+    "E01": {
+      "files": [
+        {
+          "path": "server/src/main/java/org/elasticsearch/common/util/concurrent/ListenableFuture.java",
+          "bytes": 1941,
+          "sha256": "571b58d3874ac29813cffc78c4904c48e428ba4bd5d01c1c5dc371226fb05126"
+        },
+        {
+          "path": "server/src/main/java/org/elasticsearch/action/support/SubscribableListener.java",
+          "bytes": 30747,
+          "sha256": "63c2640d144143083ba2fd8c7bba11c022186ed4ab1b8106ac756a59726d1897"
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "E01-F1",
+          "path": "server/src/main/java/org/elasticsearch/common/util/concurrent/ListenableFuture.java",
+          "kind": "behavior_evidence",
+          "symbol": "E01-F1",
+          "reason": "Identifies ListenableFuture and its SubscribableListener superclass.",
+          "start_line": 28,
+          "end_line": 28,
+          "start_byte": 1554,
+          "end_byte": 1627,
+          "sha256": "e6c7f72dee9f7a4b6cd8ad2787772dd10b76b071016f1b3b43406ea73fe4aedd",
+          "source_text": "public final class ListenableFuture<T> extends SubscribableListener<T> {\n"
+        },
+        {
+          "source_id": "E01-F2",
+          "path": "server/src/main/java/org/elasticsearch/action/support/SubscribableListener.java",
+          "kind": "behavior_evidence",
+          "symbol": "E01-F2",
+          "reason": "Connects the single-argument entry to the already-completed fast path before executor/context wrapping.",
+          "evidence_sets": [
+            {
+              "id": "minimum-implementation",
+              "spans": [
+                {
+                  "start_line": 174,
+                  "end_line": 176,
+                  "start_byte": 8785,
+                  "end_byte": 8929,
+                  "sha256": "c1ca93545aea61217c06c06d14ebcf4c429f60cc2905ef17da6ac83dc318bebf",
+                  "source_text": "    public final void addListener(ActionListener<T> listener) {\n        addListener(listener, EsExecutors.DIRECT_EXECUTOR_SERVICE, null);\n    }\n"
+                },
+                {
+                  "start_line": 209,
+                  "end_line": 214,
+                  "start_byte": 11427,
+                  "end_byte": 11732,
+                  "sha256": "681377884177a45d6567aed896dd4b4739e1ef4fda248b8777182b307d7b1c62",
+                  "source_text": "    public final void addListener(ActionListener<T> listener, Executor executor, @Nullable ThreadContext threadContext) {\n        if (tryComplete(state, listener)) {\n            return;\n        }\n\n        final ActionListener<T> wrappedListener = fork(executor, preserveContext(threadContext, listener));\n"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "source_id": "E01-F3",
+          "path": "server/src/main/java/org/elasticsearch/action/support/SubscribableListener.java",
+          "kind": "behavior_evidence",
+          "symbol": "E01-F3",
+          "reason": "Dispatches an already-successful or already-failed terminal state.",
+          "start_line": 312,
+          "end_line": 322,
+          "start_byte": 15427,
+          "end_byte": 15845,
+          "sha256": "268a6ce5ffd6a490aefc2a3b924493d25eb979e120eac4eda7e4c385c12df1f3",
+          "source_text": "    private static <T> boolean tryComplete(Object currentState, ActionListener<T> listener) {\n        if (currentState instanceof SuccessResult successResult) {\n            successResult.complete(listener);\n            return true;\n        }\n        if (currentState instanceof FailureResult failureResult) {\n            failureResult.complete(listener);\n            return true;\n        }\n        return false;\n    }\n"
+        },
+        {
+          "source_id": "E01-F4",
+          "path": "server/src/main/java/org/elasticsearch/action/support/SubscribableListener.java",
+          "kind": "behavior_evidence",
+          "symbol": "E01-F4",
+          "reason": "Delivers both success and failure callbacks synchronously to the registered listener.",
+          "evidence_sets": [
+            {
+              "id": "minimum-implementation",
+              "spans": [
+                {
+                  "start_line": 391,
+                  "end_line": 400,
+                  "start_byte": 18419,
+                  "end_byte": 18876,
+                  "sha256": "ebdebc2de579e51537f350308af07772b34a4e8896db38e23f0ad7c9bfa38fd3",
+                  "source_text": "    private record SuccessResult<T>(T result) {\n        public void complete(ActionListener<T> listener) {\n            try {\n                listener.onResponse(result);\n            } catch (Exception exception) {\n                logger.error(Strings.format(\"exception thrown while handling response in listener [%s]\", listener), exception);\n                assert false : exception;\n                // nothing more can be done here\n            }\n        }\n"
+                },
+                {
+                  "start_line": 403,
+                  "end_line": 418,
+                  "start_byte": 18883,
+                  "end_byte": 19611,
+                  "sha256": "a808d8a487ecc120374e43826ee6b1aa62ba80a873b0fbe4af6e2b17f213f047",
+                  "source_text": "    private record FailureResult(Exception exception, Exception wrappedException) {\n        public void complete(ActionListener<?> listener) {\n            try {\n                listener.onFailure(wrappedException);\n            } catch (Exception innerException) {\n                if (wrappedException != innerException) {\n                    innerException.addSuppressed(wrappedException);\n                }\n                logger.error(\n                    Strings.format(\"exception thrown while handling another exception in listener [%s]\", listener),\n                    innerException\n                );\n                assert false : innerException;\n                // nothing more can be done here\n            }\n        }\n"
                 }
               ]
             }

@@ -38,7 +38,7 @@ runner and combined report free of repeated suite-specific constants.
   queries, qrels and target IDs. This is a ten-query pilot on the C-MTEB corpus
   subset, not a score on DuReader's original full 8.09-million-passage corpus.
 
-- **AACR search traces:** six queries from three pinned PRs: five semantic
+- **AACR search traces:** seven queries from four pinned PRs: six semantic
   diagnostics and one exact-lookup control reported separately. See
   [inputs, source-review scope and reproduction](AACR.md).
 
@@ -110,10 +110,10 @@ capture or scoring rules.
 | BEIR | Original positive document qrels | Original SciFact evidence sentences where available, LLM-annotated evidence spans for NFCorpus and FiQA, and the paired ArguAna argument body |
 | DuRetrieval | Original positive passage qrels | LLM-annotated answer spans within the published passages |
 | Quarry | Unique paths of original positive units | Original function ranges on the pinned preimage, with indentation and separators outside the function excluded |
-| AACR | Twelve semantic File targets; Q09 control separate | Seventeen semantic Entity targets; Q09 is one separate two-span control target |
+| AACR | Fourteen semantic File targets; Q09 control separate | Twenty-one semantic Entity targets; Q09 is one separate two-span control target |
 
 AACR is scored with the same File and Entity rules as the other suites. Its
-five semantic queries feed the aggregate means; the Q09 exact-lookup control is
+six semantic queries feed the aggregate means; the Q09 exact-lookup control is
 excluded from them and reported separately.
 
 ZG's [Gold manifests](gold/) are assembled, annotated, and checked with LLM

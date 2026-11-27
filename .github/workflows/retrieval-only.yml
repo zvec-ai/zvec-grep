@@ -434,7 +434,7 @@ jobs:
           retention-days: 14
 
   aacr:
-    name: AACR / search traces (six enabled queries)
+    name: AACR / search traces (seven enabled queries)
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
     needs: [authorize, package-candidate]

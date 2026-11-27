@@ -40,7 +40,7 @@ Equal comparison values appear once; changes show **baseline → candidate**. **
 | BEIR | 20 | Four datasets; 75,128 unique documents |
 | DuRetrieval | 10 | 100,001 passages |
 | Quarry | 20 | 20 pinned preimages across eight languages |
-| AACR traces | 6 | Three pinned PR heads; five semantic diagnostics and one separately reported lookup control |
+| AACR traces | 7 | Four pinned PR heads; six semantic diagnostics and one separately reported lookup control |
 
 | Mode | Public search input |
 | --- | --- |
@@ -64,7 +64,7 @@ Frozen SWE-QA20 inputs are [the source lock](data/source.lock.json), [queries](d
 
 See [SWE-QA20 design](zg-retrieval-only-sweqa20-design.md), [pilot data and scoring](expansion/README.md), [QA labels](gold/qa-pairs.md) and [matching / nDCG reference](../docs/retrieval-only-qa-reference.md) for full definitions.
 
-AACR uses [six enabled code-review queries](expansion/AACR.md) with the shared File and Entity scorers unchanged: five semantic queries are scored and one exact-lookup control is reported separately. Its labels are AI-reviewed development evidence, not human-validated or exhaustive.
+AACR uses [seven enabled code-review queries](expansion/AACR.md) with the shared File and Entity scorers unchanged: six semantic queries are scored and one exact-lookup control is reported separately. Its labels are AI-reviewed development evidence, not human-validated or exhaustive.
 
 ## Gold coverage by retrieval stage
 

@@ -7,13 +7,13 @@ import { run, sha256 } from "../core/io.mjs";
 import { indexSelectionArguments } from "../engines/zg/run.mjs";
 export const aacrCorpusId = (repo) => `${repo.repository}@${repo.commit}`;
 export function validateAacrLock(lock) {
-  assert.equal(lock.suite, "aacr6");
+  assert.equal(lock.suite, "aacr7");
   assert.deepEqual(
     lock.tasks.map((t) => t.id),
-    ["Q02", "Q03", "Q04", "Q05", "Q07", "Q09"],
+    ["Q02", "Q03", "Q04", "Q05", "Q07", "Q09", "E01"],
   );
-  assert.equal(lock.repositories.length, 3);
-  assert.equal(new Set(lock.repositories.map(aacrCorpusId)).size, 3);
+  assert.equal(lock.repositories.length, 4);
+  assert.equal(new Set(lock.repositories.map(aacrCorpusId)).size, 4);
   for (const repo of lock.repositories) {
     assert.match(repo.repository, /^[\w.-]+\/[\w.-]+$/);
     assert.match(repo.commit, /^[a-f0-9]{40}$/);

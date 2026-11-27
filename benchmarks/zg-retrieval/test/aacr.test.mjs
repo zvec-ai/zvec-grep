@@ -34,19 +34,19 @@ import { run, sha256 } from "../core/io.mjs";
 const data = new URL("../expansion/data/aacr.json", import.meta.url);
 const gold = new URL("../expansion/gold/aacr.json", import.meta.url);
 
-test("AACR reuses pilot contracts for six inputs and their reviewed targets", async () => {
+test("AACR reuses pilot contracts for seven inputs and their reviewed targets", async () => {
   const pilot = await loadPilot("aacr");
   assert.deepEqual(
     pilot.lock.tasks.map((t) => t.id),
-    ["Q02", "Q03", "Q04", "Q05", "Q07", "Q09"],
+    ["Q02", "Q03", "Q04", "Q05", "Q07", "Q09", "E01"],
   );
-  assert.equal(pilotCorpusIds(pilot).length, 3);
+  assert.equal(pilotCorpusIds(pilot).length, 4);
   assert.deepEqual(pilot.modes, ["hybrid", "fts", "vector"]);
-  // Six queries, three modes and five calls per question and mode.
-  assert.equal(pilot.modes.length * pilot.lock.tasks.length * 5, 90);
+  // Seven queries, three modes and five calls per question and mode.
+  assert.equal(pilot.modes.length * pilot.lock.tasks.length * 5, 105);
   assert.deepEqual(
     Object.values(pilot.gold.tasks).map((t) => t.targets.length),
-    [6, 4, 2, 1, 4, 1],
+    [6, 4, 2, 1, 4, 1, 4],
   );
   const review = JSON.parse(
     await readFile(
@@ -77,7 +77,8 @@ test("AACR reuses pilot contracts for six inputs and their reviewed targets", as
   changed.tasks[0].query += " changed";
   assert.throws(() => validateAacrLock(changed));
   const wrongRole = structuredClone(pilot.lock);
-  wrongRole.tasks.at(-1).evaluation_role = "semantic";
+  wrongRole.tasks.find((task) => task.id === "Q09").evaluation_role =
+    "semantic";
   assert.throws(() => validateAacrLock(wrongRole));
   labels.source_lock_sha256 = "0".repeat(64);
   assert.throws(
@@ -99,7 +100,7 @@ test("AACR upstream license texts match their checksums and pinned commits", asy
   assert.ok(sources.length > 0);
   for (const source of sources) {
     assert.equal(pinned.get(source.repository), source.commit);
-    assert.match(source.path ?? "", /^[\w./-]+$/);
+    assert.match(source.path ?? "", /^[\w./+-]+$/);
     assert.equal(sha256(source.text), source.sha256, source.path);
   }
   // Every indexed repository ships at least one recorded license or notice.
@@ -225,11 +226,11 @@ test("lookup control cannot lift semantic quality or alter native ranks", async 
       qa_quality_mean: summarizePilotEntity(calls, entry),
     };
   });
-  const result = summarizePilotRows(rows, ["hybrid"], 6)[0];
-  assert.equal(result.completed, 6);
+  const result = summarizePilotRows(rows, ["hybrid"], 7)[0];
+  assert.equal(result.completed, 7);
   assert.equal(result.metrics.file_hit_at_10, 0);
   assert.equal(result.lookup_control.metrics.file_hit_at_10, 1);
-  assert.equal(result.measurements.latency_sample_count, 30);
+  assert.equal(result.measurements.latency_sample_count, 35);
   const entry = pilot.gold.tasks.Q09;
   const target = entry.targets[0];
   const items = [
@@ -298,7 +299,7 @@ test("combined reports bind the control role and Gold identity to frozen inputs"
     status: "success",
     rows,
     failures: [],
-    summary: summarizePilotRows(rows, pilot.modes, 6),
+    summary: summarizePilotRows(rows, pilot.modes, 7),
     breakdown: summarizePilotBreakdown(pilot, rows),
   };
   const check = async () =>
@@ -309,4 +310,73 @@ test("combined reports bind the control role and Gold identity to frozen inputs"
   rows.find((row) => row.task_id === "Q09").evaluation_role = "lookup_control";
   report.qa_gold = { ...pilot.gold.identity, sha256: "0".repeat(64) };
   assert.match((await check()).error, /Gold changed/);
+});
+
+test("E01 preserves its derived query and requires both spans of each evidence group", async () => {
+  const pilot = await loadPilot("aacr");
+  const task = pilot.lock.tasks.find((task) => task.id === "E01");
+  const review = JSON.parse(
+    await readFile(
+      new URL("../expansion/gold/aacr-review.json", import.meta.url),
+    ),
+  );
+  const origin = review.queries.E01.query_origin;
+  assert.equal(sha256(origin.tool_input), origin.sha256);
+  assert.deepEqual(JSON.parse(origin.tool_input), [task.query]);
+  assert.equal(origin.backend_normalization, "unknown");
+  assert.equal(
+    pilot.lock.tasks.some((task) => task.id === "C01"),
+    false,
+  );
+  const entry = pilot.gold.tasks.E01;
+  const spans = entry.targets.flatMap((target) =>
+    (target.evidence_sets?.[0].spans ?? [target]).map((span) => ({
+      path: target.path,
+      span,
+    })),
+  );
+  assert.equal(spans.length, 6);
+  const items = spans.map(({ path, span }, index) => ({
+    path,
+    rank: index + 1,
+    range: {
+      kind: "text",
+      start_line: span.start_line,
+      end_line: span.end_line,
+    },
+    source_bytes: { start_byte: span.start_byte, end_byte: span.end_byte },
+  }));
+  const score = (items) =>
+    summarizePilotEntity(
+      Array.from({ length: 5 }, (_, index) => ({
+        repetition: index + 1,
+        status: "success",
+        items,
+      })),
+      entry,
+    ).entity.recall_at_10;
+  assert.equal(score(items), 1);
+  for (const index of [1, 2, 4, 5]) {
+    assert.equal(
+      score(
+        items.map((item, i) =>
+          i === index ? { ...item, path: "unrelated.java" } : item,
+        ),
+      ),
+      0.75,
+    );
+    const partial = structuredClone(items);
+    partial[index].source_bytes.end_byte -= 1;
+    assert.equal(score(partial), 0.75);
+  }
+  assert.equal(
+    score([
+      ...Array.from({ length: 10 }, (_, i) => ({
+        path: "unrelated.java",
+        rank: i + 1,
+      })),
+      ...items.map((item) => ({ ...item, rank: item.rank + 10 })),
+    ]),
+    0,
+  );
 });
