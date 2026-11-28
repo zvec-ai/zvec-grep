@@ -12,19 +12,19 @@ use std::{
 };
 
 use async_trait::async_trait;
-#[cfg(feature = "cuda")]
-use llama_cpp_2::llama_backend::BACKENDS_DIR;
 use llama_cpp_2::{
     LlamaBackendDevice, LlamaBackendDeviceType,
     context::{LlamaContext, params::LlamaContextParams},
     list_llama_ggml_backend_devices,
     llama_backend::LlamaBackend,
     llama_batch::LlamaBatch,
-    model::{AddBos, LlamaModel, params::LlamaModelParams},
+    model::{LlamaModel, params::LlamaModelParams},
     token::LlamaToken,
 };
 use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
+#[cfg(feature = "cuda")]
+use zg_llama_native::BACKENDS_DIR;
 
 use crate::domain::model::{
     Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelInfo,
@@ -631,21 +631,20 @@ fn prepare_texts(
     })?;
     let mut truncated = Vec::new();
     let mut inputs = Vec::with_capacity(texts.len());
+    let vocab = loaded.model.vocab();
     for (index, text) in texts.iter().enumerate() {
         check_cancelled(signal)?;
-        let mut tokens = loaded
-            .model
-            .str_to_token(text, AddBos::Always)
-            .map_err(|error| {
-                ModelError::internal("Unable to tokenize llama.cpp embedding input")
-                    .with_cause(error)
-            })?;
+        // The vocabulary API panics on oversized inputs; retain a structured error.
+        i32::try_from(text.len()).map_err(|error| {
+            ModelError::internal("Unable to tokenize llama.cpp embedding input").with_cause(error)
+        })?;
+        let mut tokens = vocab.tokenize(text.as_bytes(), true, true);
         if tokens.len() > context_size {
             let final_token = tokens.last().copied();
             tokens.truncate(context_size.saturating_sub(4).max(1));
-            if let Some(final_token) = final_token.filter(|token| {
-                loaded.model.is_eog_token(*token) || *token == loaded.model.token_sep()
-            }) && tokens.last() != Some(&final_token)
+            if let Some(final_token) =
+                final_token.filter(|token| vocab.is_eog(*token) || *token == vocab.sep())
+                && tokens.last() != Some(&final_token)
             {
                 tokens.push(final_token);
             }

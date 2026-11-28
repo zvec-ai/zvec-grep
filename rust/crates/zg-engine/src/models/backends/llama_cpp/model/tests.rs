@@ -695,7 +695,7 @@ fn gemma_batch_fixture(model: &LlamaModel) -> Vec<PreparedLlamaInput> {
         .iter()
         .enumerate()
         .map(|(index, text)| {
-            let mut tokens = model.str_to_token(text, AddBos::Always).expect("tokens");
+            let mut tokens = model.vocab().tokenize(text.as_bytes(), true, true);
             tokens.truncate(2_048);
             PreparedLlamaInput { index, tokens }
         })
@@ -852,10 +852,11 @@ async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
         .await
         .expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
-    let tokens = loaded
-        .model
-        .str_to_token(&"authentication middleware ".repeat(2_048), AddBos::Always)
-        .expect("long input tokens");
+    let tokens = loaded.model.vocab().tokenize(
+        "authentication middleware ".repeat(2_048).as_bytes(),
+        true,
+        true,
+    );
     assert!(tokens.len() >= 2_048);
     let prepared = |length| PreparedLlamaBatch {
         inputs: vec![PreparedLlamaInput {

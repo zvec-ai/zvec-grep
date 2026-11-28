@@ -32,11 +32,11 @@ def cargo_records(messages):
 
 
 def backend_directory(records):
-    # This is the safe crate's public BACKENDS_DIR contract, also emitted for
+    # This is the sys crate's public BACKENDS_DIR contract, also emitted for
     # fresh Cargo builds. It points either into a verified SDK or source OUT_DIR.
     directories = {Path(value) for record in records
                    if record.get("reason") == "build-script-executed"
-                   and "llama-cpp-2" in record.get("package_id", "")
+                   and "llama-cpp-sys-2" in record.get("package_id", "")
                    for name, value in record.get("env", []) if name == "GGML_BACKENDS_DIR"}
     if len(directories) != 1:
         raise RuntimeError(f"Expected one active llama backend directory from Cargo: {directories}")

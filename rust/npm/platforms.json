@@ -32,9 +32,14 @@
           "payload": "lib/libggml-cuda.so"
         },
         {
-          "package": "@zvec/zvec-grep-linux-x64-gnu-ggml-cuda12",
+          "package": "@zvec/zvec-grep-linux-x64-gnu-ggml-cuda12-part1",
           "file": "lib/cuda12/libggml-cuda.so",
-          "payload": "lib/cuda12/libggml-cuda.so"
+          "payload": "parts/ggml-cuda12.part1"
+        },
+        {
+          "package": "@zvec/zvec-grep-linux-x64-gnu-ggml-cuda12-part2",
+          "file": "lib/cuda12/libggml-cuda.so",
+          "payload": "parts/ggml-cuda12.part2"
         },
         {
           "package": "@zvec/zvec-grep-linux-x64-gnu-ort-cuda-part1",
@@ -70,9 +75,14 @@
           "payload": "lib/ggml-cuda.dll"
         },
         {
-          "package": "@zvec/zvec-grep-win32-x64-msvc-ggml-cuda12",
+          "package": "@zvec/zvec-grep-win32-x64-msvc-ggml-cuda12-part1",
           "file": "lib/cuda12/ggml-cuda.dll",
-          "payload": "lib/cuda12/ggml-cuda.dll"
+          "payload": "parts/ggml-cuda12.part1"
+        },
+        {
+          "package": "@zvec/zvec-grep-win32-x64-msvc-ggml-cuda12-part2",
+          "file": "lib/cuda12/ggml-cuda.dll",
+          "payload": "parts/ggml-cuda12.part2"
         },
         {
           "package": "@zvec/zvec-grep-win32-x64-msvc-ort-cuda-part1",

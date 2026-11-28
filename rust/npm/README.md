@@ -45,19 +45,21 @@ carry `checksums.json` and any supplied `LICENSES/` or `SBOM.spdx.json`; these
 are package metadata rather than runtime files copied by the installer.
 
 The Linux and Windows x64 base packages' `plugins.json` references `-ggml-cuda13`,
-`-ggml-cuda12`, `-ort-cuda-part1` and `-ort-cuda-part2` packages. These suffixes
-extend the base platform package name. macOS, Linux ARM64 and deliberate CPU-only
-builds remain single native packages. A default all-platform release contains 15 tarballs:
-six base packages, eight runtime components and the meta package.
+`-ggml-cuda12-part1`, `-ggml-cuda12-part2`, `-ort-cuda-part1` and
+`-ort-cuda-part2` packages. These suffixes extend the base platform package name.
+macOS, Linux ARM64 and deliberate CPU-only builds remain single native packages.
+A default all-platform release contains 17 tarballs: six base packages, ten runtime
+components and the meta package.
 
 The base package retains the executable and CPU/core libraries, including
 zvec's embedded Jieba dictionary; no external dictionary files are required.
-CUDA components contain whole GGML plugins or fragments of the ORT provider.
-Both Linux and Windows ORT providers are split into two ordered byte ranges under
-`parts/`; postinstall streams them back into the original `.so` or `.dll` and
-verifies the original complete file's SHA256. No compiler, model execution or
-CUDA Toolkit installation is performed during npm installation. The meta package
-selects its base by OS/CPU/libc; CUDA components are not npm dependencies.
+CUDA components contain the whole CUDA 13 GGML plugin or fragments of the CUDA 12
+GGML plugin and ORT provider. On both Linux and Windows, each fragmented library is
+split into two ordered byte ranges under `parts/`; postinstall streams them back
+into the original `.so` or `.dll` and verifies the original complete file's SHA256.
+No compiler, model execution or CUDA Toolkit installation is performed during npm
+installation. The meta package selects its base by OS/CPU/libc; CUDA components
+are not npm dependencies.
 Postinstall first verifies
 and installs CPU, then uses bounded NVIDIA detection to decide whether to fetch
 the complete pinned CUDA set. CPU-only hosts make no CUDA component requests.

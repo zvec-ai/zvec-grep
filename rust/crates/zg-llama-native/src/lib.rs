@@ -12,6 +12,9 @@ use std::{
 mod cuda;
 pub use cuda::{check_cuda12_driver, check_cuda13_driver};
 
+/// Directory containing the backend plugins selected by the llama.cpp build.
+pub use llama_cpp_sys_2::BACKENDS_DIR;
+
 static REGISTRY: Mutex<()> = Mutex::new(());
 
 /// Serializes registration with the engine's registry-dependent native calls.

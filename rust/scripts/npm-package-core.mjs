@@ -31,7 +31,7 @@ export function nativePackageEntries(entry) {
   ];
 }
 
-// Split by byte range, not by loading a potentially >512 MiB ORT library into
+// Split by byte range, not by loading a potentially >512 MiB native library into
 // memory. Reassembly is byte-for-byte and verified against the original hash.
 export async function stageComponentPayload(sourceRoot, destinationRoot, entry, component) {
   const siblings = entry.components.filter((candidate) => candidate.file === component.file);

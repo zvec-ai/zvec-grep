@@ -199,7 +199,7 @@ fn save(root: &Path, manifest: &Value) {
 
 fn fixture(target: &str) -> (tempfile::TempDir, Value) {
     let sdk = tempfile::tempdir().expect("SDK directory");
-    let mut manifest = json!({"schema": 1, "target": target, "linkage": "dynamic",
+    let mut manifest = json!({"schema": 2, "target": target, "linkage": "dynamic",
         "link_libraries": ["dylib=llama", "dylib=ggml", "static=ggml-cpu"], "files": {}});
     let names = if target == WINDOWS {
         // Match the pinned Windows SDK: the common-base CMake target is STATIC,
@@ -390,7 +390,8 @@ fn wrong_metadata_or_modified_sdk_fails_instead_of_using_another_cached_sdk() {
     let target = tempfile::tempdir().expect("target");
     let out = target.path().join("release/build/zg/out");
     for (field, value) in [
-        ("schema", json!(2)),
+        ("schema", json!(1)),
+        ("schema", json!(3)),
         ("target", json!(WINDOWS)),
         ("linkage", json!("unknown")),
     ] {

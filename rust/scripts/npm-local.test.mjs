@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -303,29 +303,31 @@ test("maps supported native npm targets", () => {
 });
 
 for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
-  test(`splits the ${target} ORT provider into ordered bounded-memory component payloads`, async (t) => {
-    const root = await mkdtemp(join(tmpdir(), "zg-native-components-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    const entry = manifest.platforms.find((entry) => entry.target === target);
-    const components = entry.components.filter((component) => component.payload.startsWith("parts/"));
-    assert.deepEqual(components.map((component) => component.package),
-      [`${entry.package}-ort-cuda-part1`, `${entry.package}-ort-cuda-part2`]);
-    assert.equal(components[0].file, components[1].file);
-    const source = Buffer.alloc(2 * 1024 * 1024 + 37);
-    for (let i = 0; i < source.length; i++) source[i] = i % 251;
-    await mkdir(join(root, "source/lib"), { recursive: true });
-    await writeFile(join(root, "source", components[0].file), source);
-    const parts = [];
-    for (const [index, component] of components.entries()) {
-      const destination = join(root, `part-${index}`);
-      const checksum = await stageComponentPayload(join(root, "source"), destination, entry, component);
-      const bytes = await readFile(join(destination, component.payload));
-      assert.equal(checksum.bytes, bytes.length);
-      assert.equal(checksum.sha256.length, 64);
-      parts.push(bytes);
-    }
-    assert.deepEqual(Buffer.concat(parts), source);
-  });
+  for (const library of ["ggml-cuda12", "ort-cuda"]) {
+    test(`splits the ${target} ${library} library into ordered bounded-memory component payloads`, async (t) => {
+      const root = await mkdtemp(join(tmpdir(), "zg-native-components-"));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const entry = manifest.platforms.find((entry) => entry.target === target);
+      const components = entry.components.filter((component) => component.payload.startsWith(`parts/${library}.`));
+      assert.deepEqual(components.map((component) => component.package),
+        [`${entry.package}-${library}-part1`, `${entry.package}-${library}-part2`]);
+      assert.equal(components[0].file, components[1].file);
+      const source = Buffer.alloc(2 * 1024 * 1024 + 37);
+      for (let i = 0; i < source.length; i++) source[i] = i % 251;
+      await mkdir(dirname(join(root, "source", components[0].file)), { recursive: true });
+      await writeFile(join(root, "source", components[0].file), source);
+      const parts = [];
+      for (const [index, component] of components.entries()) {
+        const destination = join(root, `part-${index}`);
+        const checksum = await stageComponentPayload(join(root, "source"), destination, entry, component);
+        const bytes = await readFile(join(destination, component.payload));
+        assert.equal(checksum.bytes, bytes.length);
+        assert.equal(checksum.sha256.length, 64);
+        parts.push(bytes);
+      }
+      assert.deepEqual(Buffer.concat(parts), source);
+    });
+  }
 }
 
 test("enforces the compressed npm tarball budget at the exact boundary", async (t) => {
@@ -622,6 +624,7 @@ with tempfile.TemporaryDirectory(prefix="zg-test-bundle-") as temporary:
                  "cuda12/ggml-cuda.dll", "llama.lib"):
         (backend / name).write_bytes(name.encode())
     (backend.parent / "manifest.json").write_text(json.dumps({
+        "schema": 2,
         "files": {p.relative_to(backend.parent).as_posix(): runtime.digest(p)
                   for p in backend.rglob("*") if p.is_file()}}))
     for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll", "pdfium.dll"):
@@ -629,8 +632,10 @@ with tempfile.TemporaryDirectory(prefix="zg-test-bundle-") as temporary:
     (root / "zvec/zvec_c_api.dll").write_bytes(b"current zvec")
     (root / "stale/zvec_c_api.dll").write_bytes(b"must not be selected")
     records = [
-        {"reason": "build-script-executed", "package_id": "llama-cpp-2",
+        {"reason": "build-script-executed", "package_id": "git+https://github.com/zvec-ai/llama-cpp-rs#llama-cpp-sys-2@0.1.162",
          "env": [["GGML_BACKENDS_DIR", str(backend)]]},
+        {"reason": "build-script-executed", "package_id": "llama-cpp-2",
+         "env": [["GGML_BACKENDS_DIR", str(root / "stale")]]},
         {"reason": "build-script-executed", "package_id": "zvec-rust-sys",
          "linked_paths": ["native=" + str(root / "zvec")]},
     ]

@@ -99,8 +99,8 @@ async fn load_qwen_fixture(device: Device) -> Arc<LoadedLlamaModel> {
 
 fn qwen_tokens(model: &LlamaModel, text: &str, length: usize) -> Vec<LlamaToken> {
     let mut tokens = model
-        .str_to_token(&text.repeat(length), AddBos::Always)
-        .expect("Qwen fixture tokens");
+        .vocab()
+        .tokenize(text.repeat(length).as_bytes(), true, true);
     assert!(tokens.len() >= length);
     tokens.truncate(length);
     tokens
