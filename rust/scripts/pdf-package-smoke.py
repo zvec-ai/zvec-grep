@@ -115,6 +115,8 @@ def remote_layout_cache_smoke(execute, workspace, home, env, cache, provider):
 
             def saved_cache(cwd=root):
                 manifest = json.loads((cwd / ".zvec-grep/manifest.json").read_text(encoding="utf-8"))
+                check(manifest["sourceRoot"]["recordedUsername"] == "zg-pdf-package-smoke",
+                      "Saved cache reuse requires the same known fixture user")
                 check(all("cacheDir" not in model for model in
                           manifest["index"]["descriptor"]["embeddingConfigs"].values()),
                       "Model cache must be stored once at workspace level")
@@ -204,7 +206,10 @@ def main():
            {"LD_LIBRARY_PATH", "LD_PRELOAD", "ORT_DYLIB_PATH", "GGML_BACKEND_PATH", "PDFIUM_LIB_PATH", "PDFIUM_INCLUDE_PATH"}}
     home = logs / "home"
     home.mkdir(exist_ok=True)
+    # Saved workspace caches require the same known user; containers may omit
+    # both username variables, so give every fixture process a stable identity.
     env.update(HOME=str(home), USERPROFILE=str(home), XDG_CONFIG_HOME=str(home / "config"),
+               USER="zg-pdf-package-smoke", USERNAME="zg-pdf-package-smoke",
                ZVEC_GREP_MODEL_CACHE=str(cache), ZVEC_GREP_DEVICE="cpu", ZVEC_GREP_MODE="direct")
     report = {"passed": False, "platform": platform.platform(), "binary": str(binary), "entry": entry,
               "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
