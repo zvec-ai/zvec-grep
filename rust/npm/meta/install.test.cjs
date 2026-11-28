@@ -319,35 +319,40 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
 }
 
 for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
-  for (const failure of ["missing", "version", "corrupt", "swapped", "unexpected-manifest-file", "traversal"]) {
-    test(`rejects ${failure} ${target} optional components without replacing the CPU installation`, (t) => {
-      const paths = optionalFixture(t, target, ({ source, component, paths }) => {
-        const parts = paths.entry.components.filter((candidate) => candidate.payload.startsWith("parts/"));
-        if (component !== parts[0]) return;
-        const checksums = JSON.parse(readFileSync(join(source, "checksums.json"), "utf8"));
-        if (failure === "version") writeFileSync(join(source, "package.json"), JSON.stringify({ name: component.package, version: "0.0.2" }));
-        if (failure === "corrupt") writeFileSync(join(source, component.payload), "corrupt");
-        if (failure === "unexpected-manifest-file") checksums.files["parts/untracked"] = { bytes: 0, sha256: sha256("") };
-        if (failure === "traversal") checksums.files = { "parts/../../outside": checksums.files[component.payload] };
-        if (failure === "swapped") {
-          // Both the archive and fragment hashes are valid. Only the reconstructed
-          // whole-library hash can detect a fragment in the wrong position.
-          const wrong = readFileSync(join(paths.root, "component-sources", parts[1].package, parts[1].payload));
-          writeFileSync(join(source, component.payload), wrong);
-          checksums.files[component.payload] = { bytes: wrong.length, sha256: sha256(wrong) };
+  for (const library of ["ggml-cuda12", "ort-cuda"]) {
+    for (const failure of ["missing", "version", "corrupt", "swapped", "unexpected-manifest-file", "traversal"]) {
+      test(`rejects ${failure} ${target} ${library} fragments without replacing the CPU installation`, (t) => {
+        const paths = optionalFixture(t, target, ({ source, component, paths }) => {
+          const parts = paths.entry.components.filter((candidate) => candidate.payload.startsWith(`parts/${library}.`));
+          if (component !== parts[0]) return;
+          const checksums = JSON.parse(readFileSync(join(source, "checksums.json"), "utf8"));
+          if (failure === "version") writeFileSync(join(source, "package.json"), JSON.stringify({ name: component.package, version: "0.0.2" }));
+          if (failure === "corrupt") writeFileSync(join(source, component.payload), "corrupt");
+          if (failure === "unexpected-manifest-file") checksums.files["parts/untracked"] = { bytes: 0, sha256: sha256("") };
+          if (failure === "traversal") checksums.files = { "parts/../../outside": checksums.files[component.payload] };
+          if (failure === "swapped") {
+            // Both the archive and fragment hashes are valid. Only the reconstructed
+            // whole-library hash can detect a fragment in the wrong position.
+            const wrong = readFileSync(join(paths.root, "component-sources", parts[1].package, parts[1].payload));
+            writeFileSync(join(source, component.payload), wrong);
+            checksums.files[component.payload] = { bytes: wrong.length, sha256: sha256(wrong) };
+          }
+          writeFileSync(join(source, "checksums.json"), JSON.stringify(checksums));
+          if (failure === "swapped") return checksums.files[component.payload];
+        });
+        if (failure === "missing") {
+          const part = paths.plugins.components.find((component) => component.payload === `parts/${library}.part2`);
+          rmSync(join(paths.config.directory, part.tarball));
         }
-        writeFileSync(join(source, "checksums.json"), JSON.stringify(checksums));
-        if (failure === "swapped") return checksums.files[component.payload];
+        materialize(paths);
+        const before = installedBaseSnapshot(paths);
+        assert.throws(() => materialize({ ...paths, config: { ...paths.config, mode: "cuda" } }),
+          /missing|mismatch|checksum|manifest|ENOENT/);
+        assert.deepEqual(installedBaseSnapshot(paths), before);
+        assert.deepEqual(verifyInstallation(paths).components, []);
+        for (const file of paths.originals.keys()) assert.equal(existsSync(join(paths.metaRoot, file)), false);
       });
-      if (failure === "missing") rmSync(join(paths.config.directory, paths.plugins.components.at(-1).tarball));
-      materialize(paths);
-      const before = installedBaseSnapshot(paths);
-      assert.throws(() => materialize({ ...paths, config: { ...paths.config, mode: "cuda" } }),
-        /missing|mismatch|checksum|manifest|ENOENT/);
-      assert.deepEqual(installedBaseSnapshot(paths), before);
-      assert.deepEqual(verifyInstallation(paths).components, []);
-      for (const file of paths.originals.keys()) assert.equal(existsSync(join(paths.metaRoot, file)), false);
-    });
+    }
   }
 }
 
@@ -444,7 +449,7 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
       const active = statSync(join(paths.metaRoot, file === `bin/${paths.entry.binary}` ? "bin/zg.exe" : file), { bigint: true });
       assert.deepEqual([active.dev, active.ino], [original.dev, original.ino]);
     }
-    assert.equal(verifyInstallation({ ...paths, requireCuda: true }).components.length, 4);
+    assert.equal(verifyInstallation({ ...paths, requireCuda: true }).components.length, paths.entry.components.length);
     for (const [file, contents] of paths.originals) assert.deepEqual(readFileSync(join(paths.metaRoot, file)), contents);
   });
 
@@ -751,7 +756,7 @@ test("relocating the completed install does not depend on its cache", (t) => {
   const relocated = join(fixture.root, "relocated");
   renameSync(fixture.metaRoot, relocated);
   rmSync(fixture.config.directory, { recursive: true });
-  assert.equal(verifyInstallation({ ...fixture, metaRoot: relocated, requireCuda: true }).components.length, 4);
+  assert.equal(verifyInstallation({ ...fixture, metaRoot: relocated, requireCuda: true }).components.length, fixture.entry.components.length);
 });
 
 test("installation settings reject unknown modes and honor npm offline", () => {

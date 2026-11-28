@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -303,29 +303,31 @@ test("maps supported native npm targets", () => {
 });
 
 for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
-  test(`splits the ${target} ORT provider into ordered bounded-memory component payloads`, async (t) => {
-    const root = await mkdtemp(join(tmpdir(), "zg-native-components-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    const entry = manifest.platforms.find((entry) => entry.target === target);
-    const components = entry.components.filter((component) => component.payload.startsWith("parts/"));
-    assert.deepEqual(components.map((component) => component.package),
-      [`${entry.package}-ort-cuda-part1`, `${entry.package}-ort-cuda-part2`]);
-    assert.equal(components[0].file, components[1].file);
-    const source = Buffer.alloc(2 * 1024 * 1024 + 37);
-    for (let i = 0; i < source.length; i++) source[i] = i % 251;
-    await mkdir(join(root, "source/lib"), { recursive: true });
-    await writeFile(join(root, "source", components[0].file), source);
-    const parts = [];
-    for (const [index, component] of components.entries()) {
-      const destination = join(root, `part-${index}`);
-      const checksum = await stageComponentPayload(join(root, "source"), destination, entry, component);
-      const bytes = await readFile(join(destination, component.payload));
-      assert.equal(checksum.bytes, bytes.length);
-      assert.equal(checksum.sha256.length, 64);
-      parts.push(bytes);
-    }
-    assert.deepEqual(Buffer.concat(parts), source);
-  });
+  for (const library of ["ggml-cuda12", "ort-cuda"]) {
+    test(`splits the ${target} ${library} library into ordered bounded-memory component payloads`, async (t) => {
+      const root = await mkdtemp(join(tmpdir(), "zg-native-components-"));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const entry = manifest.platforms.find((entry) => entry.target === target);
+      const components = entry.components.filter((component) => component.payload.startsWith(`parts/${library}.`));
+      assert.deepEqual(components.map((component) => component.package),
+        [`${entry.package}-${library}-part1`, `${entry.package}-${library}-part2`]);
+      assert.equal(components[0].file, components[1].file);
+      const source = Buffer.alloc(2 * 1024 * 1024 + 37);
+      for (let i = 0; i < source.length; i++) source[i] = i % 251;
+      await mkdir(dirname(join(root, "source", components[0].file)), { recursive: true });
+      await writeFile(join(root, "source", components[0].file), source);
+      const parts = [];
+      for (const [index, component] of components.entries()) {
+        const destination = join(root, `part-${index}`);
+        const checksum = await stageComponentPayload(join(root, "source"), destination, entry, component);
+        const bytes = await readFile(join(destination, component.payload));
+        assert.equal(checksum.bytes, bytes.length);
+        assert.equal(checksum.sha256.length, 64);
+        parts.push(bytes);
+      }
+      assert.deepEqual(Buffer.concat(parts), source);
+    });
+  }
 }
 
 test("enforces the compressed npm tarball budget at the exact boundary", async (t) => {

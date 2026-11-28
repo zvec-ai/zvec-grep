@@ -72,9 +72,9 @@ content identity. Runtime libraries are copied beside the binary, not loaded
 from absolute cache paths. Online downloads use npm's registry/proxy/auth/CA
 configuration and do not run component lifecycle scripts.
 
-The installer verifies archives, streams Linux/Windows ORT fragments into a temporary
-file, then checks the complete library hash before activation. It preserves
-`bin/zg.exe`, `lib/` and `lib/cuda12/`; no compilation, driver/Toolkit installation
+The installer verifies archives, streams Linux/Windows CUDA 12 GGML and ORT fragments
+into temporary files, then checks the complete library hash before activation.
+It preserves `bin/zg.exe`, `lib/` and `lib/cuda12/`; no compilation, driver/Toolkit installation
 or model execution happens during installation. `native-install.json` records
 the installed core and plugins; normal CLI execution never downloads plugins.
 The `zg` command enters the native executable directly. Unix rpaths and the
